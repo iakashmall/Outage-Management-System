@@ -1,0 +1,26 @@
+{
+  "name": "oms-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Outage Management System — control-room web app, mobile crew app, and event-driven backend (UPCL Ganga Corridor reference build)",
+  "workspaces": [
+    "backend",
+    "frontend",
+    "mobile"
+  ],
+  "scripts": {
+    "seed": "npm --workspace backend run seed",
+    "dev:backend": "npm --workspace backend start",
+    "dev:web": "npm --workspace frontend run dev",
+    "dev:mobile": "npm --workspace mobile run dev",
+    "start": "concurrently -n backend,web,mobile -c cyan,green,magenta \"npm:dev:backend\" \"npm:dev:web\" \"npm:dev:mobile\"",
+    "build": "npm --workspace frontend run build && npm --workspace mobile run build",
+    "test": "npm --workspace backend run test"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

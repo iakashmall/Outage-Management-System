@@ -1,0 +1,37 @@
+import { io } from 'socket.io-client';
+
+const BASE = '/api';
+async function req(method, path, body) {
+  const r = await fetch(BASE + path, {
+    method,
+    headers: { 'content-type': 'application/json', 'x-user': 'dispatcher' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(data.error || r.statusText), { data, status: r.status });
+  return data;
+}
+
+export const api = {
+  incidents: () => req('GET', '/incidents'),
+  incident: (id) => req('GET', `/incidents/${id}`),
+  createIncident: (b) => req('POST', '/incidents', b),
+  setStatus: (id, status, note) => req('PATCH', `/incidents/${id}/status`, { status, note }),
+  assign: (id, crewId, priority) => req('POST', `/incidents/${id}/assign`, { crewId, priority }),
+  crews: () => req('GET', '/crews'),
+  alarms: () => req('GET', '/alarms'),
+  ackAlarm: (id) => req('POST', `/alarms/${id}/ack`),
+  ackAll: () => req('POST', '/alarms/ack-all'),
+  calls: () => req('GET', '/calls'),
+  callToIncident: (id) => req('POST', `/calls/${id}/to-incident`),
+  indicators: () => req('GET', '/indicators'),
+  monthly: () => req('GET', '/analytics/monthly'),
+  audit: () => req('GET', '/audit'),
+  network: () => req('GET', '/network'),
+  complaints: () => req('GET', '/complaints'),
+  complaintTrace: (qid) => req('GET', `/complaints/${qid}/trace`),
+  simulateComplaint: () => req('POST', '/complaints/simulate'),
+};
+
+// singleton socket
+export const socket = io('/', { transports: ['websocket', 'polling'], autoConnect: true });
