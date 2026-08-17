@@ -1,32 +1,50 @@
-# Production topology sketch (SDP stack). Not required for `npm start` — that runs on SQLite +
-# an in-process bus with zero infra. This file shows where the real services attach; the code
-# seams for each are documented in docs/ARCHITECTURE.md.
-version: "3.9"
-
+# OMS local development stack (SDP topology).
+# We bring services up INCREMENTALLY, one phase-step at a time, so start only what a
+# step needs, e.g.:  docker compose up -d postgres
+# The prototype still runs on SQLite with `npm start` and needs none of this; these
+# services are the production platform we migrate onto during Phase 1 and beyond.
 services:
+  # --- Phase 1 · relational + spatial operational database (PostgreSQL 16 + PostGIS 3.4)
   postgres:
     image: postgis/postgis:16-3.4
+    container_name: oms-postgres
     environment:
       POSTGRES_DB: oms
       POSTGRES_USER: oms
-      POSTGRES_PASSWORD: oms
+      POSTGRES_PASSWORD: oms          # dev-only credentials; production uses managed secrets
     ports: ["5432:5432"]
     volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:                       # lets `docker compose up` report a clear "healthy"
+      test: ["CMD-SHELL", "pg_isready -U oms -d oms"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
 
+  # --- Phase 1 · real-time tag cache (added in step P1-08)
+  redis:
+    image: redis:7-alpine
+    container_name: oms-redis
+    ports: ["6379:6379"]
+    volumes: ["redisdata:/data"]
+    restart: unless-stopped
+
+  # --- Phase 1 · SCADA historian time-series DB (added in step P1-07)
   timescale:
     image: timescale/timescaledb:latest-pg16
+    container_name: oms-timescale
     environment:
       POSTGRES_DB: telemetry
       POSTGRES_USER: oms
       POSTGRES_PASSWORD: oms
     ports: ["5433:5432"]
+    volumes: ["tsdata:/var/lib/postgresql/data"]
+    restart: unless-stopped
 
-  redis:
-    image: redis:7-alpine
-    ports: ["6379:6379"]
-
+  # --- Phase 1 · event bus (added in step P1-09)
   kafka:
     image: bitnami/kafka:3.7
+    container_name: oms-kafka
     environment:
       KAFKA_CFG_NODE_ID: "1"
       KAFKA_CFG_PROCESS_ROLES: "controller,broker"
@@ -35,23 +53,21 @@ services:
       KAFKA_CFG_ADVERTISED_LISTENERS: "PLAINTEXT://localhost:9092"
       KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
     ports: ["9092:9092"]
+    volumes: ["kafkadata:/bitnami/kafka"]
+    restart: unless-stopped
 
+  # --- Phase 4 · identity provider (kept here for the target topology; started later)
   keycloak:
     image: quay.io/keycloak/keycloak:24.0
+    container_name: oms-keycloak
     command: ["start-dev"]
     environment:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
     ports: ["8080:8080"]
 
-  # backend:
-  #   build: ./backend
-  #   environment:
-  #     DATABASE_URL: postgres://oms:oms@postgres:5432/oms
-  #     KAFKA_BROKERS: kafka:9092
-  #     REDIS_URL: redis://redis:6379
-  #   depends_on: [postgres, kafka, redis]
-  #   ports: ["4000:4000"]
-
 volumes:
   pgdata:
+  redisdata:
+  tsdata:
+  kafkadata:
