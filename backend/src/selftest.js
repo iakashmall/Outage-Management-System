@@ -1,12 +1,13 @@
 // Boots the real Express app in-process (supertest-free), exercises the API
 // against the real SQLite DB, prints results, and exits. Run: node src/selftest.js
+import 'dotenv/config'; // loads .env into process.env
 import express from 'express';
 import { migrate } from './infra/db.js';
 import { seed } from './infra/seed.js';
 import { api } from './routes/api.js';
 
-migrate();
-seed({ force: true });
+await migrate();
+await seed({ force: true });
 
 const app = express();
 app.use(express.json());

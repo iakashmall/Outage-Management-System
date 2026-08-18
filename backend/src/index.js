@@ -1,3 +1,4 @@
+import 'dotenv/config'; // loads .env into process.env
 import express from 'express';
 import cors from 'cors';
 import { createServer } from 'node:http';
@@ -10,8 +11,8 @@ import { startSimulator } from './realtime/simulator.js';
 
 const PORT = process.env.PORT || 4000;
 
-migrate();
-seed(); // idempotent — only seeds an empty DB
+ await migrate();
+ await seed(); // idempotent — only seeds an empty DB
 
 const app = express();
 app.use(cors());

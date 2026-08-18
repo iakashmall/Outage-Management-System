@@ -64,8 +64,8 @@ export default function Incidents() {
 
 function IncidentDrawer({ inc, onClose, onChange }) {
   const [busy, setBusy] = useState(false);
-  const [crews, setCrews] = useState([]);
-  useEffect(() => { api.crews().then(setCrews); }, []);
+  const [nearest, setNearest] = useState([]);
+  useEffect(() => { api.nearestCrews(inc.id).then(setNearest).catch(() => setNearest([])); }, [inc.id]);
 
   const doStatus = async (status) => {
     setBusy(true);
@@ -111,12 +111,14 @@ function IncidentDrawer({ inc, onClose, onChange }) {
 
           {!inc.crew_id && ['open', 'dispatched'].includes(inc.status) && (
             <>
-              <div style={{ margin: '18px 0 8px' }} className="eyebrow">Assign crew</div>
+              <div style={{ margin: '18px 0 8px' }} className="eyebrow">Assign crew · nearest first</div>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                {crews.filter((c) => c.status === 'available').map((c) => (
-                  <button key={c.id} className="btn sm" disabled={busy} onClick={() => doAssign(c.id)}>{c.name}</button>
+                {nearest.map((c) => (
+                  <button key={c.id} className="btn sm" disabled={busy} onClick={() => doAssign(c.id)}>
+                    {c.name} · {c.meters_away < 1000 ? `${Math.round(c.meters_away)} m` : `${(c.meters_away / 1000).toFixed(1)} km`}
+                  </button>
                 ))}
-                {!crews.filter((c) => c.status === 'available').length && <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>No crews available right now.</span>}
+                {!nearest.length && <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>No crews available right now.</span>}
               </div>
             </>
           )}
