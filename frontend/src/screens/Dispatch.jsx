@@ -45,10 +45,7 @@ export default function Dispatch() {
                   </div>
                 </div>
                 <div style={{ display: 'flex', gap: 8, marginTop: 11 }}>
-                  <select className="btn sm" style={{ flex: 1 }} value={pick[i.id] || ''} onChange={(e) => setPick({ ...pick, [i.id]: e.target.value })}>
-                    <option value="">{available.length ? 'Select crew…' : 'No crews available'}</option>
-                    {available.map((c) => <option key={c.id} value={c.id}>{c.name} · {c.location}</option>)}
-                  </select>
+                 <NearestCrewPicker incId={i.id} pick={pick} setPick={setPick} /> 
                   <button className="btn primary sm" disabled={!available.length} onClick={() => assign(i.id)}>
                     <Icon name="arrow" size={14} /> Dispatch
                   </button>
@@ -80,5 +77,20 @@ export default function Dispatch() {
         </div>
       </div>
     </>
+  );
+}
+function NearestCrewPicker({ incId, pick, setPick }) {
+  const [nearest, setNearest] = useState([]);
+  useEffect(() => { api.nearestCrews(incId).then(setNearest).catch(() => setNearest([])); }, [incId]);
+  useEffect(() => { if (!pick[incId] && nearest.length) setPick((p) => ({ ...p, [incId]: nearest[0].id })); }, [nearest]); // eslint-disable-line
+  return (
+    <select className="btn sm" style={{ flex: 1 }} value={pick[incId] || ''} onChange={(e) => setPick({ ...pick, [incId]: e.target.value })}>
+      <option value="">{nearest.length ? 'Select crew…' : 'No crews available'}</option>
+      {nearest.map((c) => (
+        <option key={c.id} value={c.id}>
+          {c.name} · {c.meters_away < 1000 ? `${Math.round(c.meters_away)} m` : `${(c.meters_away / 1000).toFixed(1)} km`}
+        </option>
+      ))}
+    </select>
   );
 }

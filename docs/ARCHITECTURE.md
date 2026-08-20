@@ -29,8 +29,8 @@ drops in. Nothing about the domain logic changes when those are swapped in — o
 
 ## Layers in the backend
 
-| Layer | File(s) | Responsibility | Swap seam |
-|---|---|---|---|
+| Layer   | File(s)             | Responsibility                  | Swap seam |
+|---      |---                  |---                               |---|
 | Routes | `src/routes/api.js` | HTTP surface, request validation | Kong/API-gateway sits in front unchanged |
 | Domain | `src/domain/lifecycle.js`, `indices.js` | State machine, IEEE 1366 math — **pure, no I/O** | Never changes across deployments |
 | Events | `src/domain/bus.js` | Publish/subscribe topics | Replace EventEmitter with KafkaJS producer/consumer |

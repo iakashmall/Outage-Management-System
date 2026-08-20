@@ -19,6 +19,7 @@ export const api = {
   setStatus: (id, status, note) => req('PATCH', `/incidents/${id}/status`, { status, note }),
   assign: (id, crewId, priority) => req('POST', `/incidents/${id}/assign`, { crewId, priority }),
   crews: () => req('GET', '/crews'),
+  nearestCrews: (incidentId) => req('GET', `/incidents/${incidentId}/nearest-crews`),
   alarms: () => req('GET', '/alarms'),
   ackAlarm: (id) => req('POST', `/alarms/${id}/ack`),
   ackAll: () => req('POST', '/alarms/ack-all'),
