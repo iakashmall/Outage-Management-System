@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { repo } from '../infra/repo.js';
+import { requireRole } from './auth.js';
 import { bus, TOPICS } from '../domain/bus.js';
 import { canTransition, nextStates, LABELS } from '../domain/lifecycle.js';
 import { computeIndices } from '../domain/indices.js';
@@ -46,7 +47,7 @@ api.post('/incidents', async (req, res) => {
   res.status(201).json(inc);
 });
 
-api.patch('/incidents/:id/status', async (req, res) => {
+api.patch('/incidents/:id/status', requireRole('oms_operator', 'system_admin'), async (req, res) => {
   const inc = await repo.incident(req.params.id);
   if (!inc) return res.status(404).json({ error: 'not found' });
   const to = req.body?.status;
