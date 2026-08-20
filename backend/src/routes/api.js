@@ -64,7 +64,7 @@ api.patch('/incidents/:id/status', requireRole('oms_operator', 'system_admin'), 
 });
 
 // ---------- dispatch ----------
-api.post('/incidents/:id/assign', async (req, res) => {
+api.post('/incidents/:id/assign', requireRole('oms_operator', 'system_admin'), async (req, res) => {
   const inc = await repo.incident(req.params.id);
   const crew = await repo.crew(req.body?.crewId);
   if (!inc || !crew) return res.status(404).json({ error: 'incident or crew not found' });
@@ -278,7 +278,7 @@ api.patch('/mobile/jobs/:id/status', async (req, res) => {
 });
 
 // ---------- admin ----------
-api.get('/audit', async (req, res) => res.json(await repo.auditLog()));
+api.get('/audit', requireRole('system_admin'), async (req, res) => res.json(await repo.auditLog()));
 
 async function pushIndices() { bus.publish(TOPICS.INDICES_UPDATED, computeIndices(await repo.incidents())); }
 export { pushIndices };
