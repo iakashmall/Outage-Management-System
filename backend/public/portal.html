@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>UPCL — Outage Status</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; color: #1a1a1a; }
+    h1 { color: #1F3864; font-size: 22px; }
+    .sub { color: #666; margin-top: -8px; }
+    .search { display: flex; gap: 8px; margin: 20px 0; }
+    input { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 8px; font-size: 15px; }
+    button { padding: 10px 18px; border: 0; border-radius: 8px; background: #1F3864; color: #fff; font-size: 15px; cursor: pointer; }
+    .card { border: 1px solid #e2e2e2; border-radius: 10px; padding: 14px 16px; margin: 12px 0; }
+    .card h3 { margin: 0 0 6px; color: #1F3864; }
+    .row { font-size: 14px; margin: 3px 0; }
+    .label { color: #777; display: inline-block; width: 150px; }
+    .none { color: #666; padding: 16px 0; }
+    .status { font-weight: 600; text-transform: capitalize; }
+  </style>
+</head>
+<body>
+  <h1>UPCL — Power Outage Status</h1>
+  <p class="sub">Check the status of outages in your area. No login required.</p>
+  <div class="search">
+    <input id="q" placeholder="Enter your area/zone (e.g. Jwalapur) or reference (e.g. INC-2026-000003)" />
+    <button onclick="lookup()">Check</button>
+  </div>
+  <div id="results"></div>
+
+  <script>
+    async function lookup() {
+      const q = document.getElementById('q').value.trim();
+      const results = document.getElementById('results');
+      results.innerHTML = 'Checking...';
+      const param = /^INC-/i.test(q) ? 'ref=' + encodeURIComponent(q) : 'zone=' + encodeURIComponent(q);
+      try {
+        const r = await fetch('/api/public/outage-status?' + (q ? param : ''));
+        const data = await r.json();
+        if (!data.outages || data.outages.length === 0) {
+          results.innerHTML = '<p class="none">No active outages found for that search. If your power is out, please report it to UPCL.</p>';
+          return;
+        }
+        results.innerHTML = data.outages.map(o =>
+          '<div class="card">' +
+          '<h3>' + (o.zone || 'Unknown area') + '</h3>' +
+          '<div class="row"><span class="label">Status</span><span class="status">' + (o.status || '').replace(/_/g,' ') + '</span></div>' +
+          '<div class="row"><span class="label">Reference</span>' + o.ref + '</div>' +
+          '<div class="row"><span class="label">Customers affected</span>' + (o.customersAffected ?? 'N/A') + '</div>' +
+          '<div class="row"><span class="label">Est. restoration</span>' + (o.estimatedRestoration ? new Date(o.estimatedRestoration).toLocaleString() : 'Being assessed') + '</div>' +
+          '<div class="row"><span class="label">Reported since</span>' + (o.since ? new Date(o.since).toLocaleString() : '') + '</div>' +
+          '</div>'
+        ).join('');
+      } catch (e) {
+        results.innerHTML = '<p class="none">Could not load status right now. Please try again shortly.</p>';
+      }
+    }
+    // show all active outages on first load
+    lookup();
+  </script>
+</body>
+</html>

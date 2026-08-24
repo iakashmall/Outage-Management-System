@@ -17,6 +17,7 @@
     "jsonwebtoken": "^9.0.3",
     "jwks-rsa": "^4.1.0",
     "nanoid": "^5.0.7",
+    "nodemailer": "^9.0.5",
     "pg-promise": "^11",
     "socket.io": "^4.7.5"
   },

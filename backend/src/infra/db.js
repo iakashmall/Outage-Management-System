@@ -114,6 +114,19 @@ export async function migrate() {
       action TEXT,
       target TEXT
     );
+
+    
+    CREATE TABLE IF NOT EXISTS notifications (
+      id          TEXT PRIMARY KEY,
+      incident_id TEXT,
+      channel     TEXT NOT NULL,
+      recipient   TEXT,
+      subject     TEXT,
+      body        TEXT,
+      status      TEXT NOT NULL,
+      error       TEXT,
+      ts          TIMESTAMPTZ NOT NULL
+    );
   `);
    await db.none(`
     ALTER TABLE incidents ADD COLUMN IF NOT EXISTS geog public.geography(Point, 4326);

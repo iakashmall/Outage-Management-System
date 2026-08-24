@@ -16,3 +16,11 @@ export function initKeycloak() {
 export function authHeader() {
   return keycloak.token ? { Authorization: `Bearer ${keycloak.token}` } : {};
 }
+export function currentUser() {
+  const t = keycloak.tokenParsed || {};
+  return { username: t.preferred_username || 'user', roles: (t.realm_access && t.realm_access.roles) || [] };
+}
+
+export function logout() {
+  keycloak.logout({ redirectUri: window.location.origin });
+}

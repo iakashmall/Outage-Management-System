@@ -5,3 +5,4 @@ backend/data/*.db-shm
 backend/data/*.db-wal
 .DS_Store
 *.log
+backend/data/*.env
