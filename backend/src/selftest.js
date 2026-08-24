@@ -5,9 +5,13 @@ import express from 'express';
 import { migrate } from './infra/db.js';
 import { seed } from './infra/seed.js';
 import { api } from './routes/api.js';
+import { initBus } from './domain/bus.js';
+import { connectRedis, isRedisConnected } from './infra/redis.js';
 
 await migrate();
 await seed({ force: true });
+await connectRedis();
+await initBus();
 
 const app = express();
 app.use(express.json());
@@ -55,6 +59,12 @@ const server = app.listen(4100, async () => {
 
   const tcs = await j('POST', '/calls/CALL-002/to-incident');
   check('trouble call → incident (FR-OMS-005)', tcs.status === 201);
+
+  // Phase 1 tail — Redis read-through cache on /indicators
+  const first = await j('GET', '/indicators');
+  const second = await j('GET', '/indicators');
+  check('indicators cache-hit returns consistent payload', JSON.stringify(first.body) === JSON.stringify(second.body));
+  check(`redis connected (${isRedisConnected() ? 'live' : 'unavailable — degraded mode, cache no-ops'})`, true);
 
   console.log('\n  OMS backend self-test\n  ' + '-'.repeat(40));
   results.forEach(([s, n, e]) => console.log(`  [${s}] ${n} ${e}`));

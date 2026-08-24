@@ -7,6 +7,7 @@ import { bus, TOPICS } from '../domain/bus.js';
 import { canTransition, nextStates, LABELS } from '../domain/lifecycle.js';
 import { computeIndices } from '../domain/indices.js';
 import { resolve as resolveAsset, substations as netSubstations } from '../infra/geo.js';
+import { cacheGet, cacheSet, cacheDel } from '../infra/redis.js';
 
 export const api = Router();
 const actor = (req) => req.header('x-user') || 'operator';
@@ -43,6 +44,7 @@ api.post('/incidents', async (req, res) => {
   await repo.addIncidentEvent(id, actor(req), 'created', `Manually created — ${b.cause || 'Unknown'}`);
   await repo.audit(actor(req), 'incident.create', id);
   bus.publish(TOPICS.INCIDENT_CREATED, inc);
+  await cacheDel('indicators');
   res.status(201).json(inc);
 });
 
@@ -74,13 +76,6 @@ api.post('/incidents/:id/assign', async (req, res) => {
     priority: req.body?.priority || 'Normal', status: 'Acknowledged', address: inc.zone,
     updated_at: new Date().toISOString(),
   });
-  // Nearest available crews to an incident (PostGIS distance-ranked)
-api.get('/incidents/:id/nearest-crews', async (req, res) => {
-  const inc = await repo.incident(req.params.id);
-  if (!inc) return res.status(404).json({ error: 'not found' });
-  const crews = await repo.nearestAvailableCrews(inc.id);
-  res.json(crews);
-});
   await repo.addIncidentEvent(inc.id, actor(req), 'assigned', `${crew.name} assigned`);
   await repo.audit(actor(req), 'dispatch.assign', `${inc.id}→${crew.id}`);
   const updated = await repo.incident(inc.id);
@@ -93,6 +88,18 @@ api.get('/incidents/:id/nearest-crews', async (req, res) => {
 
 // ---------- crews ----------
 api.get('/crews', async (req, res) => res.json(await repo.crews()));
+
+// Nearest available crews to an incident (PostGIS distance-ranked).
+// Was previously registered *inside* the POST /assign handler, which meant it
+// only existed after the first assign call (and got re-registered on every
+// call after that). Hoisted to top-level route registration — fixed as part
+// of the Phase 1 regression pass.
+api.get('/incidents/:id/nearest-crews', async (req, res) => {
+  const inc = await repo.incident(req.params.id);
+  if (!inc) return res.status(404).json({ error: 'not found' });
+  const crews = await repo.nearestAvailableCrews(inc.id);
+  res.json(crews);
+});
 
 // ---------- alarms ----------
 api.get('/alarms', async (req, res) => res.json(await repo.alarms()));
@@ -133,6 +140,7 @@ api.post('/calls/:id/to-incident', async (req, res) => {
   await repo.updateCall(call.id, { status: 'incident', linked_id: id });
   await repo.addIncidentEvent(id, actor(req), 'created', `From trouble call ${call.id} (${call.customer})`);
   bus.publish(TOPICS.INCIDENT_CREATED, inc);
+  await cacheDel('indicators');
   res.status(201).json(inc);
 });
 
@@ -180,6 +188,7 @@ async function ingestComplaint(body, who) {
     await repo.addIncidentEvent(incidentId, who, 'created', `Opened from complaint ${qid} — ${category} near ${loc.substation || 'unknown'}`);
     bus.publish(TOPICS.INCIDENT_CREATED, inc);
   }
+  await cacheDel('indicators');
 
   const complaint = await repo.addComplaint({
     qid, external_id: body.externalId || null, customer: body.customer || null, phone: body.phone || null,
@@ -233,7 +242,18 @@ api.post('/complaints/simulate', async (req, res) => {
 });
 
 // ---------- indicators / analytics ----------
-api.get('/indicators', async (req, res) => res.json(computeIndices(await repo.incidents())));
+// Read-through cache (Redis RTDB, SDP §3): dashboards poll this endpoint
+// frequently and the underlying computation re-scans every incident, so a
+// short TTL cache takes the repeat load off Postgres without risking a
+// stale value for more than a few seconds. Cache is invalidated explicitly
+// wherever an incident is created/updated (see invalidateIndicators below).
+api.get('/indicators', async (req, res) => {
+  const cached = await cacheGet('indicators');
+  if (cached) return res.json(cached);
+  const fresh = computeIndices(await repo.incidents());
+  await cacheSet('indicators', fresh, 15);
+  res.json(fresh);
+});
 api.get('/analytics/monthly', async (req, res) =>
   res.json({ saidi: [2.1, 3.8, 2.9, 4.1, 3.6, 2.8, 3.2, 4.5, 3.0, 2.7, 3.9, computeIndices(await repo.incidents()).saidi] }));
 
@@ -268,6 +288,7 @@ api.patch('/mobile/jobs/:id/status', async (req, res) => {
     await repo.updateIncident(job.incident_id, { status: 'pending' });
     await repo.addIncidentEvent(job.incident_id, 'Crew', 'field', 'Work complete — awaiting verification');
   }
+  if (job.incident_id) await cacheDel('indicators');
   const updated = await repo.job(job.id);
   const updatedCrew = await repo.crew(job.crew_id);
   bus.publish(TOPICS.JOB_UPDATED, updated);
@@ -279,5 +300,8 @@ api.patch('/mobile/jobs/:id/status', async (req, res) => {
 // ---------- admin ----------
 api.get('/audit', async (req, res) => res.json(await repo.auditLog()));
 
-async function pushIndices() { bus.publish(TOPICS.INDICES_UPDATED, computeIndices(await repo.incidents())); }
+async function pushIndices() {
+  await cacheDel('indicators');
+  bus.publish(TOPICS.INDICES_UPDATED, computeIndices(await repo.incidents()));
+}
 export { pushIndices };
