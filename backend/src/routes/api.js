@@ -111,6 +111,28 @@ api.post('/alarms/:id/ack', async (req, res) => {
   res.json(a);
 });
 
+// ---------- SCADA fault injection (Phase 2) ----------
+// Lets an operator (or the demo) push a synthetic SCADA fault through the exact
+// same auto-detection path the live DNP3/IEC-61968 adapter will use in
+// production. Publishes to the ALARM_RAISED topic; the SCADA consumer does the
+// rest (detect → dedup → classify → auto-create). INT-001.
+api.post('/scada/fault', async (req, res) => {
+  const { tag, condition = 'CRITICAL', limit_val = 'TRIP', customers, feeder, substation, lat, lon } = req.body || {};
+  if (!tag) return res.status(400).json({ error: 'tag is required' });
+  const evt = {
+    id: 'ALM-' + Math.random().toString(36).slice(2, 7),
+    tag, condition, limit_val,
+    priority: condition === 'CRITICAL' ? 1 : condition === 'MAJOR' ? 2 : 3,
+    customers, feeder, substation, lat, lon,
+    message: `${condition} injected on ${tag}`,
+    ts: new Date().toISOString(), ack: 0,
+  };
+  await repo.createAlarm({ id: evt.id, tag: evt.tag, condition: evt.condition, limit_val: evt.limit_val, priority: evt.priority, message: evt.message, ts: evt.ts, ack: 0 });
+  bus.publish(TOPICS.ALARM_RAISED, evt);
+  await repo.audit(actor(req), 'scada.fault.inject', tag);
+  res.status(202).json({ accepted: true, event: evt });
+});
+
 api.post('/alarms/ack-all', async (req, res) => {
   // NOTE: was `.forEach(async ...)` — that pattern doesn't await, so it's a
   // correctness bug once repo calls are async. Use a real loop instead.
