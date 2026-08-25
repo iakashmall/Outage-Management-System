@@ -254,6 +254,30 @@ api.get('/mobile/crews/:id', async (req, res) => {
 });
 
 api.get('/mobile/jobs/:id/history', async (req, res) => res.json(await repo.jobUpdates(req.params.id)));
+// Upload a photo for a job (base64 data URL in body.dataUrl)
+api.post('/mobile/jobs/:id/photos', async (req, res) => {
+  const job = await repo.job(req.params.id);
+  if (!job) return res.status(404).json({ error: 'not found' });
+  const { dataUrl, lat, lon, note } = req.body || {};
+  if (!dataUrl || typeof dataUrl !== 'string') {
+    return res.status(400).json({ error: 'dataUrl required' });
+  }
+  const photo = await repo.addJobPhoto(req.params.id, dataUrl, lat, lon, note);
+  const { data_url, ...meta } = photo;
+  res.status(201).json(meta);
+});
+
+// List photo metadata for a job
+api.get('/mobile/jobs/:id/photos', async (req, res) => {
+  res.json(await repo.jobPhotos(req.params.id));
+});
+
+// Fetch one full photo (data URL) by id
+api.get('/mobile/photos/:photoId', async (req, res) => {
+  const row = await repo.jobPhotoById(req.params.photoId);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  res.json(row);
+});
 
 api.patch('/mobile/jobs/:id/status', async (req, res) => {
   const job = await repo.job(req.params.id);

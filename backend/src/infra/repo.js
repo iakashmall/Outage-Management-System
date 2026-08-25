@@ -136,4 +136,25 @@ export const repo = {
       ['AU' + nanoid(8), new Date().toISOString(), actor, action, target]);
   },
   auditLog: () => db.any('SELECT * FROM audit_log ORDER BY ts DESC LIMIT 50'),
+
+    addJobPhoto: async (jobId, dataUrl, lat, lon, note) => {
+    const ph = {
+      id: 'PH' + nanoid(8),
+      job_id: jobId,
+      data_url: dataUrl,
+      lat: lat ?? null,
+      lon: lon ?? null,
+      note: note ?? null,
+      ts: new Date().toISOString(),
+    };
+    await db.none(
+      `INSERT INTO job_photos (id,job_id,data_url,lat,lon,note,ts)
+       VALUES ($/id/,$/job_id/,$/data_url/,$/lat/,$/lon/,$/note/,$/ts/)`,
+      ph
+    );
+    return ph;
+  },
+  jobPhotos: (jobId) =>
+    db.any('SELECT id, job_id, lat, lon, note, ts FROM job_photos WHERE job_id=$1 ORDER BY ts DESC', [jobId]),
+  jobPhotoById: (id) => db.oneOrNone('SELECT * FROM job_photos WHERE id=$1', [id]),
 };

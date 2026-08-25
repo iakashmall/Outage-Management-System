@@ -58,3 +58,12 @@ export async function updateMyJob(id, job) {
 export function logout() {
   kcLogout();
 }
+
+export async function uploadJobPhoto(jobId, dataUrl, location = {}, note) {
+  return req('/mobile/jobs/' + jobId + '/photos', 'POST', {
+    dataUrl,
+    lat: location.lat ?? null,
+    lon: location.lon ?? null,
+    note: note ?? null,
+  });
+}
