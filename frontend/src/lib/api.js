@@ -1,10 +1,11 @@
 import { io } from 'socket.io-client';
+import { authHeader } from './auth.js';
 
 const BASE = '/api';
 async function req(method, path, body) {
   const r = await fetch(BASE + path, {
     method,
-    headers: { 'content-type': 'application/json', 'x-user': 'dispatcher' },
+    headers: { 'content-type': 'application/json', ...authHeader() },
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await r.json().catch(() => ({}));

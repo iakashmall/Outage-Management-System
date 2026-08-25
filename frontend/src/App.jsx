@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef, Component } from 'react';
 import { socket } from './lib/api.js';
 import { Icon, useConnection, useToasts, hhmm } from './lib/ui.jsx';
+   import { currentUser, logout } from './lib/auth.js';
 import Dashboard from './screens/Dashboard.jsx';
 import Incidents from './screens/Incidents.jsx';
 import NetworkMap from './screens/NetworkMap.jsx';
@@ -125,7 +126,11 @@ export default function App() {
             {up ? 'SCADA link live' : 'Reconnecting'}
           </div>
           <div className="clock mono">{clock}</div>
-        </header>
+             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 12 }}>
+               <span style={{ fontSize: 13, opacity: 0.8 }}>{currentUser().username}</span>
+               <button onClick={logout} style={{ fontSize: 12, padding: '4px 10px', cursor: 'pointer', borderRadius: 6, border: '1px solid #ccc', background: 'transparent', color: 'inherit' }}>Logout</button>
+             </div>
+           </header>
 
         <LiveTape />
 
