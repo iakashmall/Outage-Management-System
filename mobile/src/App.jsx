@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import "./app.css";
-import { keycloak, logout as kcLogout, myCrewId } from "./lib/auth.js";
-import { getMyJobs, updateJobStatus } from "./lib/api.js";
+import { getCurrentCrew, getMyJobs, logout, updateJobStatus } from "./lib/api.js";
 
 /* =========================================================
    DEMO DATA
@@ -58,95 +57,29 @@ const CREW_STATUSES = {
   "Crew Echo-1": "Offline",
 };
 
-const DEMO_ACCOUNTS = [
-  {
-    email: "admin@oms-demo.com",
-    password: "Admin@123",
-    role: "leader",
-    label: "Operations Admin",
-    crewId: "C001",
-  },
-  {
-    email: "crew@oms-demo.com",
-    password: "Crew@123",
-    role: "crew",
-    label: "Field Crew",
-    crewId: "C003",
-  },
+const SAFETY_ITEMS = [
+  "Line confirmed de-energised",
+  "PPE worn",
+  "Work area barricaded",
+  "Permit verified",
 ];
-
-const DEMO_OMS_JOBS = [
-  {
-    id: "JOB-1005",
-    title: "Pending Line Inspection",
-    address: "Mussoorie Road, Dehradun",
-    feeder: "FDR-17",
-    severity: "High",
-    priority: "Urgent",
-    customers: 386,
-    status: "Pending Acceptance",
-    distance: "1.6 km",
-    eta: "6 min",
-    assignedCrewId: "C003",
-    assignedDistance: "1.6 km",
-  },
-  {
-    id: "JOB-1001",
-    title: "Transformer Failure",
-    address: "Rajpur Road, Dehradun",
-    feeder: "FDR-12",
-    severity: "Critical",
-    priority: "Urgent",
-    customers: 842,
-    status: "Acknowledged",
-    distance: "2.4 km",
-    eta: "7 min",
-  },
-  {
-    id: "JOB-1002",
-    title: "Line Fault",
-    address: "Haridwar Road, Rishikesh",
-    feeder: "FDR-08",
-    severity: "High",
-    priority: "Urgent",
-    customers: 531,
-    status: "En Route",
-    distance: "5.8 km",
-    eta: "14 min",
-  },
-  {
-    id: "JOB-1003",
-    title: "Fuse Failure",
-    address: "Clock Tower, Dehradun",
-    feeder: "FDR-03",
-    severity: "Medium",
-    priority: "Normal",
-    customers: 214,
-    status: "On Site",
-    distance: "8.2 km",
-    eta: "21 min",
-  },
-  {
-    id: "JOB-1004",
-    title: "Cable Fault",
-        address: "Prem Nagar, Dehradun",
-        feeder: "FDR-21",
-        severity: "Low",
-    priority: "Planned",
-    customers: 93,
-    status: "Work Started",
-    distance: "11.4 km",
-    eta: "28 min",
-  },
-];
-
-const OMS_JOBS_URL = import.meta.env.VITE_OMS_JOBS_URL;
 
 function severityClass(severity) {
   const normalized = String(severity ?? "Medium").toLowerCase();
   return ["critical", "high", "medium", "low"].includes(normalized)
     ? normalized
     : "medium";
+}
+
+function getLocation() {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) return resolve({});
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => resolve({ lat: coords.latitude, lon: coords.longitude }),
+      () => resolve({}),
+      { enableHighAccuracy: true, timeout: 8000 }
+    );
+  });
 }
 
 function normalizeOmsJob(job) {
@@ -166,57 +99,73 @@ function normalizeOmsJob(job) {
   };
 }
 
-/* =========================================================
-   MAIN APP
-========================================================= */
-
 export default function App() {
-  const [role, setRole] = useState(null);
-  const [crew, setCrew] = useState(null);
-    const [jobs, setJobs] = useState([]);
-  const [omsSource, setOmsSource] = useState("oms");
+  const role = "crew";
+  const [crew, setCrew] = useState(() => CREWS.find((item) => item.id === "C003"));
+  const [jobs, setJobs] = useState([]);
+  const [omsSource, setOmsSource] = useState("syncing");
+  const online = useOnline();
+  const [queuedUpdates, setQueuedUpdates] = useState(() => JSON.parse(localStorage.getItem("oms-status-queue") || "[]"));
 
   useEffect(() => {
-    getMyJobs().then(setJobs).catch((e) => {
-      console.error("Could not load jobs", e);
-      setOmsSource("demo");
-    });
+    localStorage.setItem("oms-status-queue", JSON.stringify(queuedUpdates));
+    if (!online || !queuedUpdates.length) return;
+    Promise.all(queuedUpdates.map(({ id, status, location }) => updateJobStatus(id, status, location)))
+      .then(() => setQueuedUpdates([]))
+      .catch(() => {});
+  }, [online, queuedUpdates]);
+
+  useEffect(() => {
+    getCurrentCrew()
+      .then((currentCrew) => setCrew(currentCrew))
+      .catch(() => {});
+
+    getMyJobs()
+      .then((myJobs) => {
+        setJobs(myJobs.map(normalizeOmsJob));
+        setOmsSource("oms");
+      })
+      .catch(() => setOmsSource("unavailable"));
   }, []);
 
   const updateJob = (id, changes) => {
-    setJobs((current) =>
-      current.map((job) =>
+    setJobs((current) => {
+      const updatedJobs = current.map((job) =>
         job.id === id ? { ...job, ...changes } : job
-      )
-    );
+      );
+      const updatedJob = updatedJobs.find((job) => job.id === id);
+      if (changes.status) {
+        if (online) updateJobStatus(id, changes.status, changes.location ?? {}).catch(() => {});
+        else setQueuedUpdates((pending) => [...pending, { id, status: changes.status, location: changes.location ?? {} }]);
+      }
+      return updatedJobs;
+    });
   };
 
-  // Authentication is handled by Keycloak (see main.jsx). Once we're here,
-  // the user is logged in. Pick their crew from the token's crew_id and
-  // decide crew-vs-leader from that crew's role.
-  useEffect(() => {
-    const id = myCrewId();
-    const found = CREWS.find((item) => item.id === id) || CREWS[2]; // fallback C003
-    setCrew(found);
-    setRole(found.role === "Crew Lead" ? "leader" : "crew");
-  }, []);
-
-  if (!role || !crew) {
-    return <div className="app-shell"><div className="login-screen"><p style={{padding:24}}>Loading your workspace…</p></div></div>;
+  if (!crew) {
+    return (
+      <main className="app-shell">
+        <div className="loading-state">Loading your field workspace...</div>
+      </main>
+    );
   }
 
   /* -------------------------------------------------------
      CREW APP
   ------------------------------------------------------- */
 
-  if (role === "crew") {
+  if (role === "crew" && crew) {
     return (
       <CrewLayout
         crew={crew}
         jobs={jobs}
         onUpdateJob={updateJob}
         omsSource={omsSource}
-        onLogout={() => kcLogout()}
+        online={online}
+        queuedUpdates={queuedUpdates}
+        onLogout={() => {
+          logout();
+        }}
       />
     );
   }
@@ -231,124 +180,14 @@ export default function App() {
       jobs={jobs}
       omsSource={omsSource}
       onLogout={() => {
-        setCrew(null);
-        setRole(null);
+        logout();
       }}
     />
   );
 }
 
 /* =========================================================
-   ROLE SELECTION
-========================================================= */
-
-function GeneralLogin({ onLogin }) {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-
-  const handleSubmit = (event) => {
-    event.preventDefault();
-    const account = DEMO_ACCOUNTS.find(
-      (item) =>
-        item.email === email.trim().toLowerCase() &&
-        item.password === password
-    );
-
-    if (!account) {
-      setError("The email or password is incorrect.");
-      return;
-    }
-
-    setError("");
-    onLogin(account);
-  };
-
-  return (
-    <div className="app-shell">
-      <div className="login-screen">
-        <div className="brand">
-          <div className="brand-icon">⚡</div>
-
-          <div>
-            <h1>
-              OMS <span>Crew</span>
-            </h1>
-
-            <p>Outage Management System</p>
-          </div>
-        </div>
-
-        <div className="login-card">
-          <h2>Sign in to OMS</h2>
-
-          <p className="muted">
-            Enter your work email to continue to the right workspace.
-          </p>
-
-          <form className="email-login-form" onSubmit={handleSubmit}>
-            <label htmlFor="login-email">Work email</label>
-            <input
-              id="login-email"
-              type="email"
-              value={email}
-              onChange={(event) => {
-                setEmail(event.target.value);
-                setError("");
-              }}
-              placeholder="you@company.com"
-              autoComplete="email"
-              autoFocus
-              required
-            />
-            <label htmlFor="login-password">Password</label>
-            <input
-              id="login-password"
-              type="password"
-              value={password}
-              onChange={(event) => {
-                setPassword(event.target.value);
-                setError("");
-              }}
-              placeholder="Enter your password"
-              autoComplete="current-password"
-              required
-            />
-            {error && <p className="login-error">{error}</p>}
-            <button className="email-submit" type="submit">
-              Continue <span>→</span>
-            </button>
-          </form>
-
-          <div className="demo-accounts">
-            <span>Demonstration accounts</span>
-            {DEMO_ACCOUNTS.map((account) => (
-              <button
-                key={account.email}
-                type="button"
-                onClick={() => {
-                  setEmail(account.email);
-                  setPassword(account.password);
-                  setError("");
-                }}
-              >
-                <strong>{account.label}</strong>
-                <small>{account.email} · {account.password}</small>
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="login-footer">
-          Ganga Corridor · UPCL Field Operations
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* =========================================================
-   CREW LOGIN
+  CREW LOGIN
 ========================================================= */
 
 function CrewLogin({ onSelect, onBack }) {
@@ -487,7 +326,7 @@ function LeaderLogin({ onSelect, onBack }) {
    CREW LAYOUT
 ========================================================= */
 
-function CrewLayout({ crew, jobs, onUpdateJob, omsSource, onLogout }) {
+function CrewLayout({ crew, jobs, onUpdateJob, omsSource, online, queuedUpdates, onLogout }) {
   const [tab, setTab] = useState("jobs");
 
   return (
@@ -505,6 +344,8 @@ function CrewLayout({ crew, jobs, onUpdateJob, omsSource, onLogout }) {
             crew={crew}
             onUpdate={onUpdateJob}
             omsSource={omsSource}
+            online={online}
+            queuedUpdates={queuedUpdates}
           />
         )}
 
@@ -535,7 +376,7 @@ function CrewLayout({ crew, jobs, onUpdateJob, omsSource, onLogout }) {
    CREW JOBS
 ========================================================= */
 
-function CrewJobs({ jobs, crew, onUpdate, omsSource }) {
+function CrewJobs({ jobs, crew, onUpdate, omsSource, online, queuedUpdates }) {
   const visibleJobs = jobs.filter(
     (job) => !job.assignedCrewId || job.assignedCrewId === crew.id
   );
@@ -549,6 +390,9 @@ function CrewJobs({ jobs, crew, onUpdate, omsSource }) {
         title="My Jobs"
         subtitle={`${visibleJobs.length} assigned outages · ${omsSource === "oms" ? "Live OMS feed" : "Demo OMS feed"}`}
       />
+
+      {!online && <div className="offline-banner">Offline - changes will sync</div>}
+      {queuedUpdates.length > 0 && <div className="sync-queue">{queuedUpdates.length} pending update(s)</div>}
 
       <div className="summary-row">
         <SummaryCard
@@ -608,6 +452,12 @@ function CrewJobs({ jobs, crew, onUpdate, omsSource }) {
 
 function JobCard({ job, onUpdate }) {
   const [expanded, setExpanded] = useState(false);
+  const [updating, setUpdating] = useState(false);
+  const [showSafety, setShowSafety] = useState(false);
+  const [checked, setChecked] = useState({});
+  const [photos, setPhotos] = useState([]);
+  const [assetId, setAssetId] = useState("");
+  const [assetMessage, setAssetMessage] = useState("");
 
   const nextStatus = {
     "Pending Acceptance": "Acknowledged",
@@ -615,6 +465,66 @@ function JobCard({ job, onUpdate }) {
     "En Route": "On Site",
     "On Site": "Work Started",
     "Work Started": "Work Complete",
+  };
+
+  const advance = async () => {
+    const next = nextStatus[job.status];
+    if (!next || updating) return;
+
+    if (job.status === "On Site" && !SAFETY_ITEMS.every((_, index) => checked[index])) {
+      setShowSafety(true);
+      return;
+    }
+    setUpdating(true);
+    const location = await getLocation();
+    onUpdate(job.id, {
+      status: next,
+      location,
+      acceptance: job.status === "Pending Acceptance" ? "Accepted" : job.acceptance,
+    });
+    setUpdating(false);
+  };
+
+  const addPhotos = (event) => {
+    const selected = Array.from(event.target.files ?? []).map((file) => ({
+      url: URL.createObjectURL(file),
+      file,
+    }));
+    setPhotos((current) => [...current, ...selected]);
+  };
+
+  const scanQrImage = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file || !("BarcodeDetector" in window)) {
+      setAssetMessage("QR camera scanning is unavailable. Enter the asset ID instead.");
+      return;
+    }
+    try {
+      const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
+      const result = await detector.detect(await createImageBitmap(file));
+      if (!result.length) throw new Error("No QR code");
+      setAssetId(result[0].rawValue);
+      setAssetMessage("QR asset detected.");
+    } catch {
+      setAssetMessage("No readable QR code found.");
+    }
+  };
+
+  const readNfc = async () => {
+    if (!("NDEFReader" in window)) {
+      setAssetMessage("NFC is unavailable in this browser.");
+      return;
+    }
+    try {
+      const reader = new window.NDEFReader();
+      await reader.scan();
+      reader.onreading = ({ serialNumber }) => {
+        setAssetId(serialNumber);
+        setAssetMessage("NFC asset detected.");
+      };
+    } catch {
+      setAssetMessage("NFC permission was not granted.");
+    }
   };
 
   return (
@@ -684,6 +594,37 @@ function JobCard({ job, onUpdate }) {
         </div>
       )}
 
+      {showSafety && (
+        <div className="safety-card">
+          <h3>Safety checklist</h3>
+          {SAFETY_ITEMS.map((item, index) => (
+            <label key={item} className="safety-row">
+              <input type="checkbox" checked={Boolean(checked[index])} onChange={(event) => setChecked((current) => ({ ...current, [index]: event.target.checked }))} />
+              {item}
+            </label>
+          ))}
+          <button type="button" disabled={!SAFETY_ITEMS.every((_, index) => checked[index])} onClick={() => { setShowSafety(false); advance(); }}>
+            Confirm &amp; start work
+          </button>
+        </div>
+      )}
+
+      <div className="photo-capture">
+        <label className="photo-btn">+ Add photo<input type="file" accept="image/*" capture="environment" multiple hidden onChange={addPhotos} /></label>
+        <div className="photo-grid">{photos.map((photo, index) => <img key={`${photo.url}-${index}`} src={photo.url} alt="Job evidence" />)}</div>
+      </div>
+
+      <div className="asset-scan">
+        <strong>Asset scan</strong>
+        <div className="asset-controls">
+          <input value={assetId} onChange={(event) => setAssetId(event.target.value)} placeholder="Asset ID" />
+          <label>Scan QR<input type="file" accept="image/*" capture="environment" onChange={scanQrImage} /></label>
+          <button type="button" onClick={readNfc}>Read NFC</button>
+        </div>
+        {assetMessage && <small>{assetMessage}</small>}
+        {assetId && <span className="asset-result">Attached asset: {assetId}</span>}
+      </div>
+
       <div className="job-actions">
         <button
           className="secondary-btn"
@@ -692,17 +633,17 @@ function JobCard({ job, onUpdate }) {
           {expanded ? "Hide details" : "View details"}
         </button>
 
+        <a className="secondary-btn navigation-btn" href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(job.address)}`} target="_blank" rel="noreferrer">
+          Navigate
+        </a>
+
         {nextStatus[job.status] && (
           <button
             className="primary-btn"
-            onClick={() =>
-                onUpdate(job.id, {
-                  status: nextStatus[job.status],
-                  acceptance: job.status === "Pending Acceptance" ? "Accepted" : job.acceptance,
-                })
-            }
+            onClick={advance}
+              disabled={updating}
           >
-              {job.status === "Pending Acceptance" ? "Accept task" : `${nextStatus[job.status]} →`}
+              {updating ? "Getting location..." : job.status === "Pending Acceptance" ? "Accept task" : `${nextStatus[job.status]} →`}
           </button>
         )}
       </div>
@@ -1139,6 +1080,16 @@ function TeamOverview({ jobs }) {
 ========================================================= */
 
 function MapView({ jobs }) {
+  const [selectedJobId, setSelectedJobId] = useState(null);
+  const selectedJob = jobs.find((job) => job.id === selectedJobId);
+  const markerPositions = [
+    { top: "21%", left: "20%" },
+    { top: "43%", left: "72%" },
+    { top: "64%", left: "39%" },
+    { top: "76%", left: "68%" },
+    { top: "30%", left: "48%" },
+  ];
+
   return (
     <>
       <PageHeader
@@ -1155,13 +1106,17 @@ function MapView({ jobs }) {
           <div className="map-river" />
 
           {jobs.map((job, index) => (
-            <div
+            <button
               key={job.id}
               className={`map-marker marker-${index} marker-${severityClass(job.severity)}`}
               title={job.title}
+              style={markerPositions[index % markerPositions.length]}
+              aria-label={`View ${job.title}`}
+              aria-pressed={selectedJobId === job.id}
+              onClick={() => setSelectedJobId(job.id)}
             >
               ⚡
-            </div>
+            </button>
           ))}
 
           <div className="crew-marker">
@@ -1187,9 +1142,22 @@ function MapView({ jobs }) {
         </div>
       </div>
 
+      {selectedJob && (
+        <div className="map-job-panel">
+          <div>
+            <strong>{selectedJob.title}</strong>
+            <span>{selectedJob.id} · {selectedJob.address}</span>
+            <small>{selectedJob.status} · {selectedJob.customers} customers affected</small>
+          </div>
+          <div className="map-job-actions">
+            <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(selectedJob.address)}`} target="_blank" rel="noreferrer">Navigate</a>
+            <button type="button" onClick={() => setSelectedJobId(null)}>Close</button>
+          </div>
+        </div>
+      )}
+
       <div className="map-note">
-        Tap an incident marker to view the outage
-        location and assigned crew.
+        Select an incident marker to view the outage location and assigned crew.
       </div>
     </>
   );
@@ -1479,4 +1447,19 @@ function DashboardCard({
       </div>
     </div>
   );
+}
+
+function useOnline() {
+  const [online, setOnline] = useState(navigator.onLine);
+  useEffect(() => {
+    const on = () => setOnline(true);
+    const off = () => setOnline(false);
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+    return () => {
+      window.removeEventListener("online", on);
+      window.removeEventListener("offline", off);
+    };
+  }, []);
+  return online;
 }

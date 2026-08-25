@@ -6,3 +6,8 @@ backend/data/*.db-wal
 .DS_Store
 *.log
 backend/data/*.env
+mobile_backup/
+mobile_pre_adeeb_merge/
+.env
+backend/.env
+mobile_pre_adeeb_merge/
