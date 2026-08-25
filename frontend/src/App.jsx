@@ -88,6 +88,7 @@ function LiveTape() {
 
 export default function App() {
   const [tab, setTab] = useState('dashboard');
+  const [focusIncidentId, setFocusIncidentId] = useState(null);
   const up = useConnection();
   const { items } = useToasts();
   const [clock, setClock] = useState('');
@@ -95,6 +96,11 @@ export default function App() {
     const t = setInterval(() => setClock(new Date().toTimeString().slice(0, 8)), 1000);
     return () => clearInterval(t);
   }, []);
+
+  // Jump to the Incidents screen with a specific incident pre-selected —
+  // used by the Alarms table so an operator can go straight from "this alarm
+  // fired" to "here's the incident it created" in one click.
+  const openIncident = (id) => { setFocusIncidentId(id); setTab('incidents'); };
 
   const active = NAV.find((n) => n[0] === tab);
   const Screen = active[3];
@@ -131,7 +137,7 @@ export default function App() {
 
         <div className="content">
           <ScreenBoundary key={tab}>
-            <Screen go={setTab} />
+            <Screen go={setTab} openIncident={openIncident} focusIncidentId={tab === 'incidents' ? focusIncidentId : null} clearFocus={() => setFocusIncidentId(null)} />
           </ScreenBoundary>
         </div>
       </div>

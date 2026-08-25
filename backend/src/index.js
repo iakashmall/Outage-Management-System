@@ -10,6 +10,7 @@ import { bus, initBus } from './domain/bus.js';
 import { connectRedis } from './infra/redis.js';
 import { startSimulator } from './realtime/simulator.js';
 import { startScadaConsumer } from './realtime/scada.js';
+import { startRestorationPublisher } from './realtime/restoration.js';
 
 const PORT = process.env.PORT || 4000;
 
@@ -18,6 +19,7 @@ const PORT = process.env.PORT || 4000;
  await connectRedis(); // non-fatal if unreachable — see infra/redis.js
  await initBus();       // memory driver by default; EVENT_BUS_DRIVER=kafka for the real broker
  startScadaConsumer();  // Phase 2: auto-detect outages from SCADA fault events
+ startRestorationPublisher(); // Phase 2: publish restoration commands back to the DMS
 
 const app = express();
 app.use(cors());

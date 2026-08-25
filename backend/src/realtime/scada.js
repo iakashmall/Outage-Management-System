@@ -127,6 +127,7 @@ export async function handleScadaEvent(evt) {
       // instead of opening a new one.
       await repo.addIncidentEvent(recent.incidentId, 'SCADA', 'field',
         `Correlated SCADA ${evt.condition} on ${evt.tag || key} (deduplicated)`);
+      if (evt.id) await repo.updateAlarm(evt.id, { incident_id: recent.incidentId }).catch(() => {});
       recentByAsset.set(key, { incidentId: recent.incidentId, ts: now });
       return { deduplicated: true, incidentId: recent.incidentId };
     }
@@ -139,6 +140,7 @@ export async function handleScadaEvent(evt) {
         const inc = open[0];
         await repo.addIncidentEvent(inc.id, 'SCADA', 'field',
           `Correlated SCADA ${evt.condition} on ${evt.tag || key} (deduplicated)`);
+        if (evt.id) await repo.updateAlarm(evt.id, { incident_id: inc.id }).catch(() => {});
         recentByAsset.set(key, { incidentId: inc.id, ts: now });
         return { deduplicated: true, incidentId: inc.id };
       }
@@ -172,6 +174,7 @@ export async function handleScadaEvent(evt) {
     await repo.addIncidentEvent(id, 'SCADA', 'created',
       `Auto-detected from SCADA ${evt.condition} on ${evt.tag || key} — ${severity} severity, ~${customers} customers`);
     await repo.audit('SCADA', 'incident.autodetect', id);
+    if (evt.id) await repo.updateAlarm(evt.id, { incident_id: id }).catch(() => {});
 
     recentByAsset.set(key, { incidentId: id, ts: now });
     bus.publish(TOPICS.INCIDENT_CREATED, inc);

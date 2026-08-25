@@ -1,13 +1,16 @@
 // Boots the real Express app in-process (supertest-free), exercises the API
 // against the real SQLite DB, prints results, and exits. Run: node src/selftest.js
 import 'dotenv/config'; // loads .env into process.env
+process.env.PORT = process.env.PORT || '4100'; // so the restoration publisher's mock-DMS URL matches this test server
 import express from 'express';
 import { migrate } from './infra/db.js';
 import { seed } from './infra/seed.js';
 import { api } from './routes/api.js';
+import { repo } from './infra/repo.js';
 import { initBus } from './domain/bus.js';
 import { connectRedis, isRedisConnected } from './infra/redis.js';
 import { handleScadaEvent, _resetDedupState } from './realtime/scada.js';
+import { publishRestoration, _resetPublishedState } from './realtime/restoration.js';
 
 await migrate();
 await seed({ force: true });
@@ -91,6 +94,31 @@ const server = app.listen(4100, async () => {
   const r4 = await handleScadaEvent({ tag: 'RK01.SE02.LOAD', condition: 'MINOR', customers: 50 });
   const after4 = (await j('GET', '/incidents')).body.length;
   check('SCADA MINOR does not open an outage', r4 === null && after4 === before4);
+
+  // 5) The originating alarm row gets linked to the incident it triggered (P2.5 —
+  //    this is what lets the control-room Alarms table show "this alarm → that incident")
+  _resetDedupState();
+  const scadaAlarm = { id: 'ALM-linktest', tag: 'MAYA.FDR2.CB1.TRIP', condition: 'CRITICAL', limit_val: 'TRIP', priority: 1, message: 'test', ts: new Date().toISOString(), ack: 0 };
+  await repo.createAlarm(scadaAlarm);
+  const r5 = await handleScadaEvent({ ...scadaAlarm, customers: 700 });
+  const linkedAlarm = (await j('GET', '/alarms')).body.find(a => a.id === 'ALM-linktest');
+  check('alarm row linked to the incident it auto-created (P2.5)', !!r5 && linkedAlarm && linkedAlarm.incident_id === r5.incidentId, linkedAlarm && linkedAlarm.incident_id);
+
+  // ---- Phase 2 — restoration command publisher (INT-002) ----
+  _resetPublishedState();
+  const resolvable = await j('POST', '/incidents', { zone: 'Restore Test', severity: 'high', cause: 'Test', feeder: 'FDR-RESTORE' });
+  const rid = resolvable.body.id;
+  // walk the incident through the lifecycle to a resolvable state, then resolve it
+  await j('PATCH', `/incidents/${rid}/status`, { status: 'dispatched' });
+  await j('PATCH', `/incidents/${rid}/status`, { status: 'in_progress' });
+  await j('PATCH', `/incidents/${rid}/status`, { status: 'pending' });
+  const resolvedInc = (await j('PATCH', `/incidents/${rid}/status`, { status: 'resolved' })).body;
+
+  const pub1 = await publishRestoration(resolvedInc);
+  check('restoration command published to DMS on resolve (INT-002)', pub1.skipped === false && pub1.response?.accepted === true, JSON.stringify(pub1.response));
+
+  const pub2 = await publishRestoration(resolvedInc);
+  check('restoration command is idempotent — no duplicate send', pub2.skipped === true);
 
   console.log('\n  OMS backend self-test\n  ' + '-'.repeat(40));
   results.forEach(([s, n, e]) => console.log(`  [${s}] ${n} ${e}`));

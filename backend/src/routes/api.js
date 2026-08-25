@@ -111,6 +111,25 @@ api.post('/alarms/:id/ack', async (req, res) => {
   res.json(a);
 });
 
+// ---------- mock DMS endpoint (Phase 2, INT-002) ----------
+// Stands in for the utility's real DMS REST interface so the restoration
+// publisher (realtime/restoration.js) is testable end-to-end without a real
+// SCADA/DMS connection — exactly like /scada/fault stands in for a live feed.
+// A real DMS integration would replace DMS_RESTORATION_URL in .env with the
+// utility's actual endpoint; this route then becomes dead code, kept only
+// for local dev/demo.
+const seenIdempotencyKeys = new Set();
+api.post('/dms/restore', async (req, res) => {
+  const { idempotencyKey, incidentId, feeder, action } = req.body || {};
+  if (!idempotencyKey || !incidentId) return res.status(400).json({ error: 'idempotencyKey and incidentId are required' });
+  if (seenIdempotencyKeys.has(idempotencyKey)) {
+    return res.json({ accepted: true, duplicate: true, message: 'already processed — idempotent no-op' });
+  }
+  seenIdempotencyKeys.add(idempotencyKey);
+  console.log(`[mock-dms] restoration command: ${action} on ${feeder || incidentId}`);
+  res.json({ accepted: true, duplicate: false, switchState: 'CLOSED', ts: new Date().toISOString() });
+});
+
 // ---------- SCADA fault injection (Phase 2) ----------
 // Lets an operator (or the demo) push a synthetic SCADA fault through the exact
 // same auto-detection path the live DNP3/IEC-61968 adapter will use in
