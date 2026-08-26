@@ -21,6 +21,13 @@ startScadaConsumer(); // subscribes to scada.alarm.raised — needed for the DNP
 
 const app = express();
 app.use(express.json());
+// The real app authenticates via Keycloak (see routes/auth.js's requireAuth/
+// requireRole, wired in index.js). This test harness builds its own bare
+// app and doesn't run a real Keycloak server, so it injects a trusted
+// system_admin identity directly — the same shape requireAuth would attach
+// to req.user after a real token verifies, letting the role-gated routes
+// (assign, status, audit) be exercised without standing up Keycloak.
+app.use((req, res, next) => { req.user = { username: 'test-harness', roles: ['system_admin', 'oms_operator'] }; next(); });
 app.use('/api', api);
 
 const server = app.listen(4100, async () => {

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { repo } from '../infra/repo.js';
+import { requireRole } from './auth.js';
 import { bus, TOPICS } from '../domain/bus.js';
 import { canTransition, nextStates, LABELS } from '../domain/lifecycle.js';
 import { computeIndices } from '../domain/indices.js';
@@ -48,7 +49,7 @@ api.post('/incidents', async (req, res) => {
   res.status(201).json(inc);
 });
 
-api.patch('/incidents/:id/status', async (req, res) => {
+api.patch('/incidents/:id/status', requireRole('oms_operator', 'system_admin'), async (req, res) => {
   const inc = await repo.incident(req.params.id);
   if (!inc) return res.status(404).json({ error: 'not found' });
   const to = req.body?.status;
@@ -65,7 +66,7 @@ api.patch('/incidents/:id/status', async (req, res) => {
 });
 
 // ---------- dispatch ----------
-api.post('/incidents/:id/assign', async (req, res) => {
+api.post('/incidents/:id/assign', requireRole('oms_operator', 'system_admin'), async (req, res) => {
   const inc = await repo.incident(req.params.id);
   const crew = await repo.crew(req.body?.crewId);
   if (!inc || !crew) return res.status(404).json({ error: 'incident or crew not found' });
@@ -314,6 +315,30 @@ api.get('/mobile/crews/:id', async (req, res) => {
 });
 
 api.get('/mobile/jobs/:id/history', async (req, res) => res.json(await repo.jobUpdates(req.params.id)));
+// Upload a photo for a job (base64 data URL in body.dataUrl)
+api.post('/mobile/jobs/:id/photos', async (req, res) => {
+  const job = await repo.job(req.params.id);
+  if (!job) return res.status(404).json({ error: 'not found' });
+  const { dataUrl, lat, lon, note } = req.body || {};
+  if (!dataUrl || typeof dataUrl !== 'string') {
+    return res.status(400).json({ error: 'dataUrl required' });
+  }
+  const photo = await repo.addJobPhoto(req.params.id, dataUrl, lat, lon, note);
+  const { data_url, ...meta } = photo;
+  res.status(201).json(meta);
+});
+
+// List photo metadata for a job
+api.get('/mobile/jobs/:id/photos', async (req, res) => {
+  res.json(await repo.jobPhotos(req.params.id));
+});
+
+// Fetch one full photo (data URL) by id
+api.get('/mobile/photos/:photoId', async (req, res) => {
+  const row = await repo.jobPhotoById(req.params.photoId);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  res.json(row);
+});
 
 api.patch('/mobile/jobs/:id/status', async (req, res) => {
   const job = await repo.job(req.params.id);
@@ -339,7 +364,7 @@ api.patch('/mobile/jobs/:id/status', async (req, res) => {
 });
 
 // ---------- admin ----------
-api.get('/audit', async (req, res) => res.json(await repo.auditLog()));
+api.get('/audit', requireRole('system_admin'), async (req, res) => res.json(await repo.auditLog()));
 
 async function pushIndices() {
   await cacheDel('indicators');

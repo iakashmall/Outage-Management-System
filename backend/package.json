@@ -14,8 +14,11 @@
     "cors": "^2.8.5",
     "dotenv": "^17.4.2",
     "express": "^4.19.2",
-    "kafkajs": "2.2.4  ",
+    "jsonwebtoken": "^9.0.3",
+    "jwks-rsa": "^4.1.0",
+    "kafkajs": "^2.2.4",
     "nanoid": "^5.0.7",
+    "nodemailer": "^9.0.5",
     "pg-promise": "^11",
     "redis": "^6.2.1",
     "socket.io": "^4.7.5"
