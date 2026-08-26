@@ -134,6 +134,7 @@ function IncidentDrawer({ inc, onClose, onChange }) {
               </li>
             ))}
           </ul>
+          <MessagePanel incidentId={inc.id} />
         </div>
       </aside>
     </>
@@ -172,5 +173,49 @@ function NewIncident({ onClose, onCreated }) {
         </div>
       </aside>
     </>
+  );
+}
+
+function MessagePanel({ incidentId }) {
+  const [msgs, setMsgs] = useState([]);
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = () => api.messages(incidentId).then(setMsgs).catch(() => setMsgs([]));
+  useEffect(() => { load(); }, [incidentId]); // eslint-disable-line
+
+  const send = async () => {
+    if (!text.trim() || busy) return;
+    setBusy(true);
+    try { await api.postMessage(incidentId, text.trim()); setText(''); await load(); }
+    catch { toast('Could not send message'); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ margin: '20px 0 10px' }}>
+      <div className="eyebrow">Crew ↔ dispatcher messages</div>
+      <div style={{ maxHeight: 220, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8, margin: '10px 0' }}>
+        {msgs.length === 0 && <div style={{ fontSize: 13, opacity: 0.6 }}>No messages yet.</div>}
+        {msgs.map((m) => (
+          <div key={m.id} style={{ background: '#f2f5f9', borderRadius: 8, padding: '8px 10px' }}>
+            <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 2 }}>
+              {m.sender} · {m.sender_role} · {hhmm(m.ts)}
+            </div>
+            <div style={{ fontSize: 14 }}>{m.body}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: 'flex', gap: 6 }}>
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && send()}
+          placeholder="Message the crew…"
+          style={{ flex: 1, padding: '8px 10px', borderRadius: 8, border: '1px solid #ccc' }}
+        />
+        <button onClick={send} disabled={busy} style={{ padding: '8px 14px', borderRadius: 8, border: 0, background: '#12325a', color: '#fff', cursor: 'pointer' }}>Send</button>
+      </div>
+    </div>
   );
 }
