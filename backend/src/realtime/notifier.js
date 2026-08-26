@@ -2,6 +2,7 @@ import nodemailer from 'nodemailer';
 import { nanoid } from 'nanoid';
 import { bus, TOPICS } from '../domain/bus.js';
 import { db } from '../infra/db.js';
+import { repo } from '../infra/repo.js';
 
 const transport = nodemailer.createTransport({
   host: process.env.BREVO_SMTP_HOST,
@@ -30,6 +31,11 @@ async function record(incidentId, channel, recipient, subject, body, status, err
 }
 
 async function sendEmail(incidentId, subject, body) {
+  if (await repo.isOptedOut(TEST_TO, 'email')) {
+    console.log(`[notifier] EMAIL skipped (opted out) -> ${TEST_TO}`);
+    await record(incidentId, 'email', TEST_TO, subject, body, 'skipped-optout', null);
+    return;
+  }
   try {
     await transport.sendMail({ from: FROM, to: TEST_TO, subject, text: body });
     console.log(`[notifier] EMAIL sent -> ${TEST_TO}: ${subject}`);
@@ -41,6 +47,11 @@ async function sendEmail(incidentId, subject, body) {
 }
 
 async function sendSms(incidentId, body) {
+  if (await repo.isOptedOut(TEST_TO, 'sms')) {
+    console.log(`[notifier] SMS skipped (opted out) -> ${TEST_TO}`);
+    await record(incidentId, 'sms', TEST_TO, null, body, 'skipped-optout', null);
+    return;
+  }
   console.log(`[notifier] SMS (console only) -> customer: ${body}`);
   await record(incidentId, 'sms', TEST_TO, null, body, 'logged', null);
 }
@@ -70,6 +81,15 @@ export function startNotifier() {
       await sendEmail(inc.id, subject, body);
       await sendSms(inc.id, body);
     }
+  });
+
+  bus.subscribe(TOPICS.ERT_CHANGED, async (inc) => {
+    const { where } = describe(inc);
+    const subject = `Updated restoration time for ${where}`;
+    const body = `The estimated restoration time for the outage in ${where} has changed to ` +
+      `${new Date(inc.ert).toLocaleString()}. Incident ref: ${inc.id}.`;
+    await sendEmail(inc.id, subject, body);
+    await sendSms(inc.id, body);
   });
 
   console.log('[notifier] started - listening for incident events');
