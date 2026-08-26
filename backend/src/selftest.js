@@ -9,13 +9,15 @@ import { api } from './routes/api.js';
 import { repo } from './infra/repo.js';
 import { initBus } from './domain/bus.js';
 import { connectRedis, isRedisConnected } from './infra/redis.js';
-import { handleScadaEvent, _resetDedupState } from './realtime/scada.js';
+import { handleScadaEvent, startScadaConsumer, _resetDedupState } from './realtime/scada.js';
 import { publishRestoration, _resetPublishedState } from './realtime/restoration.js';
+import { Dnp3Master, Dnp3TestOutstation, _internal as dnp3Internal } from './realtime/dnp3.js';
 
 await migrate();
 await seed({ force: true });
 await connectRedis();
 await initBus();
+startScadaConsumer(); // subscribes to scada.alarm.raised — needed for the DNP3 adapter's bus-integration test below
 
 const app = express();
 app.use(express.json());
@@ -119,6 +121,42 @@ const server = app.listen(4100, async () => {
 
   const pub2 = await publishRestoration(resolvedInc);
   check('restoration command is idempotent — no duplicate send', pub2.skipped === true);
+
+  // ---- Phase 2 — P2.2 DNP3-over-IP protocol adapter (INT-003) ----
+  // Link layer correctness, independent of any network/hardware:
+  const crcOk = dnp3Internal.crc16dnp(Buffer.from('123456789', 'ascii')) === 0xea82;
+  check('DNP3 CRC-16/DNP matches the standard test vector', crcOk);
+
+  const sampleUserData = Buffer.from([0xC0, 0x81, 0x00, 0x00, 0x02, 0x01, 0x17, 0x01, 0x07, 0x81]);
+  const builtFrame = dnp3Internal.buildFrame({ control: 0x44, dest: 1, src: 1024, userData: sampleUserData });
+  const parsedFrame = dnp3Internal.parseFrame(builtFrame);
+  check('DNP3 link-layer frame round-trips correctly', !!parsedFrame && Buffer.compare(parsedFrame.userData, sampleUserData) === 0);
+
+  const corruptedFrame = Buffer.from(builtFrame); corruptedFrame[15] ^= 0xFF;
+  check('DNP3 corrupted frame is rejected by CRC check', dnp3Internal.parseFrame(corruptedFrame) === null);
+
+  // End-to-end: real TCP socket, real framing, simulated outstation reports a
+  // trip, master decodes it, and it flows through the SAME auto-detection
+  // pipeline as every other alarm source (P2.1/P2.3) — proving the adapter's
+  // integration seam, not just its byte-level correctness.
+  _resetDedupState();
+  const outstation = new Dnp3TestOutstation({ port: 20101 });
+  await outstation.listen();
+  const master = new Dnp3Master({
+    host: '127.0.0.1', port: 20101, substation: 'DNP3TEST', feeder: 'FDR1',
+    pointMap: { 7: { tag: 'DNP3TEST.FDR1.CB1.TRIP', description: 'Test breaker 1' } },
+  });
+  const beforeDnp3 = (await j('GET', '/incidents')).body.length;
+  await master.connect();
+  outstation.triggerTrip(7);
+  master.requestBinaryInputEvents();
+  await new Promise((r) => setTimeout(r, 400)); // let the async bus→scada.js pipeline finish
+  const afterDnp3 = (await j('GET', '/incidents')).body.length;
+  const dnp3Incidents = (await j('GET', '/incidents')).body.filter(i => i.cause && i.cause.includes('DNP3TEST'));
+  check('DNP3 trip over real TCP auto-creates an incident via the existing pipeline (P2.2)',
+    afterDnp3 === beforeDnp3 + 1 && dnp3Incidents.length === 1, dnp3Incidents[0] && dnp3Incidents[0].id);
+  master.close();
+  await outstation.close();
 
   console.log('\n  OMS backend self-test\n  ' + '-'.repeat(40));
   results.forEach(([s, n, e]) => console.log(`  [${s}] ${n} ${e}`));
