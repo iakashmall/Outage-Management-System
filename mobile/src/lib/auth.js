@@ -1,7 +1,9 @@
 import Keycloak from 'keycloak-js';
 
+// Same reasoning as frontend/src/lib/auth.js — this runs in the browser,
+// so "localhost" means the visitor's own machine, not the server's.
 export const keycloak = new Keycloak({
-  url: 'http://localhost:8080',
+  url: import.meta.env.VITE_KEYCLOAK_URL || 'http://localhost:8081',
   realm: 'oms-upcl',
   clientId: 'oms-mobile',
 });
