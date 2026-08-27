@@ -31,8 +31,8 @@
   "registrationEmailAsUsername" : false,
   "rememberMe" : false,
   "verifyEmail" : false,
-  "loginWithEmailAllowed" : true,
-  "duplicateEmailsAllowed" : false,
+  "loginWithEmailAllowed" : false,
+  "duplicateEmailsAllowed" : true,
   "resetPasswordAllowed" : false,
   "editUsernameAllowed" : false,
   "bruteForceProtected" : false,
@@ -449,7 +449,7 @@
     "emailVerified" : false,
     "createdTimestamp" : 1787211283362,
     "enabled" : true,
-    "totp" : false,
+    "totp" : true,
     "credentials" : [ {
       "id" : "b4ba8f02-ecf2-4aff-a193-df7b8c54f370",
       "type" : "password",
@@ -457,6 +457,13 @@
       "createdDate" : 1787212089424,
       "secretData" : "{\"value\":\"fRo/YI7r5nVskmtzEDGdYTsFxb1ZoI+5pNxLmN/AfObxk8gwRLxoKXsVD2KC62BLbYRjO6WJu1Vx5N7hrLK8rw==\",\"salt\":\"39gJ0Adzm/MW7d9sDZjnVw==\",\"additionalParameters\":{}}",
       "credentialData" : "{\"hashIterations\":210000,\"algorithm\":\"pbkdf2-sha512\",\"additionalParameters\":{}}"
+    }, {
+      "id" : "7fd91dec-c62f-4c0b-9e91-3ce8ce29319f",
+      "type" : "otp",
+      "userLabel" : "Akash's iPhone",
+      "createdDate" : 1787814500859,
+      "secretData" : "{\"value\":\"vfc3yz5HnSzxRQ47E1VF\"}",
+      "credentialData" : "{\"subType\":\"totp\",\"digits\":6,\"counter\":0,\"period\":30,\"algorithm\":\"HmacSHA1\"}"
     } ],
     "disableableCredentialTypes" : [ ],
     "requiredActions" : [ ],
@@ -586,7 +593,9 @@
     "publicClient" : true,
     "frontchannelLogout" : false,
     "protocol" : "openid-connect",
-    "attributes" : { },
+    "attributes" : {
+      "post.logout.redirect.uris" : "+"
+    },
     "authenticationFlowBindingOverrides" : { },
     "fullScopeAllowed" : false,
     "nodeReRegistrationTimeout" : 0,
@@ -612,7 +621,9 @@
     "publicClient" : false,
     "frontchannelLogout" : false,
     "protocol" : "openid-connect",
-    "attributes" : { },
+    "attributes" : {
+      "post.logout.redirect.uris" : "+"
+    },
     "authenticationFlowBindingOverrides" : { },
     "fullScopeAllowed" : false,
     "nodeReRegistrationTimeout" : 0,
@@ -644,6 +655,7 @@
     "protocol" : "openid-connect",
     "attributes" : {
       "oidc.ciba.grant.enabled" : "false",
+      "post.logout.redirect.uris" : "+",
       "oauth2.device.authorization.grant.enabled" : "false",
       "backchannel.logout.session.required" : "true",
       "backchannel.logout.revoke.offline.tokens" : "false"
@@ -673,7 +685,9 @@
     "publicClient" : false,
     "frontchannelLogout" : false,
     "protocol" : "openid-connect",
-    "attributes" : { },
+    "attributes" : {
+      "post.logout.redirect.uris" : "+"
+    },
     "authenticationFlowBindingOverrides" : { },
     "fullScopeAllowed" : false,
     "nodeReRegistrationTimeout" : 0,
@@ -978,6 +992,7 @@
       "config" : {
         "introspection.token.claim" : "true",
         "multivalued" : "true",
+        "userinfo.token.claim" : "true",
         "user.attribute" : "foo",
         "id.token.claim" : "true",
         "access.token.claim" : "true",
@@ -1103,7 +1118,8 @@
       "config" : {
         "id.token.claim" : "true",
         "introspection.token.claim" : "true",
-        "access.token.claim" : "true"
+        "access.token.claim" : "true",
+        "userinfo.token.claim" : "true"
       }
     } ]
   }, {
@@ -1230,7 +1246,20 @@
     "xXSSProtection" : "1; mode=block",
     "strictTransportSecurity" : "max-age=31536000; includeSubDomains"
   },
-  "smtpServer" : { },
+  "smtpServer" : {
+    "replyToDisplayName" : "",
+    "starttls" : "true",
+    "auth" : "true",
+    "envelopeFrom" : "",
+    "ssl" : "false",
+    "password" : "SET_BY_USER",
+    "port" : "587",
+    "replyTo" : "",
+    "host" : "smtp-relay.brevo.com",
+    "from" : "akashmall160202@gmail.com",
+    "fromDisplayName" : "OMS UPCL",
+    "user" : "b621d8001@smtp-brevo.com"
+  },
   "eventsEnabled" : false,
   "eventsListeners" : [ "jboss-logging" ],
   "enabledEventTypes" : [ ],
@@ -1255,7 +1284,7 @@
       "subType" : "authenticated",
       "subComponents" : { },
       "config" : {
-        "allowed-protocol-mapper-types" : [ "saml-user-property-mapper", "oidc-address-mapper", "oidc-sha256-pairwise-sub-mapper", "saml-user-attribute-mapper", "oidc-usermodel-property-mapper", "saml-role-list-mapper", "oidc-usermodel-attribute-mapper", "oidc-full-name-mapper" ]
+        "allowed-protocol-mapper-types" : [ "oidc-usermodel-property-mapper", "saml-role-list-mapper", "oidc-sha256-pairwise-sub-mapper", "saml-user-property-mapper", "oidc-address-mapper", "oidc-full-name-mapper", "saml-user-attribute-mapper", "oidc-usermodel-attribute-mapper" ]
       }
     }, {
       "id" : "5f307b47-ee90-422a-a35f-e506e013a2ca",
@@ -1264,7 +1293,7 @@
       "subType" : "anonymous",
       "subComponents" : { },
       "config" : {
-        "allowed-protocol-mapper-types" : [ "oidc-sha256-pairwise-sub-mapper", "saml-user-attribute-mapper", "oidc-full-name-mapper", "saml-user-property-mapper", "oidc-address-mapper", "oidc-usermodel-attribute-mapper", "oidc-usermodel-property-mapper", "saml-role-list-mapper" ]
+        "allowed-protocol-mapper-types" : [ "saml-user-attribute-mapper", "oidc-usermodel-attribute-mapper", "oidc-sha256-pairwise-sub-mapper", "oidc-usermodel-property-mapper", "oidc-full-name-mapper", "oidc-address-mapper", "saml-user-property-mapper", "saml-role-list-mapper" ]
       }
     }, {
       "id" : "dcb98ef9-6916-4578-9e7e-4d9d07530cef",
@@ -1399,6 +1428,94 @@
       "requirement" : "REQUIRED",
       "priority" : 20,
       "autheticatorFlow" : false,
+      "userSetupAllowed" : false
+    } ]
+  }, {
+    "id" : "29e98ba3-2746-42a6-a409-64b39c7132e7",
+    "alias" : "Browser - Role MFA",
+    "description" : "browser based authentication",
+    "providerId" : "basic-flow",
+    "topLevel" : true,
+    "builtIn" : false,
+    "authenticationExecutions" : [ {
+      "authenticator" : "auth-cookie",
+      "authenticatorFlow" : false,
+      "requirement" : "ALTERNATIVE",
+      "priority" : 10,
+      "autheticatorFlow" : false,
+      "userSetupAllowed" : false
+    }, {
+      "authenticator" : "auth-spnego",
+      "authenticatorFlow" : false,
+      "requirement" : "DISABLED",
+      "priority" : 20,
+      "autheticatorFlow" : false,
+      "userSetupAllowed" : false
+    }, {
+      "authenticator" : "identity-provider-redirector",
+      "authenticatorFlow" : false,
+      "requirement" : "ALTERNATIVE",
+      "priority" : 25,
+      "autheticatorFlow" : false,
+      "userSetupAllowed" : false
+    }, {
+      "authenticatorFlow" : true,
+      "requirement" : "ALTERNATIVE",
+      "priority" : 30,
+      "autheticatorFlow" : true,
+      "flowAlias" : "Browser - Role MFA forms",
+      "userSetupAllowed" : false
+    } ]
+  }, {
+    "id" : "30d4fbce-ecf0-41a3-b6a3-89428a8fcd8a",
+    "alias" : "Browser - Role MFA Browser - Conditional OTP",
+    "description" : "Flow to determine if the OTP is required for the authentication",
+    "providerId" : "basic-flow",
+    "topLevel" : false,
+    "builtIn" : false,
+    "authenticationExecutions" : [ {
+      "authenticator" : "conditional-user-configured",
+      "authenticatorFlow" : false,
+      "requirement" : "DISABLED",
+      "priority" : 10,
+      "autheticatorFlow" : false,
+      "userSetupAllowed" : false
+    }, {
+      "authenticator" : "auth-otp-form",
+      "authenticatorFlow" : false,
+      "requirement" : "REQUIRED",
+      "priority" : 20,
+      "autheticatorFlow" : false,
+      "userSetupAllowed" : false
+    }, {
+      "authenticatorConfig" : "require-mfa-for-oms-operator",
+      "authenticator" : "conditional-user-role",
+      "authenticatorFlow" : false,
+      "requirement" : "REQUIRED",
+      "priority" : 21,
+      "autheticatorFlow" : false,
+      "userSetupAllowed" : false
+    } ]
+  }, {
+    "id" : "f264d9a4-7029-4c6d-a007-328e0b16d617",
+    "alias" : "Browser - Role MFA forms",
+    "description" : "Username, password, otp and other auth forms.",
+    "providerId" : "basic-flow",
+    "topLevel" : false,
+    "builtIn" : false,
+    "authenticationExecutions" : [ {
+      "authenticator" : "auth-username-password-form",
+      "authenticatorFlow" : false,
+      "requirement" : "REQUIRED",
+      "priority" : 10,
+      "autheticatorFlow" : false,
+      "userSetupAllowed" : false
+    }, {
+      "authenticatorFlow" : true,
+      "requirement" : "CONDITIONAL",
+      "priority" : 20,
+      "autheticatorFlow" : true,
+      "flowAlias" : "Browser - Role MFA Browser - Conditional OTP",
       "userSetupAllowed" : false
     } ]
   }, {
@@ -1806,6 +1923,12 @@
       "require.password.update.after.registration" : "false"
     }
   }, {
+    "id" : "929ee4c8-dbe9-4273-885a-0c9b64b8bc15",
+    "alias" : "require-mfa-for-oms-operator",
+    "config" : {
+      "condUserRole" : "oms_operator"
+    }
+  }, {
     "id" : "6ca104a4-0ad9-45e9-81db-62a843fd0482",
     "alias" : "review profile config",
     "config" : {
@@ -1901,7 +2024,7 @@
     "priority" : 1000,
     "config" : { }
   } ],
-  "browserFlow" : "browser",
+  "browserFlow" : "Browser - Role MFA",
   "registrationFlow" : "registration",
   "directGrantFlow" : "direct grant",
   "resetCredentialsFlow" : "reset credentials",
@@ -1913,8 +2036,12 @@
     "cibaExpiresIn" : "120",
     "cibaAuthRequestedUserHint" : "login_hint",
     "oauth2DeviceCodeLifespan" : "600",
+    "clientOfflineSessionMaxLifespan" : "0",
     "oauth2DevicePollingInterval" : "5",
+    "clientSessionIdleTimeout" : "0",
     "parRequestUriLifespan" : "60",
+    "clientSessionMaxLifespan" : "0",
+    "clientOfflineSessionIdleTimeout" : "0",
     "cibaInterval" : "5",
     "realmReusableOtpCode" : "false"
   },
