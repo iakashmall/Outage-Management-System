@@ -157,4 +157,36 @@ export const repo = {
   jobPhotos: (jobId) =>
     db.any('SELECT id, job_id, lat, lon, note, ts FROM job_photos WHERE job_id=$1 ORDER BY ts DESC', [jobId]),
   jobPhotoById: (id) => db.oneOrNone('SELECT * FROM job_photos WHERE id=$1', [id]),
+
+    addMessage: async (incidentId, sender, senderRole, body) => {
+    const m = {
+      id: 'MSG' + nanoid(8),
+      incident_id: incidentId,
+      sender,
+      sender_role: senderRole ?? null,
+      body,
+      ts: new Date().toISOString(),
+    };
+    await db.none(
+      `INSERT INTO messages (id,incident_id,sender,sender_role,body,ts)
+       VALUES ($/id/,$/incident_id/,$/sender/,$/sender_role/,$/body/,$/ts/)`,
+      m
+    );
+    return m;
+  },
+  messages: (incidentId) =>
+    db.any('SELECT * FROM messages WHERE incident_id=$1 ORDER BY ts ASC', [incidentId]),
+
+    setOptOut: async (recipient, channel) => {
+    await db.none(
+      `INSERT INTO opt_outs (id, recipient, channel, ts) VALUES ($/id/, $/recipient/, $/channel/, $/ts/)`,
+      { id: 'OPT' + nanoid(8), recipient, channel, ts: new Date().toISOString() }
+    );
+  },
+  clearOptOut: (recipient, channel) =>
+    db.none('DELETE FROM opt_outs WHERE recipient=$1 AND channel=$2', [recipient, channel]),
+  isOptedOut: async (recipient, channel) => {
+    const row = await db.oneOrNone('SELECT 1 FROM opt_outs WHERE recipient=$1 AND channel=$2', [recipient, channel]);
+    return !!row;
+  },
 };

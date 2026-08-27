@@ -29,6 +29,32 @@ api.get('/incidents/:id', async (req, res) => {
   if (!inc) return res.status(404).json({ error: 'not found' });
   res.json({ ...inc, events: await repo.incidentEvents(inc.id), nextStates: nextStates(inc.status), stateLabels: LABELS });
 });
+api.get('/incidents/:id', async (req, res) => {
+  const inc = await repo.incident(req.params.id);
+  if (!inc) return res.status(404).json({ error: 'not found' });
+  res.json({ ...inc, events: await repo.incidentEvents(inc.id), nextStates: nextStates(inc.status), stateLabels: LABELS });
+});
+
+// List messages for an incident
+api.get('/incidents/:id/messages', async (req, res) => {
+  res.json(await repo.messages(req.params.id));
+});
+
+// Post a message to an incident (crew <-> dispatcher thread)
+api.post('/incidents/:id/messages', async (req, res) => {
+  const inc = await repo.incident(req.params.id);
+  if (!inc) return res.status(404).json({ error: 'not found' });
+  const { body } = req.body || {};
+  if (!body || !String(body).trim()) {
+    return res.status(400).json({ error: 'body required' });
+  }
+  const sender = req.user?.username || 'unknown';
+  const KNOWN = ['system_admin','oms_operator','dms_operator','scada_operator','call_centre_attendant','field_crew_coordinator','operations_engineer','configuration_engineer'];
+  const role = (req.user?.roles || []).find(r => KNOWN.includes(r)) || 'user';
+  const msg = await repo.addMessage(req.params.id, sender, role, String(body).trim());
+  bus.publish(TOPICS.MESSAGE_POSTED, msg);
+  res.status(201).json(msg);
+});
 
 api.post('/incidents', async (req, res) => {
   const b = req.body || {};
@@ -63,6 +89,43 @@ api.patch('/incidents/:id/status', requireRole('oms_operator', 'system_admin'), 
   bus.publish(TOPICS.INCIDENT_UPDATED, updated);
   await pushIndices();
   res.json(updated);
+});
+
+// Set/update the estimated restoration time; notifies customers if it moves by >30 min
+api.patch('/incidents/:id/ert', requireRole('oms_operator', 'system_admin'), async (req, res) => {
+  const inc = await repo.incident(req.params.id);
+  if (!inc) return res.status(404).json({ error: 'not found' });
+  const newErt = req.body?.ert;
+  if (!newErt) return res.status(400).json({ error: 'ert required (ISO datetime)' });
+
+  const oldErt = inc.ert;
+  await repo.updateIncident(inc.id, { ert: newErt });
+  const updated = await repo.incident(inc.id);
+
+  if (oldErt) {
+    const diffMin = Math.abs(new Date(newErt) - new Date(oldErt)) / 60000;
+    if (diffMin > 30) {
+      bus.publish(TOPICS.ERT_CHANGED, { ...updated, previousErt: oldErt });
+    }
+  }
+  await repo.addIncidentEvent(inc.id, actor(req), 'ert', `Estimated restoration updated to ${new Date(newErt).toLocaleString()}`);
+  await repo.audit(actor(req), 'incident.ert', inc.id);
+  bus.publish(TOPICS.INCIDENT_UPDATED, updated);
+  res.json(updated);
+});
+// Customer opt-out (per channel: 'email' or 'sms')
+api.post('/notify/opt-out', async (req, res) => {
+  const { recipient, channel } = req.body || {};
+  if (!recipient || !channel) return res.status(400).json({ error: 'recipient and channel required' });
+  await repo.setOptOut(recipient, channel);
+  res.status(201).json({ recipient, channel, optedOut: true });
+});
+
+api.post('/notify/opt-in', async (req, res) => {
+  const { recipient, channel } = req.body || {};
+  if (!recipient || !channel) return res.status(400).json({ error: 'recipient and channel required' });
+  await repo.clearOptOut(recipient, channel);
+  res.status(201).json({ recipient, channel, optedOut: false });
 });
 
 // ---------- dispatch ----------

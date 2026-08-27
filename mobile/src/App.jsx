@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import "./app.css";
 import { getCurrentCrew, getMyJobs, logout, updateJobStatus } from "./lib/api.js";
+import JobMessages from "./JobMessages.jsx";
 
 /* =========================================================
    DEMO DATA
@@ -96,6 +97,7 @@ function normalizeOmsJob(job) {
     eta: job.eta ?? "—",
     assignedCrewId: job.assignedCrewId ?? job.crewId ?? null,
     assignedDistance: job.assignedDistance ?? job.distance ?? "Nearest available",
+    incidentId: job.incidentId ?? job.incident_id ?? null,
   };
 }
 
@@ -591,6 +593,7 @@ function JobCard({ job, onUpdate }) {
             <span>Feeder</span>
             <strong>{job.feeder}</strong>
           </div>
+            <JobMessages incidentId={job.incidentId} />
         </div>
       )}
 

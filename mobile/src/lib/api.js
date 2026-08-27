@@ -67,3 +67,11 @@ export async function uploadJobPhoto(jobId, dataUrl, location = {}, note) {
     note: note ?? null,
   });
 }
+
+export async function getMessages(incidentId) {
+  return req('/incidents/' + incidentId + '/messages');
+}
+
+export async function postMessage(incidentId, body) {
+  return req('/incidents/' + incidentId + '/messages', 'POST', { body });
+}

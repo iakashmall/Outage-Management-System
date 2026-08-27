@@ -85,6 +85,16 @@ function IncidentDrawer({ inc, onClose, onChange }) {
     try { await api.assign(inc.id, crewId, 'Normal'); toast('Crew assigned'); onChange(); }
     catch (e) { toast(e.message, 'err'); } finally { setBusy(false); }
   };
+  const [ertInput, setErtInput] = useState('');
+  const doSetErt = async () => {
+    if (!ertInput) { toast('Pick a date/time first', 'err'); return; }
+    setBusy(true);
+    try {
+      await api.setErt(inc.id, new Date(ertInput).toISOString());
+      toast('Restoration estimate updated — customers notified if it moved significantly');
+      onChange();
+    } catch (e) { toast(e.message, 'err'); } finally { setBusy(false); }
+  };
 
   return (
     <>
@@ -106,6 +116,20 @@ function IncidentDrawer({ inc, onClose, onChange }) {
           <div className="kv-row"><span className="k">Source</span><span className="v mono">{inc.source}</span></div>
           <div className="kv-row"><span className="k">Opened</span><span className="v mono">{hhmm(inc.opened_at)} · {timeAgo(inc.opened_at)}</span></div>
           <div className="kv-row"><span className="k">SLA due</span><span className="v mono">{hhmm(inc.sla_due_at)}</span></div>
+
+          <div className="kv-row">
+            <span className="k">Est. restoration</span>
+            <span className="v mono">{inc.ert ? hhmm(inc.ert) : 'Not set'}</span>
+          </div>
+          <div className="kv-row" style={{ alignItems: 'center', gap: 8 }}>
+            <input
+              type="datetime-local"
+              value={ertInput}
+              onChange={(e) => setErtInput(e.target.value)}
+              style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid #ccc', fontSize: 13 }}
+            />
+            <button className="btn sm" disabled={busy} onClick={doSetErt}>Update ETA</button>
+          </div>
 
           <div style={{ margin: '18px 0 8px' }} className="eyebrow">Advance lifecycle</div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -142,6 +166,7 @@ function IncidentDrawer({ inc, onClose, onChange }) {
               </li>
             ))}
           </ul>
+          <MessagePanel incidentId={inc.id} />
         </div>
       </aside>
     </>
@@ -182,3 +207,46 @@ function NewIncident({ onClose, onCreated }) {
     </>
   );
 }  
+function MessagePanel({ incidentId }) {
+  const [msgs, setMsgs] = useState([]);
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = () => api.messages(incidentId).then(setMsgs).catch(() => setMsgs([]));
+  useEffect(() => { load(); }, [incidentId]); // eslint-disable-line
+
+  const send = async () => {
+    if (!text.trim() || busy) return;
+    setBusy(true);
+    try { await api.postMessage(incidentId, text.trim()); setText(''); await load(); }
+    catch { toast('Could not send message'); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ margin: '20px 0 10px' }}>
+      <div className="eyebrow">Crew ↔ dispatcher messages</div>
+      <div style={{ maxHeight: 220, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8, margin: '10px 0' }}>
+        {msgs.length === 0 && <div style={{ fontSize: 13, opacity: 0.6 }}>No messages yet.</div>}
+        {msgs.map((m) => (
+          <div key={m.id} style={{ background: '#f2f5f9', borderRadius: 8, padding: '8px 10px' }}>
+            <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 2 }}>
+              {m.sender} · {m.sender_role} · {hhmm(m.ts)}
+            </div>
+            <div style={{ fontSize: 14 }}>{m.body}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: 'flex', gap: 6 }}>
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && send()}
+          placeholder="Message the crew…"
+          style={{ flex: 1, padding: '8px 10px', borderRadius: 8, border: '1px solid #ccc' }}
+        />
+        <button onClick={send} disabled={busy} style={{ padding: '8px 14px', borderRadius: 8, border: 0, background: '#12325a', color: '#fff', cursor: 'pointer' }}>Send</button>
+      </div>
+    </div>
+  );
+}
