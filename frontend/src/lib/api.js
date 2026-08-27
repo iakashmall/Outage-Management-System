@@ -1,32 +1,39 @@
-import Keycloak from 'keycloak-js';
+import { io } from 'socket.io-client';
+import { authHeader } from './auth.js';
 
-// Configurable at build time (see .env.production / Vite's VITE_ prefix
-// convention). This URL runs in the VISITOR'S BROWSER, not on the server —
-// hardcoding "localhost" here means every visitor's browser tries to reach
-// Keycloak on their OWN machine, not the server's, which only ever worked
-// by accident on a laptop where the app and Keycloak run on the same box.
-// For any real deployment this must be the server's actual public address.
-export const keycloak = new Keycloak({
-  url: import.meta.env.VITE_KEYCLOAK_URL || 'http://localhost:8081',
-  realm: 'oms-upcl',
-  clientId: 'oms-web',
-});
-
-// Call once, before rendering the app. Resolves true once the user has a
-// valid session (redirecting to Keycloak's login page first if needed).
-export function initKeycloak() {
-  return keycloak.init({ onLoad: 'login-required', pkceMethod: 'S256' });
+const BASE = '/api';
+async function req(method, path, body) {
+  const r = await fetch(BASE + path, {
+    method,
+    headers: { 'content-type': 'application/json', ...authHeader() },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(data.error || r.statusText), { data, status: r.status });
+  return data;
 }
 
-// Attach this to every API call so the backend can verify who's asking.
-export function authHeader() {
-  return keycloak.token ? { Authorization: `Bearer ${keycloak.token}` } : {};
-}
-export function currentUser() {
-  const t = keycloak.tokenParsed || {};
-  return { username: t.preferred_username || 'user', roles: (t.realm_access && t.realm_access.roles) || [] };
-}
+export const api = {
+  incidents: () => req('GET', '/incidents'),
+  incident: (id) => req('GET', `/incidents/${id}`),
+  createIncident: (b) => req('POST', '/incidents', b),
+  setStatus: (id, status, note) => req('PATCH', `/incidents/${id}/status`, { status, note }),
+  assign: (id, crewId, priority) => req('POST', `/incidents/${id}/assign`, { crewId, priority }),
+  crews: () => req('GET', '/crews'),
+  nearestCrews: (incidentId) => req('GET', `/incidents/${incidentId}/nearest-crews`),
+  alarms: () => req('GET', '/alarms'),
+  ackAlarm: (id) => req('POST', `/alarms/${id}/ack`),
+  ackAll: () => req('POST', '/alarms/ack-all'),
+  calls: () => req('GET', '/calls'),
+  callToIncident: (id) => req('POST', `/calls/${id}/to-incident`),
+  indicators: () => req('GET', '/indicators'),
+  monthly: () => req('GET', '/analytics/monthly'),
+  audit: () => req('GET', '/audit'),
+  network: () => req('GET', '/network'),
+  complaints: () => req('GET', '/complaints'),
+  complaintTrace: (qid) => req('GET', `/complaints/${qid}/trace`),
+  simulateComplaint: () => req('POST', '/complaints/simulate'),
+};
 
-export function logout() {
-  keycloak.logout({ redirectUri: window.location.origin });
-}
+// singleton socket
+export const socket = io('/', { transports: ['websocket', 'polling'], autoConnect: true });
