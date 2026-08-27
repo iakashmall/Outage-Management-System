@@ -77,6 +77,16 @@ function IncidentDrawer({ inc, onClose, onChange }) {
     try { await api.assign(inc.id, crewId, 'Normal'); toast('Crew assigned'); onChange(); }
     catch (e) { toast(e.message, 'err'); } finally { setBusy(false); }
   };
+  const [ertInput, setErtInput] = useState('');
+  const doSetErt = async () => {
+    if (!ertInput) { toast('Pick a date/time first', 'err'); return; }
+    setBusy(true);
+    try {
+      await api.setErt(inc.id, new Date(ertInput).toISOString());
+      toast('Restoration estimate updated — customers notified if it moved significantly');
+      onChange();
+    } catch (e) { toast(e.message, 'err'); } finally { setBusy(false); }
+  };
 
   return (
     <>
@@ -98,6 +108,20 @@ function IncidentDrawer({ inc, onClose, onChange }) {
           <div className="kv-row"><span className="k">Source</span><span className="v mono">{inc.source}</span></div>
           <div className="kv-row"><span className="k">Opened</span><span className="v mono">{hhmm(inc.opened_at)} · {timeAgo(inc.opened_at)}</span></div>
           <div className="kv-row"><span className="k">SLA due</span><span className="v mono">{hhmm(inc.sla_due_at)}</span></div>
+
+          <div className="kv-row">
+            <span className="k">Est. restoration</span>
+            <span className="v mono">{inc.ert ? hhmm(inc.ert) : 'Not set'}</span>
+          </div>
+          <div className="kv-row" style={{ alignItems: 'center', gap: 8 }}>
+            <input
+              type="datetime-local"
+              value={ertInput}
+              onChange={(e) => setErtInput(e.target.value)}
+              style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid #ccc', fontSize: 13 }}
+            />
+            <button className="btn sm" disabled={busy} onClick={doSetErt}>Update ETA</button>
+          </div>
 
           <div style={{ margin: '18px 0 8px' }} className="eyebrow">Advance lifecycle</div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>

@@ -21,6 +21,7 @@ export const api = {
   assign: (id, crewId, priority) => req('POST', `/incidents/${id}/assign`, { crewId, priority }),
   messages: (id) => req('GET', `/incidents/${id}/messages`),
   postMessage: (id, body) => req('POST', `/incidents/${id}/messages`, { body }),
+  setErt: (id, ert) => req('PATCH', `/incidents/${id}/ert`, { ert }),
   crews: () => req('GET', '/crews'),
   nearestCrews: (incidentId) => req('GET', `/incidents/${incidentId}/nearest-crews`),
   alarms: () => req('GET', '/alarms'),
