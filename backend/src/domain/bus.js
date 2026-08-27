@@ -25,4 +25,6 @@ export const TOPICS = {
   CREW_UPDATED: 'crew.updated',
   JOB_UPDATED: 'crew.job.updated',
   INDICES_UPDATED: 'oms.indices.updated',
+  MESSAGE_POSTED: 'oms.message.posted',
+    ERT_CHANGED: 'oms.incident.ert_changed',
 };
