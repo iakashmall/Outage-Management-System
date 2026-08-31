@@ -1,0 +1,742 @@
+import { useEffect, useState, useCallback, Component } from 'react';
+import {
+  ActivityIndicator,
+  Modal,
+  Pressable,
+  SafeAreaView,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
+import * as AuthSession from 'expo-auth-session';
+import * as WebBrowser from 'expo-web-browser';
+import {
+  discovery,
+  redirectUri,
+  login,
+  restoreSession,
+  logout as authLogout,
+  isAuthenticated,
+  isBiometricEnabled,
+  setBiometricEnabled,
+} from './lib/auth';
+import { biometricUnlock } from './lib/biometric';
+import { getLockoutStatus, recordFailedAttempt, resetAttempts as resetLoginAttempts, MAX_ATTEMPTS, LOCKOUT_MS } from './lib/lockout';
+import { CLIENT_ID } from './config';
+import { getCurrentCrew, getMyJobs, updateJobStatus } from './lib/api.js';
+import { getLocation } from './lib/location';
+import { captureAndUpload } from './lib/photos';
+import { navigateTo } from './lib/navigate';
+import { queueUpdate, flushQueue, getQueueLength } from './lib/offlineQueue';
+import SafetyChecklist from './components/SafetyChecklist';
+import QrScanner from './components/QrScanner';
+import * as PriorityChecklistModule from './components/PriorityChecklist';
+const PriorityChecklist = PriorityChecklistModule.default || PriorityChecklistModule;
+import FaultDiagnosisWizard from './components/FaultDiagnosisWizard';
+import PartsPicker from './components/PartsPicker';
+import CrewLeadSignOff from './components/CrewLeadSignOff';
+
+WebBrowser.maybeCompleteAuthSession();
+
+const FALLBACK_JOBS = [
+  { id: 'JOB-1005', title: 'Pending Line Inspection', address: 'Mussoorie Road, Dehradun', severity: 'High', status: 'Pending Acceptance', customers: 386, distance: '1.6 km' },
+  { id: 'JOB-1001', title: 'Transformer Failure', address: 'Rajpur Road, Dehradun', severity: 'Critical', status: 'Acknowledged', customers: 842, distance: '2.4 km' },
+  { id: 'JOB-1002', title: 'Line Fault', address: 'Haridwar Road, Rishikesh', severity: 'High', status: 'En Route', customers: 531, distance: '5.8 km' },
+];
+
+const NEXT_STATUS = {
+  'Pending Acceptance': 'Acknowledged',
+  Acknowledged: 'En Route',
+  'En Route': 'On Site',
+  'On Site': 'Work Started',
+  'Work Started': 'Work Complete',
+};
+
+// Severity color coding: High -> orange, Medium -> blue, Low -> green,
+// Critical -> red. Kept local (not imported) so this file can never crash
+// due to a missing/misnamed export in another file.
+const severityColors = { Critical: '#d7382a', High: '#e08a1e', Medium: '#2f6fd6', Low: '#2a9d5c' };
+
+export default function NativeApp() {
+  return (
+    <AppErrorBoundary>
+      <NativeAppScreen />
+    </AppErrorBoundary>
+  );
+}
+
+// Catches render/runtime errors anywhere below it and shows the actual
+// error message on screen instead of a silent blank page — makes it much
+// easier to diagnose crashes that only happen after login.
+class AppErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, info) {
+    console.error('NativeApp crashed:', error, info?.componentStack);
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <SafeAreaView style={[styles.safe, styles.center, { padding: 24 }]}>
+          <Text style={{ fontSize: 16, fontWeight: '800', color: '#d7382a', marginBottom: 10 }}>
+            App crashed
+          </Text>
+          <Text style={{ fontSize: 13, color: '#33465f', textAlign: 'center' }}>
+            {String(this.state.error?.message || this.state.error)}
+          </Text>
+        </SafeAreaView>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function NativeAppScreen() {
+  const [checkingSession, setCheckingSession] = useState(true);
+  const [authenticated, setAuthenticated] = useState(false);
+  const [needsBiometric, setNeedsBiometric] = useState(false);
+  const [biometricBusy, setBiometricBusy] = useState(false);
+  const [biometricError, setBiometricError] = useState('');
+  const [biometricOn, setBiometricOn] = useState(false);
+  const [crew, setCrew] = useState({ name: 'Crew Gamma-2', role: 'Field Technician', id: 'C003' });
+  const [jobs, setJobs] = useState(FALLBACK_JOBS);
+  const [tab, setTab] = useState('Jobs');
+  const [activeJob, setActiveJob] = useState(null);
+  const [pendingCount, setPendingCount] = useState(0);
+
+  // Try to resume a previous Keycloak session on cold start. Guarded so a
+  // slow/unavailable native module (e.g. secure storage on web) can never
+  // leave the app stuck on the loading spinner. If the crew member has
+  // opted in to biometric unlock, a restored session is held behind a
+  // Face ID/fingerprint prompt rather than granted automatically.
+  useEffect(() => {
+    let settled = false;
+    const finish = async (restored) => {
+      if (settled) return;
+      settled = true;
+      if (restored && (await isBiometricEnabled().catch(() => false))) {
+        setNeedsBiometric(true);
+        setCheckingSession(false);
+        return;
+      }
+      setAuthenticated(restored);
+      setCheckingSession(false);
+    };
+    restoreSession()
+      .then(finish)
+      .catch(() => finish(false));
+    const timeout = setTimeout(() => finish(false), 4000);
+    return () => clearTimeout(timeout);
+  }, []);
+
+  useEffect(() => {
+    if (authenticated) isBiometricEnabled().then(setBiometricOn).catch(() => {});
+  }, [authenticated]);
+
+  const handleBiometricUnlock = useCallback(async () => {
+    setBiometricBusy(true);
+    setBiometricError('');
+    try {
+      const ok = await biometricUnlock();
+      if (ok) {
+        setNeedsBiometric(false);
+        setAuthenticated(true);
+      } else {
+        setBiometricError('Unlock failed or was cancelled.');
+      }
+    } catch {
+      setBiometricError('Biometric unlock is unavailable on this device.');
+    } finally {
+      setBiometricBusy(false);
+    }
+  }, []);
+
+  // Auto-prompt once as soon as the lock screen appears.
+  useEffect(() => {
+    if (needsBiometric) handleBiometricUnlock();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [needsBiometric]);
+
+  const toggleBiometric = useCallback(async () => {
+    if (biometricOn) {
+      await setBiometricEnabled(false);
+      setBiometricOn(false);
+      return;
+    }
+    const ok = await biometricUnlock().catch(() => false);
+    if (ok) {
+      await setBiometricEnabled(true);
+      setBiometricOn(true);
+    }
+  }, [biometricOn]);
+
+  const refresh = useCallback(() => {
+    if (!authenticated) return;
+    getCurrentCrew().then(setCrew).catch(() => {});
+    getMyJobs().then((items) => items?.length && setJobs(items)).catch(() => {});
+  }, [authenticated]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  // Flush any status updates that were queued while offline whenever we
+  // have a session, and again periodically.
+  useEffect(() => {
+    if (!authenticated) return;
+    const sync = () => {
+      flushQueue()
+        .then(() => getQueueLength())
+        .then(setPendingCount)
+        .then(refresh)
+        .catch(() => {});
+    };
+    sync();
+    const interval = setInterval(sync, 30000);
+    return () => clearInterval(interval);
+  }, [authenticated, refresh]);
+
+  const handleAdvance = useCallback(async (job, nextStatus) => {
+    const location = await getLocation();
+    setJobs((current) => current.map((j) => (j.id === job.id ? { ...j, status: nextStatus } : j)));
+    try {
+      await updateJobStatus(job.id, nextStatus, location);
+    } catch {
+      await queueUpdate({ id: job.id, status: nextStatus, location });
+      setPendingCount((n) => n + 1);
+    }
+  }, []);
+
+  if (checkingSession) {
+    return (
+      <SafeAreaView style={[styles.safe, styles.center]}>
+        <ActivityIndicator size="large" color="#1F3864" />
+      </SafeAreaView>
+    );
+  }
+
+  if (needsBiometric) {
+    return (
+      <SafeAreaView style={[styles.loginSafe, styles.center, { padding: 24 }]}>
+        <Text style={styles.loginTitle}>🔒</Text>
+        <Text style={[styles.loginTitle, { fontSize: 20, marginTop: 12 }]}>Unlock OMS Crew</Text>
+        <Text style={[styles.loginSubtitle, { textAlign: 'center' }]}>
+          Confirm it's you with Face ID / fingerprint to resume your session.
+        </Text>
+        {biometricError ? <Text style={styles.error}>{biometricError}</Text> : null}
+        <Pressable style={[styles.signIn, { marginTop: 20 }]} disabled={biometricBusy} onPress={handleBiometricUnlock}>
+          <Text style={styles.signInText}>{biometricBusy ? 'Checking…' : 'Try again'}</Text>
+          <Text style={styles.signInArrow}>→</Text>
+        </Pressable>
+        <Pressable
+          style={styles.demoBtn}
+          onPress={async () => {
+            await authLogout();
+            setNeedsBiometric(false);
+            setAuthenticated(false);
+          }}
+        >
+          <Text style={styles.demoBtnText}>Sign out instead</Text>
+        </Pressable>
+      </SafeAreaView>
+    );
+  }
+
+  if (!authenticated) {
+    return <CrewLogin onSuccess={() => setAuthenticated(true)} />;
+  }
+
+  return (
+    <SafeAreaView style={styles.safe}>
+      <StatusBar barStyle="light-content" backgroundColor="#173355" />
+      <View style={styles.header}>
+        <View>
+          <Text style={styles.kicker}>OMS CREW</Text>
+          <Text style={styles.crewName}>{crew.name}</Text>
+          <Text style={styles.role}>{crew.role} · {crew.id}</Text>
+        </View>
+        <View style={styles.headerRight}>
+          {!isAuthenticated() && (
+            <View style={styles.demoBadge}>
+              <Text style={styles.demoBadgeText}>DEMO MODE</Text>
+            </View>
+          )}
+          {pendingCount > 0 && (
+            <View style={styles.pendingBadge}>
+              <Text style={styles.pendingText}>{pendingCount} queued</Text>
+            </View>
+          )}
+          {isAuthenticated() && (
+            <Pressable style={styles.online} onPress={toggleBiometric}>
+              <Text style={styles.onlineText}>{biometricOn ? 'Biometric: On' : 'Enable biometric'}</Text>
+            </Pressable>
+          )}
+          <Pressable
+            style={styles.online}
+            onPress={async () => {
+              await authLogout();
+              setAuthenticated(false);
+            }}
+          >
+            <View style={styles.dot} />
+            <Text style={styles.onlineText}>Sign out</Text>
+          </Pressable>
+        </View>
+      </View>
+      <ScrollView contentContainerStyle={styles.content}>
+        {tab === 'Jobs' ? (
+          <>
+            <Text style={styles.title}>Today&apos;s field work</Text>
+            <Text style={styles.subtitle}>Priority outages assigned to your crew.</Text>
+            <View style={styles.stats}>
+              <Stat value={String(jobs.length)} label="Active jobs" />
+              <Stat value={jobs[0]?.distance ?? '—'} label="Next location" />
+              <Stat value={String(jobs.reduce((sum, j) => sum + (j.customers || 0), 0))} label="Customers" />
+            </View>
+            <Text style={styles.section}>MY JOBS</Text>
+            {jobs.map((job) => (
+              <JobCard key={job.id} job={job} onPress={() => setActiveJob(job)} />
+            ))}
+          </>
+        ) : (
+          <View style={styles.empty}>
+            <Text style={styles.title}>{tab}</Text>
+            <Text style={styles.subtitle}>This field workspace is ready for your next assignment.</Text>
+          </View>
+        )}
+      </ScrollView>
+      <View style={styles.nav}>
+        {['Dashboard', 'Jobs', 'Map', 'Profile'].map((item) => (
+          <Pressable
+            key={item}
+            onPress={() => setTab(item === 'Dashboard' ? 'Jobs' : item)}
+            style={styles.navItem}
+          >
+            <Text style={[styles.navText, tab === (item === 'Dashboard' ? 'Jobs' : item) && styles.navActive]}>
+              {item}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+
+      <Modal visible={!!activeJob} animationType="slide" onRequestClose={() => setActiveJob(null)}>
+        {activeJob && (
+          <JobDetail
+            job={activeJob}
+            onClose={() => setActiveJob(null)}
+            onAdvance={handleAdvance}
+          />
+        )}
+      </Modal>
+    </SafeAreaView>
+  );
+}
+
+function CrewLogin({ onSuccess }) {
+  const [request, , promptAsync] = AuthSession.useAuthRequest(
+    {
+      clientId: CLIENT_ID,
+      redirectUri,
+      responseType: AuthSession.ResponseType.Code,
+      usePKCE: true,
+      scopes: ['openid', 'profile'],
+    },
+    discovery
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [lockStatus, setLockStatus] = useState({ locked: false, remainingMs: 0, attempts: 0 });
+  const [enableBiometricNext, setEnableBiometricNext] = useState(false);
+
+  useEffect(() => {
+    getLockoutStatus().then(setLockStatus);
+  }, []);
+
+  // Keep the countdown fresh while locked.
+  useEffect(() => {
+    if (!lockStatus.locked) return;
+    const interval = setInterval(() => getLockoutStatus().then(setLockStatus), 1000);
+    return () => clearInterval(interval);
+  }, [lockStatus.locked]);
+
+  const submit = async () => {
+    if (!request || busy) return;
+    const current = await getLockoutStatus();
+    if (current.locked) {
+      setLockStatus(current);
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const ok = await login(promptAsync, request);
+      if (!ok) {
+        const status = await recordFailedAttempt();
+        setLockStatus(status);
+        setError(
+          status.locked
+            ? `Too many failed attempts. Locked for ${Math.ceil(LOCKOUT_MS / 60000)} minutes.`
+            : `Sign-in was cancelled or failed. ${MAX_ATTEMPTS - status.attempts} attempt(s) left.`
+        );
+        return;
+      }
+      await resetLoginAttempts();
+      if (enableBiometricNext) {
+        const bOk = await biometricUnlock().catch(() => false);
+        if (bOk) await setBiometricEnabled(true);
+      }
+      onSuccess();
+    } catch {
+      const status = await recordFailedAttempt();
+      setLockStatus(status);
+      setError('Could not reach the sign-in server. Check your connection and API_BASE/KEYCLOAK_URL in config.js.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const lockedMinutes = Math.ceil(lockStatus.remainingMs / 60000);
+
+  return (
+    <SafeAreaView style={styles.loginSafe}>
+      <StatusBar barStyle="light-content" backgroundColor="#10201d" />
+      <View style={styles.login}>
+        <Text style={styles.loginKicker}>OMS CREW</Text>
+        <Text style={styles.loginTitle}>Crew sign in</Text>
+        <Text style={styles.loginSubtitle}>Access your field operations workspace.</Text>
+
+        {error ? <Text style={styles.error}>{error}</Text> : null}
+        {lockStatus.locked ? (
+          <Text style={styles.error}>
+            Account locked after {MAX_ATTEMPTS} failed attempts. Try again in {lockedMinutes} min.
+          </Text>
+        ) : null}
+
+        <Pressable
+          style={styles.checkboxRow}
+          onPress={() => setEnableBiometricNext((v) => !v)}
+        >
+          <View style={[styles.checkbox, enableBiometricNext && styles.checkboxOn]} />
+          <Text style={styles.checkboxLabel}>Enable biometric unlock next time</Text>
+        </Pressable>
+
+        <Pressable
+          style={[styles.signIn, (!request || lockStatus.locked) && styles.btnOff]}
+          disabled={!request || busy || lockStatus.locked}
+          onPress={submit}
+        >
+          <Text style={styles.signInText}>
+            {lockStatus.locked ? `Locked (${lockedMinutes} min)` : busy ? 'Signing in…' : 'Sign in with Keycloak'}
+          </Text>
+          <Text style={styles.signInArrow}>→</Text>
+        </Pressable>
+
+        <Pressable style={styles.demoBtn} onPress={onSuccess}>
+          <Text style={styles.demoBtnText}>Continue in demo mode</Text>
+        </Pressable>
+        <Text style={styles.demoBtnHint}>
+          No backend/Keycloak reachable yet? Skip sign-in and explore the app with sample jobs.
+        </Text>
+
+        <View style={styles.demo}>
+          <Text style={styles.demoLabel}>USES YOUR OMS ACCOUNT</Text>
+          <Text style={styles.demoText}>Realm: oms-upcl · Client: oms-mobile</Text>
+          <Text style={styles.demoPassword}>Configured in src/config.js</Text>
+        </View>
+        <Text style={styles.loginFooter}>Crew access only · Offline capable</Text>
+      </View>
+    </SafeAreaView>
+  );
+}
+
+function Stat({ value, label }) {
+  return (
+    <View style={styles.stat}>
+      <Text style={styles.statValue}>{value}</Text>
+      <Text style={styles.statLabel}>{label}</Text>
+    </View>
+  );
+}
+
+function JobCard({ job, onPress }) {
+  return (
+    <Pressable onPress={onPress} style={styles.card}>
+      <View style={[styles.severity, { backgroundColor: (severityColors && severityColors[job.severity]) || '#2f6fd6' }]} />
+      <View style={styles.cardBody}>
+        <View style={styles.row}>
+          <Text style={styles.jobId}>{job.id}</Text>
+          <Text style={styles.status}>{job.status}</Text>
+        </View>
+        <Text style={styles.jobTitle}>{job.title}</Text>
+        <Text style={styles.address}>{job.address}</Text>
+        <View style={styles.row}>
+          <Text style={styles.meta}>{job.distance}</Text>
+          <Text style={styles.meta}>{job.customers} customers</Text>
+        </View>
+      </View>
+    </Pressable>
+  );
+}
+
+function JobDetail({ job, onClose, onAdvance }) {
+  const [showSafety, setShowSafety] = useState(false);
+  const [showScanner, setShowScanner] = useState(false);
+  const [assetId, setAssetId] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [message, setMessage] = useState('');
+
+  // Completion flow: fault diagnosis -> parts used -> crew-lead sign-off.
+  // Gates the final "Work Started" -> "Work Complete" transition.
+  const [completionStep, setCompletionStep] = useState(null); // null | 'diagnosis' | 'parts' | 'signoff'
+  const [diagnosis, setDiagnosis] = useState(null);
+  const [partsUsed, setPartsUsed] = useState(null);
+  const [signOff, setSignOff] = useState(null);
+
+  const next = NEXT_STATUS[job.status];
+
+  const requestAdvance = () => {
+    if (!next) return;
+    if (job.status === 'On Site') {
+      setShowSafety(true);
+      return;
+    }
+    if (job.status === 'Work Started') {
+      setCompletionStep('diagnosis');
+      return;
+    }
+    onAdvance(job, next);
+  };
+
+  const finishCompletion = (finalSignOff) => {
+    setSignOff(finalSignOff);
+    setCompletionStep(null);
+    // Diagnosis / parts / sign-off aren't sent to the backend yet — the
+    // OMS mobile contract only defines status + photo endpoints. They're
+    // captured here and shown in-app; ask the integration track for a
+    // completion-details endpoint if this should be persisted server-side.
+    onAdvance(job, next);
+  };
+
+  const takePhoto = async () => {
+    setUploading(true);
+    setMessage('');
+    try {
+      await captureAndUpload(job.id, assetId ? `Asset: ${assetId}` : undefined);
+      setMessage('Photo uploaded.');
+    } catch (err) {
+      setMessage(err?.message || 'Photo upload failed.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <SafeAreaView style={styles.detailSafe}>
+      <View style={styles.detailHeader}>
+        <Pressable onPress={onClose}>
+          <Text style={styles.detailBack}>← Back</Text>
+        </Pressable>
+        <Text style={styles.detailId}>{job.id}</Text>
+      </View>
+      <ScrollView contentContainerStyle={styles.detailContent}>
+        <Text style={[styles.jobTitle, { fontSize: 22 }]}>{job.title}</Text>
+        <Text style={styles.address}>📍 {job.address}</Text>
+        <View style={styles.detailStats}>
+          <View>
+            <Text style={styles.statLabel}>Feeder</Text>
+            <Text style={styles.statValue}>{job.feeder ?? '—'}</Text>
+          </View>
+          <View>
+            <Text style={styles.statLabel}>Customers</Text>
+            <Text style={styles.statValue}>{job.customers ?? '—'}</Text>
+          </View>
+          <View>
+            <Text style={styles.statLabel}>Status</Text>
+            <Text style={styles.statValue}>{job.status}</Text>
+          </View>
+        </View>
+
+        <PriorityChecklist severity={job.severity} />
+
+        {showSafety && (
+          <SafetyChecklist
+            onPass={() => {
+              setShowSafety(false);
+              onAdvance(job, next);
+            }}
+            onCancel={() => setShowSafety(false)}
+          />
+        )}
+
+        {completionStep === 'diagnosis' && (
+          <FaultDiagnosisWizard
+            onComplete={(answers) => {
+              setDiagnosis(answers);
+              setCompletionStep('parts');
+            }}
+            onCancel={() => setCompletionStep(null)}
+          />
+        )}
+
+        {completionStep === 'parts' && (
+          <PartsPicker
+            onComplete={(parts) => {
+              setPartsUsed(parts);
+              setCompletionStep('signoff');
+            }}
+            onCancel={() => setCompletionStep('diagnosis')}
+          />
+        )}
+
+        {completionStep === 'signoff' && (
+          <CrewLeadSignOff
+            onComplete={finishCompletion}
+            onCancel={() => setCompletionStep('parts')}
+          />
+        )}
+
+        {signOff && (
+          <View style={styles.completionSummary}>
+            <Text style={styles.completionSummaryTitle}>Job closed out</Text>
+            {diagnosis && (
+              <Text style={styles.completionSummaryLine}>
+                Cause: {diagnosis.cause} · Action: {diagnosis.action}
+              </Text>
+            )}
+            {partsUsed && partsUsed.length > 0 && (
+              <Text style={styles.completionSummaryLine}>
+                Parts: {partsUsed.map((p) => `${p.name} ×${p.qty}`).join(', ')}
+              </Text>
+            )}
+            <Text style={styles.completionSummaryLine}>
+              Signed off by {signOff.name} at {new Date(signOff.signedAt).toLocaleTimeString()}
+            </Text>
+          </View>
+        )}
+
+        <Pressable style={styles.secondaryBtn} onPress={() => navigateTo(job.address)}>
+          <Text style={styles.secondaryBtnText}>Navigate to site</Text>
+        </Pressable>
+
+        <View style={styles.assetRow}>
+          <Text style={styles.sectionSmall}>ASSET SCAN</Text>
+          {assetId ? <Text style={styles.assetValue}>Attached asset: {assetId}</Text> : null}
+          <Pressable style={styles.secondaryBtn} onPress={() => setShowScanner(true)}>
+            <Text style={styles.secondaryBtnText}>Scan QR asset tag</Text>
+          </Pressable>
+        </View>
+
+        {showScanner && (
+          <View style={styles.scannerWrap}>
+            <QrScanner
+              onScan={(data) => {
+                setAssetId(data);
+                setShowScanner(false);
+              }}
+              onClose={() => setShowScanner(false)}
+            />
+          </View>
+        )}
+
+        <Pressable style={styles.secondaryBtn} onPress={takePhoto} disabled={uploading}>
+          <Text style={styles.secondaryBtnText}>{uploading ? 'Uploading…' : '+ Add photo'}</Text>
+        </Pressable>
+        {message ? <Text style={styles.assetValue}>{message}</Text> : null}
+
+        {next && !completionStep && (
+          <Pressable style={styles.primaryBtn} onPress={requestAdvance}>
+            <Text style={styles.primaryBtnText}>
+              {job.status === 'Pending Acceptance' ? 'Accept task' : `${next} →`}
+            </Text>
+          </Pressable>
+        )}
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  loginSafe: { flex: 1, backgroundColor: '#10201d' },
+  login: { flex: 1, paddingHorizontal: 24, paddingTop: 64 },
+  loginKicker: { color: '#27c7b2', fontSize: 13, fontWeight: '800', letterSpacing: 2 },
+  loginTitle: { color: '#fff', fontSize: 32, fontWeight: '800', marginTop: 70 },
+  loginSubtitle: { color: '#a8c0ba', fontSize: 14, marginTop: 8, marginBottom: 36 },
+  label: { color: '#d8e7e2', fontSize: 11, fontWeight: '800', letterSpacing: 1, marginTop: 16, marginBottom: 8 },
+  error: { color: '#ffb5a8', fontSize: 12, marginTop: 10 },
+  signIn: { backgroundColor: '#55d7be', borderRadius: 12, padding: 15, marginTop: 18, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  signInText: { color: '#062b24', fontSize: 14, fontWeight: '800' },
+  signInArrow: { color: '#062b24', fontSize: 22, lineHeight: 18 },
+  btnOff: { opacity: 0.5 },
+  checkboxRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 20 },
+  checkbox: { width: 18, height: 18, borderRadius: 4, borderWidth: 2, borderColor: '#55d7be' },
+  checkboxOn: { backgroundColor: '#55d7be' },
+  checkboxLabel: { color: '#d8e7e2', fontSize: 13 },
+  demoBtn: { alignItems: 'center', paddingVertical: 12, marginTop: 10 },
+  demoBtnText: { color: '#a8c0ba', fontSize: 13, fontWeight: '700', textDecorationLine: 'underline' },
+  demoBtnHint: { color: '#5f7b74', fontSize: 11, textAlign: 'center', marginTop: 4 },
+  demo: { backgroundColor: 'rgba(255,255,255,.06)', borderRadius: 12, padding: 14, marginTop: 24 },
+  demoLabel: { color: '#7f9b94', fontSize: 10, fontWeight: '800', letterSpacing: 1 },
+  demoText: { color: '#d8e7e2', fontSize: 13, fontWeight: '700', marginTop: 8 },
+  demoPassword: { color: '#8eaaa2', fontSize: 12, marginTop: 4 },
+  loginFooter: { color: '#77938c', fontSize: 11, textAlign: 'center', marginTop: 'auto', paddingBottom: 24 },
+  safe: { flex: 1, backgroundColor: '#f2f5f9' },
+  center: { alignItems: 'center', justifyContent: 'center' },
+  header: { backgroundColor: '#173355', paddingHorizontal: 22, paddingVertical: 20, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  headerRight: { alignItems: 'flex-end', gap: 8 },
+  demoBadge: { backgroundColor: '#5a3fa6', borderRadius: 12, paddingHorizontal: 9, paddingVertical: 4 },
+  demoBadgeText: { color: '#fff', fontSize: 10, fontWeight: '800', letterSpacing: 0.5 },
+  kicker: { color: '#27c7b2', fontSize: 12, fontWeight: '800', letterSpacing: 2 },
+  crewName: { color: '#fff', fontSize: 21, fontWeight: '700', marginTop: 4 },
+  role: { color: '#a7bdd6', fontSize: 12, marginTop: 3 },
+  online: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#245675', borderRadius: 18, paddingHorizontal: 11, paddingVertical: 7 },
+  pendingBadge: { backgroundColor: '#e08a1e', borderRadius: 12, paddingHorizontal: 9, paddingVertical: 4 },
+  pendingText: { color: '#fff', fontSize: 10, fontWeight: '800' },
+  dot: { width: 7, height: 7, borderRadius: 4, backgroundColor: '#27c7b2', marginRight: 6 },
+  onlineText: { color: '#b9fff3', fontSize: 12, fontWeight: '700' },
+  content: { padding: 20, paddingBottom: 100 },
+  title: { color: '#0f1b2d', fontSize: 26, fontWeight: '800' },
+  subtitle: { color: '#7c8da3', fontSize: 14, marginTop: 5, marginBottom: 20 },
+  stats: { flexDirection: 'row', gap: 9, marginBottom: 28 },
+  stat: { flex: 1, backgroundColor: '#fff', borderRadius: 12, padding: 13, borderWidth: 1, borderColor: '#e6ecf3' },
+  statValue: { color: '#173355', fontSize: 18, fontWeight: '800' },
+  statLabel: { color: '#7c8da3', fontSize: 11, marginTop: 4 },
+  section: { color: '#7c8da3', fontSize: 11, fontWeight: '800', letterSpacing: 1.5, marginBottom: 11 },
+  sectionSmall: { color: '#7c8da3', fontSize: 10, fontWeight: '800', letterSpacing: 1.2, marginBottom: 8 },
+  card: { backgroundColor: '#fff', borderRadius: 13, flexDirection: 'row', marginBottom: 12, overflow: 'hidden', borderWidth: 1, borderColor: '#e6ecf3' },
+  severity: { width: 5 },
+  cardBody: { flex: 1, padding: 15 },
+  row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  jobId: { color: '#7c8da3', fontSize: 11, fontWeight: '700' },
+  status: { color: '#33465f', backgroundColor: '#f2f5f9', borderRadius: 12, paddingHorizontal: 8, paddingVertical: 4, fontSize: 10, fontWeight: '700' },
+  jobTitle: { color: '#0f1b2d', fontSize: 16, fontWeight: '800', marginTop: 10 },
+  address: { color: '#7c8da3', fontSize: 13, marginTop: 4 },
+  meta: { color: '#33465f', fontSize: 12, fontWeight: '600', marginTop: 13 },
+  empty: { paddingTop: 40 },
+  nav: { position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: '#fff', borderTopWidth: 1, borderTopColor: '#e6ecf3', flexDirection: 'row', paddingTop: 10, paddingBottom: 12 },
+  navItem: { flex: 1, alignItems: 'center' },
+  navText: { color: '#7c8da3', fontSize: 12, fontWeight: '700' },
+  navActive: { color: '#0e9f8e' },
+  detailSafe: { flex: 1, backgroundColor: '#f2f5f9' },
+  detailHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 18, backgroundColor: '#173355' },
+  detailBack: { color: '#b9fff3', fontWeight: '700' },
+  detailId: { color: '#fff', fontWeight: '800' },
+  detailContent: { padding: 20, gap: 14, paddingBottom: 60 },
+  detailStats: { flexDirection: 'row', justifyContent: 'space-between', backgroundColor: '#fff', borderRadius: 12, padding: 14, borderWidth: 1, borderColor: '#e6ecf3' },
+  secondaryBtn: { backgroundColor: '#fff', borderWidth: 1, borderColor: '#1F3864', borderRadius: 10, padding: 12, alignItems: 'center' },
+  secondaryBtnText: { color: '#1F3864', fontWeight: '700' },
+  assetRow: { gap: 8 },
+  assetValue: { color: '#33465f', fontSize: 13, fontWeight: '600' },
+  scannerWrap: { height: 320 },
+  primaryBtn: { backgroundColor: '#1F3864', borderRadius: 10, padding: 14, alignItems: 'center' },
+  completionSummary: { backgroundColor: '#eafaf1', borderRadius: 12, padding: 14, borderWidth: 1, borderColor: '#a9e3c4', gap: 4 },
+  completionSummaryTitle: { color: '#1b7a4a', fontSize: 13, fontWeight: '800' },
+  completionSummaryLine: { color: '#2f5d47', fontSize: 12 },
+  primaryBtnText: { color: '#fff', fontWeight: '800' },
+});
