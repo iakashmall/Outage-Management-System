@@ -1252,7 +1252,7 @@
     "auth" : "true",
     "envelopeFrom" : "",
     "ssl" : "false",
-    "password" : "SET_BY_USER",
+    "password" : "",
     "port" : "587",
     "replyTo" : "",
     "host" : "smtp-relay.brevo.com",

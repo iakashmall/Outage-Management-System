@@ -14,8 +14,13 @@ export const keycloak = new Keycloak({
 
 // Call once, before rendering the app. Resolves true once the user has a
 // valid session (redirecting to Keycloak's login page first if needed).
+// checkLoginIframe disabled: it relies on a hidden cross-port iframe (app on
+// 5173, Keycloak on 8081) that modern Chrome blocks by default as part of
+// third-party cookie restrictions, causing a permanent timeout rather than
+// a real login failure. This only disables Keycloak's periodic background
+// session-validity check; login itself and token verification still work.
 export function initKeycloak() {
-  return keycloak.init({ onLoad: 'login-required', pkceMethod: 'S256' });
+  return keycloak.init({ onLoad: 'login-required', pkceMethod: 'S256', checkLoginIframe: false });
 }
 
 // Attach this to every API call so the backend can verify who's asking.
