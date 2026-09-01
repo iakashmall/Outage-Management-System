@@ -732,7 +732,7 @@ function JobDetail({ job, onClose, onAdvance, onNavigate }) {
         )}
 
         <Pressable style={styles.secondaryBtn} onPress={takePhoto} disabled={uploading}>
-          <Text style={styles.secondaryBtnText}>{uploading ? 'Uploading…' : '+ Add photo'}</Text>
+          <Text style={styles.secondaryBtnText}>{uploading ? 'Uploading to PostgreSQL…' : 'Upload photo to PostgreSQL'}</Text>
         </Pressable>
         {message ? <Text style={styles.assetValue}>{message}</Text> : null}
 
