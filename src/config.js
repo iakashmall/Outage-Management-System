@@ -13,11 +13,11 @@ const isAndroidEmulator = false; // flip manually if you're on an Android emulat
 
 export const API_BASE = isAndroidEmulator
   ? "http://10.0.2.2:4000/api"
-  : "http://192.168.1.50:4000/api"; // <-- replace with your PC's LAN IP
+  : "http://192.168.0.121:4000/api";
 
 export const KEYCLOAK_URL = isAndroidEmulator
   ? "http://10.0.2.2:8080"
-  : "http://192.168.1.50:8080"; // <-- replace with your PC's LAN IP
+  : "http://192.168.0.121:8080";
 
 export const REALM = "oms-upcl";
 export const CLIENT_ID = "oms-mobile";

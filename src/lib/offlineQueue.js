@@ -8,13 +8,24 @@ const KEY = "oms-status-queue";
 
 export async function queueUpdate(update) {
   const q = JSON.parse((await AsyncStorage.getItem(KEY)) || "[]");
-  q.push(update);
+  q.push({ ...update, queuedAt: update.queuedAt || Date.now() });
   await AsyncStorage.setItem(KEY, JSON.stringify(q));
 }
 
 export async function getQueueLength() {
   const q = JSON.parse((await AsyncStorage.getItem(KEY)) || "[]");
   return q.length;
+}
+
+// Full queued items (job id, status they're stuck trying to sync, and
+// when they were queued) — used to render a "pending sync" list on the
+// dashboard, not just a count badge.
+export async function getQueueItems() {
+  try {
+    return JSON.parse((await AsyncStorage.getItem(KEY)) || "[]");
+  } catch {
+    return [];
+  }
 }
 
 export async function flushQueue() {

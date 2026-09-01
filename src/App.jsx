@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import "./app.css";
-import { getCurrentCrew, getMyJobs, logout, updateJobStatus } from "./lib/api.js";
+import { getCurrentCrew, getMyJobs, logout, updateJobStatus, uploadJobPhoto } from "./lib/api.js";
 
 /* =========================================================
    DEMO DATA
@@ -171,6 +171,7 @@ export default function App() {
         queuedUpdates={queuedUpdates}
         onLogout={() => {
           logout();
+          setAuthenticated(false);
         }}
       />
     );
@@ -334,6 +335,12 @@ function LeaderLogin({ onSelect, onBack }) {
 
 function CrewLayout({ crew, jobs, onUpdateJob, omsSource, online, queuedUpdates, onLogout }) {
   const [tab, setTab] = useState("jobs");
+  const [selectedMapJobId, setSelectedMapJobId] = useState(null);
+
+  const openJobOnMap = (job) => {
+    setSelectedMapJobId(job.id);
+    setTab("map");
+  };
 
   return (
     <div className="phone-app">
@@ -352,10 +359,11 @@ function CrewLayout({ crew, jobs, onUpdateJob, omsSource, online, queuedUpdates,
             omsSource={omsSource}
             online={online}
             queuedUpdates={queuedUpdates}
+            onNavigate={openJobOnMap}
           />
         )}
 
-        {tab === "map" && <MapView jobs={jobs} />}
+        {tab === "map" && <MapView jobs={jobs} selectedJobId={selectedMapJobId} />}
 
         {tab === "me" && (
           <Profile
@@ -382,7 +390,7 @@ function CrewLayout({ crew, jobs, onUpdateJob, omsSource, online, queuedUpdates,
    CREW JOBS
 ========================================================= */
 
-function CrewJobs({ jobs, crew, onUpdate, omsSource, online, queuedUpdates }) {
+function CrewJobs({ jobs, crew, onUpdate, omsSource, online, queuedUpdates, onNavigate }) {
   const [jobFilter, setJobFilter] = useState("Assigned");
   const visibleJobs = jobs.filter(
     (job) => !job.assignedCrewId || job.assignedCrewId === crew.id
@@ -458,6 +466,7 @@ function CrewJobs({ jobs, crew, onUpdate, omsSource, online, queuedUpdates }) {
             key={job.id}
             job={job}
             onUpdate={onUpdate}
+            onNavigate={onNavigate}
           />
         ))}
       </div>
@@ -472,7 +481,7 @@ function CrewJobs({ jobs, crew, onUpdate, omsSource, online, queuedUpdates }) {
    JOB CARD
 ========================================================= */
 
-function JobCard({ job, onUpdate }) {
+function JobCard({ job, onUpdate, onNavigate }) {
   const [expanded, setExpanded] = useState(false);
   const [updating, setUpdating] = useState(false);
   const [showSafety, setShowSafety] = useState(false);
@@ -480,6 +489,7 @@ function JobCard({ job, onUpdate }) {
   const [photos, setPhotos] = useState([]);
   const [assetId, setAssetId] = useState("");
   const [assetMessage, setAssetMessage] = useState("");
+  const [photoMessage, setPhotoMessage] = useState("");
 
   const nextStatus = {
     "Pending Acceptance": "Acknowledged",
@@ -507,12 +517,28 @@ function JobCard({ job, onUpdate }) {
     setUpdating(false);
   };
 
-  const addPhotos = (event) => {
-    const selected = Array.from(event.target.files ?? []).map((file) => ({
-      url: URL.createObjectURL(file),
-      file,
-    }));
-    setPhotos((current) => [...current, ...selected]);
+  const addPhotos = async (event) => {
+    const files = Array.from(event.target.files ?? []);
+    if (!files.length) return;
+    setPhotoMessage("Uploading photo...");
+    try {
+      const uploaded = await Promise.all(files.map(async (file) => {
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error("Could not read photo"));
+          reader.readAsDataURL(file);
+        });
+        await uploadJobPhoto(job.id, dataUrl, await getLocation(), assetId ? `Asset: ${assetId}` : undefined);
+        return { url: URL.createObjectURL(file), file };
+      }));
+      setPhotos((current) => [...current, ...uploaded]);
+      setPhotoMessage(`${uploaded.length} photo${uploaded.length === 1 ? "" : "s"} stored.`);
+    } catch (error) {
+      setPhotoMessage(error?.message || "Photo upload failed.");
+    } finally {
+      event.target.value = "";
+    }
   };
 
   const scanQrImage = async (event) => {
@@ -633,6 +659,7 @@ function JobCard({ job, onUpdate }) {
 
       <div className="photo-capture">
         <label className="photo-btn">+ Add photo<input type="file" accept="image/*" capture="environment" multiple hidden onChange={addPhotos} /></label>
+        {photoMessage && <small>{photoMessage}</small>}
         <div className="photo-grid">{photos.map((photo, index) => <img key={`${photo.url}-${index}`} src={photo.url} alt="Job evidence" />)}</div>
       </div>
 
@@ -655,7 +682,7 @@ function JobCard({ job, onUpdate }) {
           {expanded ? "Hide details" : "View details"}
         </button>
 
-        <a className="secondary-btn navigation-btn" href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(job.address)}`} target="_blank" rel="noreferrer">
+        <a className="secondary-btn navigation-btn" href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(job.address)}`} target="_blank" rel="noreferrer" onClick={() => onNavigate?.(job)}>
           Navigate
         </a>
 
@@ -1101,8 +1128,9 @@ function TeamOverview({ jobs }) {
    MAP
 ========================================================= */
 
-function MapView({ jobs }) {
-  const [selectedJobId, setSelectedJobId] = useState(null);
+function MapView({ jobs, selectedJobId: initialSelectedJobId = null }) {
+  const [selectedJobId, setSelectedJobId] = useState(initialSelectedJobId);
+  useEffect(() => setSelectedJobId(initialSelectedJobId), [initialSelectedJobId]);
   const selectedJob = jobs.find((job) => job.id === selectedJobId);
   const markerPositions = [
     { top: "21%", left: "20%" },

@@ -29,7 +29,7 @@ import { getCurrentCrew, getMyJobs, updateJobStatus } from './lib/api.js';
 import { getLocation } from './lib/location';
 import { captureAndUpload } from './lib/photos';
 import { navigateTo } from './lib/navigate';
-import { queueUpdate, flushQueue, getQueueLength } from './lib/offlineQueue';
+import { queueUpdate, flushQueue, getQueueLength, getQueueItems } from './lib/offlineQueue';
 import SafetyChecklist from './components/SafetyChecklist';
 import QrScanner from './components/QrScanner';
 import * as PriorityChecklistModule from './components/PriorityChecklist';
@@ -58,6 +58,15 @@ const NEXT_STATUS = {
 // Critical -> red. Kept local (not imported) so this file can never crash
 // due to a missing/misnamed export in another file.
 const severityColors = { Critical: '#d7382a', High: '#e08a1e', Medium: '#2f6fd6', Low: '#2a9d5c' };
+
+function timeAgo(timestamp) {
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return 'just now';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours} hr ago`;
+}
 
 export default function NativeApp() {
   return (
@@ -109,7 +118,9 @@ function NativeAppScreen() {
   const [jobs, setJobs] = useState(FALLBACK_JOBS);
   const [tab, setTab] = useState('Jobs');
   const [activeJob, setActiveJob] = useState(null);
+  const [mapJobId, setMapJobId] = useState(null);
   const [pendingCount, setPendingCount] = useState(0);
+  const [pendingItems, setPendingItems] = useState([]);
 
   // Try to resume a previous Keycloak session on cold start. Guarded so a
   // slow/unavailable native module (e.g. secure storage on web) can never
@@ -192,9 +203,24 @@ function NativeAppScreen() {
   useEffect(() => {
     if (!authenticated) return;
     const sync = () => {
+      if (!isAuthenticated()) {
+        // Demo mode has no real backend to flush against, and re-fetching
+        // demo jobs would just overwrite locally-advanced statuses — only
+        // refresh the pending list for display.
+        getQueueItems()
+          .then((items) => {
+            setPendingItems(items);
+            setPendingCount(items.length);
+          })
+          .catch(() => {});
+        return;
+      }
       flushQueue()
-        .then(() => getQueueLength())
-        .then(setPendingCount)
+        .then(() => getQueueItems())
+        .then((items) => {
+          setPendingItems(items);
+          setPendingCount(items.length);
+        })
         .then(refresh)
         .catch(() => {});
     };
@@ -206,13 +232,27 @@ function NativeAppScreen() {
   const handleAdvance = useCallback(async (job, nextStatus) => {
     const location = await getLocation();
     setJobs((current) => current.map((j) => (j.id === job.id ? { ...j, status: nextStatus } : j)));
+
+    // Demo mode has no real backend to sync with — queue immediately so
+    // the pending-sync section actually shows something, instead of the
+    // update silently "succeeding" against nothing.
+    if (!isAuthenticated()) {
+      const queued = { id: job.id, status: nextStatus, location, queuedAt: Date.now() };
+      await queueUpdate(queued);
+      setPendingItems((current) => [...current, queued]);
+      setPendingCount((n) => n + 1);
+      return;
+    }
+
     try {
       await updateJobStatus(job.id, nextStatus, location);
     } catch {
-      await queueUpdate({ id: job.id, status: nextStatus, location });
+      const queued = { id: job.id, status: nextStatus, location, queuedAt: Date.now() };
+      await queueUpdate(queued);
+      setPendingItems((current) => [...current, queued]);
       setPendingCount((n) => n + 1);
     }
-  }, []);
+  }, []);;
 
   if (checkingSession) {
     return (
@@ -300,11 +340,44 @@ function NativeAppScreen() {
               <Stat value={jobs[0]?.distance ?? '—'} label="Next location" />
               <Stat value={String(jobs.reduce((sum, j) => sum + (j.customers || 0), 0))} label="Customers" />
             </View>
+
+            {pendingItems.length > 0 && (
+              <View style={styles.pendingSection}>
+                <View style={styles.pendingSectionHeader}>
+                  <Text style={styles.pendingSectionTitle}>PENDING SYNC</Text>
+                  <View style={styles.pendingCountPill}>
+                    <Text style={styles.pendingCountPillText}>{pendingItems.length}</Text>
+                  </View>
+                </View>
+                <Text style={styles.pendingSectionSubtitle}>
+                  These status updates didn't reach the server yet. They'll retry automatically.
+                </Text>
+                {pendingItems.map((item, i) => (
+                  <View key={`${item.id}-${item.queuedAt ?? i}`} style={styles.pendingItemRow}>
+                    <View style={styles.pendingDot} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.pendingItemTitle}>{item.id} → {item.status}</Text>
+                      <Text style={styles.pendingItemMeta}>
+                        {item.queuedAt ? `Queued ${timeAgo(item.queuedAt)}` : 'Queued offline'}
+                      </Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            )}
+
             <Text style={styles.section}>MY JOBS</Text>
             {jobs.map((job) => (
               <JobCard key={job.id} job={job} onPress={() => setActiveJob(job)} />
             ))}
           </>
+        ) : tab === 'Map' ? (
+          <MapScreen jobs={jobs} selectedJobId={mapJobId} onSelect={setMapJobId} />
+        ) : tab === 'Profile' ? (
+          <ProfileScreen crew={crew} jobs={jobs} onLogout={async () => {
+            await authLogout();
+            setAuthenticated(false);
+          }} />
         ) : (
           <View style={styles.empty}>
             <Text style={styles.title}>{tab}</Text>
@@ -332,6 +405,11 @@ function NativeAppScreen() {
             job={activeJob}
             onClose={() => setActiveJob(null)}
             onAdvance={handleAdvance}
+            onNavigate={(job) => {
+              setMapJobId(job.id);
+              setActiveJob(null);
+              setTab('Map');
+            }}
           />
         )}
       </Modal>
@@ -466,26 +544,31 @@ function Stat({ value, label }) {
 }
 
 function JobCard({ job, onPress }) {
+  const severity = job.severity || 'Medium';
+  const color = (severityColors && severityColors[severity]) || '#2f6fd6';
   return (
     <Pressable onPress={onPress} style={styles.card}>
-      <View style={[styles.severity, { backgroundColor: (severityColors && severityColors[job.severity]) || '#2f6fd6' }]} />
+      <View style={[styles.severity, { backgroundColor: color }]} />
       <View style={styles.cardBody}>
         <View style={styles.row}>
-          <Text style={styles.jobId}>{job.id}</Text>
-          <Text style={styles.status}>{job.status}</Text>
+          <Text style={styles.jobId}>{job.id || 'JOB-—'}</Text>
+          <Text style={styles.status}>{job.status || 'Unknown status'}</Text>
         </View>
-        <Text style={styles.jobTitle}>{job.title}</Text>
-        <Text style={styles.address}>{job.address}</Text>
+        <View style={[styles.severityBadge, { backgroundColor: color }]}>
+          <Text style={styles.severityBadgeText}>{severity.toUpperCase()}</Text>
+        </View>
+        <Text style={styles.jobTitle}>{job.title || 'Untitled job'}</Text>
+        <Text style={styles.address}>{job.address || 'Location not available'}</Text>
         <View style={styles.row}>
-          <Text style={styles.meta}>{job.distance}</Text>
-          <Text style={styles.meta}>{job.customers} customers</Text>
+          <Text style={styles.meta}>{job.distance || 'Distance unknown'}</Text>
+          <Text style={styles.meta}>{job.customers ?? 0} customers</Text>
         </View>
       </View>
     </Pressable>
   );
 }
 
-function JobDetail({ job, onClose, onAdvance }) {
+function JobDetail({ job, onClose, onAdvance, onNavigate }) {
   const [showSafety, setShowSafety] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
   const [assetId, setAssetId] = useState('');
@@ -621,7 +704,10 @@ function JobDetail({ job, onClose, onAdvance }) {
           </View>
         )}
 
-        <Pressable style={styles.secondaryBtn} onPress={() => navigateTo(job.address)}>
+        <Pressable style={styles.secondaryBtn} onPress={() => {
+          onNavigate(job);
+          navigateTo(job.address);
+        }}>
           <Text style={styles.secondaryBtnText}>Navigate to site</Text>
         </Pressable>
 
@@ -659,6 +745,78 @@ function JobDetail({ job, onClose, onAdvance }) {
         )}
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+function MapScreen({ jobs, selectedJobId, onSelect }) {
+  const selectedJob = jobs.find((job) => job.id === selectedJobId);
+
+  return (
+    <View>
+      <Text style={styles.title}>Outage map</Text>
+      <Text style={styles.subtitle}>Tap an incident to focus the crew route.</Text>
+      <View style={styles.mapPanel}>
+        <View style={styles.mapGrid}>
+          <View style={styles.mapRoadOne} />
+          <View style={styles.mapRoadTwo} />
+          <View style={styles.mapRiver} />
+          <View style={styles.mapCrewMarker}>●</View>
+          {jobs.map((job, index) => (
+            <Pressable
+              key={job.id}
+              style={[styles.mapJobMarker, styles[`mapMarker${index % 4}`], selectedJobId === job.id && styles.mapJobMarkerSelected]}
+              onPress={() => onSelect(job.id)}
+              accessibilityLabel={`Focus ${job.title}`}
+            >
+              <Text style={styles.mapMarkerText}>!</Text>
+            </Pressable>
+          ))}
+        </View>
+        <Text style={styles.mapLegend}>● Crew  • Incidents  • Selected task</Text>
+      </View>
+      {selectedJob ? (
+        <View style={styles.mapSelectedCard}>
+          <Text style={styles.mapSelectedTitle}>{selectedJob.title}</Text>
+          <Text style={styles.mapSelectedMeta}>{selectedJob.id} · {selectedJob.address}</Text>
+          <Pressable style={styles.primaryBtn} onPress={() => navigateTo(selectedJob.address)}>
+            <Text style={styles.primaryBtnText}>Open route</Text>
+          </Pressable>
+        </View>
+      ) : (
+        <Text style={styles.mapEmpty}>Select a task marker to view its site.</Text>
+      )}
+    </View>
+  );
+}
+
+function ProfileScreen({ crew, jobs, onLogout }) {
+  const activeJobs = jobs.filter((job) => !['Work Complete', 'Completed', 'Closed'].includes(job.status));
+  return (
+    <View>
+      <Text style={styles.title}>My profile</Text>
+      <Text style={styles.subtitle}>Crew identity and field assignment details.</Text>
+      <View style={styles.profilePanel}>
+        <View style={styles.profileAvatar}><Text style={styles.profileAvatarText}>{crew.name?.charAt(5) || 'C'}</Text></View>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.profileName}>{crew.name}</Text>
+          <Text style={styles.profileRole}>{crew.role} · {crew.id}</Text>
+          <Text style={styles.profileLead}>Lead: {crew.lead || 'Assigned crew lead'}</Text>
+        </View>
+      </View>
+      <View style={styles.profileGrid}>
+        <Stat value={crew.shift || 'Day shift'} label="Shift" />
+        <Stat value={String(activeJobs.length)} label="Active jobs" />
+      </View>
+      <View style={styles.profileDetails}>
+        <Text style={styles.sectionSmall}>CREW DETAILS</Text>
+        <Text style={styles.profileDetailLine}>Skills: {(crew.skills || ['Field operations']).join(', ')}</Text>
+        <Text style={styles.profileDetailLine}>Status: Ready for assignment</Text>
+        <Text style={styles.profileDetailLine}>Session: Offline capable</Text>
+      </View>
+      <Pressable style={styles.logoutBtn} onPress={onLogout}>
+        <Text style={styles.logoutBtnText}>Sign out</Text>
+      </Pressable>
+    </View>
   );
 }
 
@@ -708,6 +866,16 @@ const styles = StyleSheet.create({
   statValue: { color: '#173355', fontSize: 18, fontWeight: '800' },
   statLabel: { color: '#7c8da3', fontSize: 11, marginTop: 4 },
   section: { color: '#7c8da3', fontSize: 11, fontWeight: '800', letterSpacing: 1.5, marginBottom: 11 },
+  pendingSection: { backgroundColor: '#fff7ea', borderRadius: 12, borderWidth: 1, borderColor: '#f2d9a8', padding: 14, marginBottom: 24, gap: 10 },
+  pendingSectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  pendingSectionTitle: { color: '#a8710f', fontSize: 11, fontWeight: '800', letterSpacing: 1 },
+  pendingSectionSubtitle: { color: '#8a6a33', fontSize: 12, marginTop: -4 },
+  pendingCountPill: { backgroundColor: '#e08a1e', borderRadius: 10, minWidth: 20, height: 20, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 5 },
+  pendingCountPillText: { color: '#fff', fontSize: 11, fontWeight: '800' },
+  pendingItemRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  pendingDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#e08a1e' },
+  pendingItemTitle: { color: '#5a3d10', fontSize: 13, fontWeight: '700' },
+  pendingItemMeta: { color: '#8a6a33', fontSize: 11, marginTop: 1 },
   sectionSmall: { color: '#7c8da3', fontSize: 10, fontWeight: '800', letterSpacing: 1.2, marginBottom: 8 },
   card: { backgroundColor: '#fff', borderRadius: 13, flexDirection: 'row', marginBottom: 12, overflow: 'hidden', borderWidth: 1, borderColor: '#e6ecf3' },
   severity: { width: 5 },
@@ -715,6 +883,8 @@ const styles = StyleSheet.create({
   row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   jobId: { color: '#7c8da3', fontSize: 11, fontWeight: '700' },
   status: { color: '#33465f', backgroundColor: '#f2f5f9', borderRadius: 12, paddingHorizontal: 8, paddingVertical: 4, fontSize: 10, fontWeight: '700' },
+  severityBadge: { alignSelf: 'flex-start', borderRadius: 8, paddingHorizontal: 7, paddingVertical: 3, marginTop: 8 },
+  severityBadgeText: { color: '#fff', fontSize: 9, fontWeight: '800', letterSpacing: 0.5 },
   jobTitle: { color: '#0f1b2d', fontSize: 16, fontWeight: '800', marginTop: 10 },
   address: { color: '#7c8da3', fontSize: 13, marginTop: 4 },
   meta: { color: '#33465f', fontSize: 12, fontWeight: '600', marginTop: 13 },
@@ -739,4 +909,33 @@ const styles = StyleSheet.create({
   completionSummaryTitle: { color: '#1b7a4a', fontSize: 13, fontWeight: '800' },
   completionSummaryLine: { color: '#2f5d47', fontSize: 12 },
   primaryBtnText: { color: '#fff', fontWeight: '800' },
+  mapPanel: { backgroundColor: '#fff', borderRadius: 12, padding: 12, borderWidth: 1, borderColor: '#e6ecf3' },
+  mapGrid: { height: 300, overflow: 'hidden', borderRadius: 9, backgroundColor: '#dcebe3', position: 'relative' },
+  mapRoadOne: { position: 'absolute', width: '130%', height: 12, top: '28%', left: '-10%', backgroundColor: 'rgba(255,255,255,.82)', transform: [{ rotate: '-25deg' }] },
+  mapRoadTwo: { position: 'absolute', width: '130%', height: 10, top: '64%', left: '-10%', backgroundColor: 'rgba(255,255,255,.82)', transform: [{ rotate: '19deg' }] },
+  mapRiver: { position: 'absolute', height: '130%', width: 28, top: '-10%', right: '25%', backgroundColor: '#acd6d5', transform: [{ rotate: '17deg' }], opacity: 0.8 },
+  mapCrewMarker: { position: 'absolute', top: '52%', left: '53%', width: 30, height: 30, borderRadius: 15, backgroundColor: '#0e9f8e', color: '#fff', textAlign: 'center', lineHeight: 30, fontSize: 18 },
+  mapJobMarker: { position: 'absolute', width: 30, height: 30, borderRadius: 15, backgroundColor: '#d13d2f', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#fff' },
+  mapMarkerText: { color: '#fff', fontSize: 16, fontWeight: '800' },
+  mapMarker0: { top: '20%', left: '20%' },
+  mapMarker1: { top: '40%', right: '18%', backgroundColor: '#e08a1e' },
+  mapMarker2: { bottom: '18%', left: '38%', backgroundColor: '#2f6fd6' },
+  mapMarker3: { bottom: '10%', right: '28%', backgroundColor: '#2a9d5c' },
+  mapJobMarkerSelected: { transform: [{ scale: 1.25 }], borderColor: '#173355' },
+  mapLegend: { color: '#7c8da3', fontSize: 11, marginTop: 10 },
+  mapSelectedCard: { backgroundColor: '#fff', borderRadius: 12, padding: 14, marginTop: 12, borderWidth: 1, borderColor: '#b9dcd3', gap: 8 },
+  mapSelectedTitle: { color: '#173355', fontSize: 15, fontWeight: '800' },
+  mapSelectedMeta: { color: '#7c8da3', fontSize: 12 },
+  mapEmpty: { color: '#7c8da3', fontSize: 13, marginTop: 16, textAlign: 'center' },
+  profilePanel: { flexDirection: 'row', alignItems: 'center', gap: 13, backgroundColor: '#fff', borderRadius: 13, padding: 16, borderWidth: 1, borderColor: '#e6ecf3' },
+  profileAvatar: { width: 58, height: 58, borderRadius: 18, backgroundColor: '#173355', alignItems: 'center', justifyContent: 'center' },
+  profileAvatarText: { color: '#fff', fontSize: 24, fontWeight: '800' },
+  profileName: { color: '#0f1b2d', fontSize: 18, fontWeight: '800' },
+  profileRole: { color: '#0e9f8e', fontSize: 12, fontWeight: '700', marginTop: 3 },
+  profileLead: { color: '#7c8da3', fontSize: 12, marginTop: 5 },
+  profileGrid: { flexDirection: 'row', gap: 9, marginTop: 12 },
+  profileDetails: { backgroundColor: '#fff', borderRadius: 12, padding: 15, marginTop: 12, borderWidth: 1, borderColor: '#e6ecf3', gap: 10 },
+  profileDetailLine: { color: '#33465f', fontSize: 13 },
+  logoutBtn: { marginTop: 18, padding: 14, alignItems: 'center', borderRadius: 10, borderWidth: 1, borderColor: '#efc9c4', backgroundColor: '#fff' },
+  logoutBtnText: { color: '#bd3e32', fontWeight: '800' },
 });

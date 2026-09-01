@@ -82,6 +82,33 @@ npm run native      # Expo dev server (scan QR with Expo Go, or press a/i)
 npm run dev          # Vite web build at http://localhost:5173
 ```
 
+## PostgreSQL photo storage
+
+Photo uploads are handled by `server/index.js`. The service accepts the
+existing `{ dataUrl, lat, lon, note }` payload, compresses the source image
+to WebP with a maximum 1920px edge and quality 72, then stores the compressed
+bytes in PostgreSQL `job_photos.image_data` as `bytea`.
+
+For local development:
+
+```bash
+docker compose up -d postgres
+# PowerShell
+$env:DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/oms"
+$env:DB_SSL = "false"
+npm run server
+```
+
+The schema is mounted automatically by Docker Compose. Check the service at
+`http://localhost:4000/health`. Do not use the example database password in
+production; use a secret environment variable and put the photo route behind
+the same Keycloak authorization middleware as the other mobile routes.
+For a hosted PostgreSQL provider that requires TLS, set `$env:DB_SSL = "true"`.
+PEM certificates do not need to be installed as packages. Point `DB_SSL_CA`
+to the provider's `.pem` CA file; mutual TLS providers may also require
+`DB_SSL_CERT` and `DB_SSL_KEY`. Keep `DB_SSL_REJECT_UNAUTHORIZED=true` when
+using a trusted CA.
+
 ## Known follow-ups
 
 - `expo-network`/`NetInfo` isn't wired to a live connectivity listener

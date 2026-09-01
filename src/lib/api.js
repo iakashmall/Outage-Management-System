@@ -11,10 +11,13 @@
 // we're in, so screens can share the exact same function signatures.
 import { Platform } from "react-native";
 import { API_BASE } from "../config";
-import { authHeader, myCrewId, isAuthenticated } from "./auth";
 
 const IS_WEB = Platform.OS === "web";
 const WEB_API_URL = "/api";
+
+async function nativeAuth() {
+  return import("./auth");
+}
 
 /* =========================================================
    DEMO FALLBACK DATA
@@ -57,6 +60,7 @@ async function webReq(path, method = "GET", body) {
 
 // Native: absolute backend URL, Keycloak bearer token (per the OMS mobile guide).
 async function nativeReq(path, method = "GET", body) {
+  const { authHeader } = await nativeAuth();
   const response = await fetch(API_BASE + path, {
     method,
     headers: { "Content-Type": "application/json", ...authHeader() },
@@ -94,6 +98,7 @@ function normalizeOmsJob(job) {
 export async function getCurrentCrew() {
   try {
     if (IS_WEB) return await webReq("/me");
+    const { isAuthenticated, myCrewId } = await nativeAuth();
     if (!isAuthenticated()) return DEMO_CREW;
     return await nativeReq("/mobile/crews/" + myCrewId());
   } catch {
@@ -111,6 +116,7 @@ export async function getMyJobs() {
       const jobs = Array.isArray(payload) ? payload : payload.jobs ?? [];
       return jobs.length ? jobs : demoJobs;
     }
+    const { isAuthenticated, myCrewId } = await nativeAuth();
     if (!isAuthenticated()) return demoJobs;
     const jobs = await nativeReq("/mobile/crews/" + myCrewId() + "/jobs");
     return (jobs ?? []).map(normalizeOmsJob);
@@ -146,6 +152,14 @@ export async function updateJobStatus(id, status, location = {}, job) {
 // POST a photo for a job (native only — the web app uses local object URLs).
 // Native: POST /api/mobile/jobs/:id/photos  { dataUrl, lat, lon, note }
 export async function uploadJobPhoto(id, dataUrl, location = {}, note) {
+  if (IS_WEB) {
+    return webReq(`/mobile/jobs/${id}/photos`, "POST", {
+      dataUrl,
+      lat: location.lat ?? null,
+      lon: location.lon ?? null,
+      note: note ?? null,
+    });
+  }
   return nativeReq(`/mobile/jobs/${id}/photos`, "POST", {
     dataUrl,
     lat: location.lat ?? null,

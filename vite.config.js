@@ -4,6 +4,15 @@ import { VitePWA } from 'vite-plugin-pwa';
 
 // Mobile crew PWA — runs on 5174, proxies API to the OMS backend on 4000.
 export default defineConfig({
+  define: {
+    __DEV__: false,
+    'process.env.NODE_ENV': JSON.stringify('development'),
+  },
+  resolve: {
+    alias: {
+      'react-native': 'react-native-web',
+    },
+  },
   plugins: [
     react(),
     VitePWA({
