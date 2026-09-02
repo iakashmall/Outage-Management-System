@@ -174,36 +174,37 @@ export default function Splash({ onDone, minDurationMs = 2600 }) {
         </g>
       </svg>
 
-      {/* ---- logo mark: ring + tail drawn on via Motion's pathLength ---- */}
-      <motion.div style={{ position: 'relative', zIndex: 1, filter: 'drop-shadow(0 8px 24px rgba(14,159,142,0.35))' }}>
-        <svg width="96" height="96" viewBox="0 0 256 256">
-          <defs>
-            <linearGradient id="splashGrad" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0" stopColor="#0e9f8e" />
-              <stop offset="1" stopColor="#0b7d70" />
-            </linearGradient>
-          </defs>
-          <motion.rect
-            width="256" height="256" rx="52" fill="url(#splashGrad)"
-            initial={{ scale: 0.7, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            transition={reduceMotion ? { duration: 0.01 } : { type: 'spring', stiffness: 260, damping: 20 }}
-            style={{ transformOrigin: '128px 128px' }}
-          />
-          <motion.circle
-            cx="128" cy="128" r="60" fill="none" stroke="#ffffff" strokeWidth="24" strokeLinecap="round"
-            initial={{ pathLength: 0 }}
-            animate={{ pathLength: 1 }}
-            transition={t({ duration: 0.7, delay: 0.15, ease: [0.4, 0, 0.2, 1] })}
-          />
-          <motion.path
-            d="M148 158 L192 202" stroke="#ffffff" strokeWidth="24" strokeLinecap="round"
-            initial={{ pathLength: 0 }}
-            animate={{ pathLength: 1 }}
-            transition={t({ duration: 0.26, delay: 0.82, ease: 'easeOut' })}
-          />
-        </svg>
+      {/* ---- logo mark: no background container — just the logo, with a
+           continuous pulse/glow after it settles in, tying into the
+           electric theme (echoes the current-pulse motif in the scene
+           below rather than a generic breathing effect). ---- */}
+      <motion.div style={{ position: 'relative', zIndex: 1, width: 96, height: 96, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <motion.img
+          src="/gridq-mark.png"
+          alt="GridQ"
+          initial={{ scale: 0.5, opacity: 0 }}
+          animate={reduceMotion ? { scale: 1, opacity: 1 } : {
+            scale: [0.5, 1.06, 1, 1.035, 1],
+            opacity: [0, 1, 1, 1, 1],
+            filter: [
+              'drop-shadow(0 0 0px rgba(14,159,142,0))',
+              'drop-shadow(0 8px 26px rgba(14,159,142,0.55))',
+              'drop-shadow(0 8px 20px rgba(14,159,142,0.35))',
+              'drop-shadow(0 8px 30px rgba(14,159,142,0.55))',
+              'drop-shadow(0 8px 20px rgba(14,159,142,0.35))',
+            ],
+          }}
+          transition={reduceMotion ? { duration: 0.01 } : {
+            duration: 2.6,
+            times: [0, 0.25, 0.4, 0.7, 1],
+            repeat: Infinity,
+            repeatDelay: 0.3,
+            ease: 'easeInOut',
+          }}
+          style={{ width: 72, height: 72, objectFit: 'contain' }}
+        />
       </motion.div>
+
 
       <motion.div
         initial={{ opacity: 0, y: 6 }}

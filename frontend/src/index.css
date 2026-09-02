@@ -37,9 +37,9 @@ button{font-family:inherit;cursor:pointer}
 .rail{background:var(--navy);display:flex;flex-direction:column;align-items:center;
   padding:14px 0;gap:6px;position:relative}
 .rail .brand{width:38px;height:38px;border-radius:9px;
-  background:linear-gradient(145deg,#16b7a2 0%,var(--live) 48%,#087b78 100%);
-  display:grid;place-items:center;margin-bottom:14px;box-shadow:0 3px 10px rgba(14,159,142,.4)}
+  display:grid;place-items:center;margin-bottom:14px}
 .rail .brand b{font-family:var(--disp);color:#fff;font-size:18px;font-weight:700}
+.rail .brand-img{width:32px;height:32px;object-fit:contain}
 .navbtn{width:44px;height:44px;border:0;background:transparent;border-radius:10px;
   display:grid;place-items:center;color:#8fa6c4;transition:.15s;position:relative}
 .navbtn:hover{background:rgba(255,255,255,.08);color:#dce7f4}
@@ -426,10 +426,9 @@ body{
 }
 
 /* Brand / active navigation */
-.rail .brand{
-  background:linear-gradient(145deg,var(--teal-1) 0%,var(--teal-2) 52%,var(--teal-3) 100%);
-  box-shadow:0 5px 16px rgba(11,159,143,.32);
-}
+/* .rail .brand background intentionally removed — the logo image now
+   stands on its own, no colored badge behind it (see App.jsx / index.css
+   base .rail .brand rule). */
 .navbtn.on{
   background:linear-gradient(135deg,rgba(22,183,162,.20),rgba(16,47,74,.34));
 }

@@ -111,7 +111,7 @@ export default function App() {
   return (
     <div className="shell">
       <nav className="rail" aria-label="Primary">
-        <div className="brand" title="UPCL OMS"><b>Q</b></div>
+        <div className="brand" title="GridQ"><img src="/gridq-mark.png" alt="GridQ" className="brand-img" /></div>
         {NAV.map(([id, label, icon]) => (
           <button key={id} className={`navbtn ${tab === id ? 'on' : ''}`}
             onClick={() => setTab(id)} aria-current={tab === id} aria-label={label}>
