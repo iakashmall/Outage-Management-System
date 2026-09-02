@@ -109,7 +109,7 @@ export default function App() {
   return (
     <div className="shell">
       <nav className="rail" aria-label="Primary">
-        <div className="brand" title="UPCL OMS"><b>Ω</b></div>
+        <div className="brand" title="UPCL OMS"><b>Q</b></div>
         {NAV.map(([id, label, icon]) => (
           <button key={id} className={`navbtn ${tab === id ? 'on' : ''}`}
             onClick={() => setTab(id)} aria-current={tab === id} aria-label={label}>
@@ -121,6 +121,23 @@ export default function App() {
       </nav>
 
       <div className="main">
+        <div className="masthead">
+          <div className="masthead-brand">
+            <div className="masthead-text">
+              <div className="masthead-word">GridQ</div>
+              {/* Real tagline — update here if it changes */}
+              <div className="masthead-tag">Predict. Prevent. Power.</div>
+            </div>
+          </div>
+          <div className="grow" />
+          <div className="masthead-brand masthead-brand-right">
+            <div className="masthead-text masthead-text-right">
+              <div className="masthead-tag">Uttarakhand Power Corporation Limited</div>
+            </div>
+            <img src="/upcl-logo.png" alt="UPCL" className="masthead-logo" />
+          </div>
+        </div>
+
         <header className="cmd">
           <div>
             <h1>{active[1]}</h1>

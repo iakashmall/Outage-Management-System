@@ -1,13 +1,19 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App.jsx';
+import Splash from './Splash.jsx';
 import './index.css';
 import { initKeycloak } from './lib/auth.js';
 
 initKeycloak()
   .then((authenticated) => {
     if (authenticated) {
-      createRoot(document.getElementById('root')).render(<React.StrictMode><App /></React.StrictMode>);
+      const root = createRoot(document.getElementById('root'));
+      // Splash renders first — a few seconds of themed animation — then
+      // swaps itself out for the real dashboard once it's done. The actual
+      // App component doesn't mount until the splash finishes, so this
+      // isn't just a visual overlay sitting on top of a half-loaded app.
+      root.render(<Splash onDone={() => root.render(<React.StrictMode><App /></React.StrictMode>)} />);
     }
   })
   .catch((err) => {

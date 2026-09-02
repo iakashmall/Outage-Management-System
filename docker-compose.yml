@@ -79,6 +79,9 @@ services:
       KC_DB_USERNAME: oms
       KC_DB_PASSWORD: oms
     ports: ["8081:8081"]
+    volumes:
+      # GridQ-themed login page — matches the app's landing page (Splash.jsx)
+      - ./infra/keycloak-theme/gridq:/opt/keycloak/themes/gridq
     depends_on:
       postgres:
         condition: service_healthy
