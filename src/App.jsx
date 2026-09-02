@@ -1,6 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "./app.css";
 import { getCurrentCrew, getMyJobs, logout, updateJobStatus, uploadJobPhoto } from "./lib/api.js";
+import { navigateTo } from "./lib/navigate.js";
+import { buildMultiStopUrl, openMultiJobRoute } from "./lib/routing.js";
 
 /* =========================================================
    DEMO DATA
@@ -115,6 +117,16 @@ export default function App() {
       .then(() => setQueuedUpdates([]))
       .catch(() => {});
   }, [online, queuedUpdates]);
+
+  useEffect(() => () => {
+    if (navigator.mediaDevices?.getUserMedia) {
+      const tracks = document.querySelectorAll("video");
+      tracks.forEach((video) => {
+        const stream = video.srcObject;
+        stream?.getTracks().forEach((track) => track.stop());
+      });
+    }
+  }, []);
 
   useEffect(() => {
     if (!authenticated) return;
@@ -347,6 +359,7 @@ function CrewLayout({ crew, jobs, onUpdateJob, omsSource, online, queuedUpdates,
       <Header
         crew={crew}
         title="Field Crew"
+        online={online}
         onLogout={onLogout}
       />
 
@@ -490,6 +503,9 @@ function JobCard({ job, onUpdate, onNavigate }) {
   const [assetId, setAssetId] = useState("");
   const [assetMessage, setAssetMessage] = useState("");
   const [photoMessage, setPhotoMessage] = useState("");
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [cameraStream, setCameraStream] = useState(null);
+  const videoRef = useRef(null);
 
   const nextStatus = {
     "Pending Acceptance": "Acknowledged",
@@ -538,6 +554,63 @@ function JobCard({ job, onUpdate, onNavigate }) {
       setPhotoMessage(error?.message || "Photo upload failed.");
     } finally {
       event.target.value = "";
+    }
+  };
+
+  const stopCamera = () => {
+    if (cameraStream) {
+      cameraStream.getTracks().forEach((track) => track.stop());
+    }
+    setCameraStream(null);
+    setCameraOpen(false);
+  };
+
+  const openQrCamera = async () => {
+    if (!("BarcodeDetector" in window) || !navigator.mediaDevices?.getUserMedia) {
+      setAssetMessage("Camera QR scanning is unavailable in this browser. Upload an image instead.");
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } },
+      });
+      setCameraStream(stream);
+      setCameraOpen(true);
+      setAssetMessage("Camera ready. Point it at the QR code and press Capture.");
+    } catch {
+      setAssetMessage("Camera permission was denied. Upload an image instead.");
+    }
+  };
+
+  const captureQrFromCamera = async () => {
+    if (!videoRef.current || !cameraStream) return;
+
+    const video = videoRef.current;
+    const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+
+    if (!context) {
+      setAssetMessage("Camera frame could not be processed. Try again.");
+      return;
+    }
+
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    try {
+      const result = await detector.detect(canvas);
+      if (!result.length) {
+        setAssetMessage("No QR code found in the camera frame.");
+        return;
+      }
+      setAssetId(result[0].rawValue);
+      setAssetMessage("QR asset detected from camera.");
+      stopCamera();
+    } catch {
+      setAssetMessage("Camera QR detection failed. Try again or upload an image.");
     }
   };
 
@@ -667,9 +740,21 @@ function JobCard({ job, onUpdate, onNavigate }) {
         <strong>Asset scan</strong>
         <div className="asset-controls">
           <input value={assetId} onChange={(event) => setAssetId(event.target.value)} placeholder="Asset ID" />
+          <button type="button" className="camera-qr-btn" onClick={openQrCamera}>Use camera</button>
           <label>Scan QR<input type="file" accept="image/*" capture="environment" onChange={scanQrImage} /></label>
           <button type="button" onClick={readNfc}>Read NFC</button>
         </div>
+
+        {cameraOpen && (
+          <div className="camera-qr-panel">
+            <video ref={videoRef} className="camera-view" autoPlay playsInline muted />
+            <div className="camera-actions">
+              <button type="button" onClick={captureQrFromCamera}>Capture QR</button>
+              <button type="button" className="ghost" onClick={stopCamera}>Close</button>
+            </div>
+          </div>
+        )}
+
         {assetMessage && <small>{assetMessage}</small>}
         {assetId && <span className="asset-result">Attached asset: {assetId}</span>}
       </div>
@@ -682,9 +767,16 @@ function JobCard({ job, onUpdate, onNavigate }) {
           {expanded ? "Hide details" : "View details"}
         </button>
 
-        <a className="secondary-btn navigation-btn" href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(job.address)}`} target="_blank" rel="noreferrer" onClick={() => onNavigate?.(job)}>
-          Navigate
-        </a>
+        <button
+          type="button"
+          className="secondary-btn navigation-btn"
+          onClick={() => {
+            onNavigate?.(job);
+            navigateTo(job.address);
+          }}
+        >
+          Turn-by-turn
+        </button>
 
         {nextStatus[job.status] && (
           <button
@@ -1139,6 +1231,7 @@ function MapView({ jobs, selectedJobId: initialSelectedJobId = null }) {
     { top: "76%", left: "68%" },
     { top: "30%", left: "48%" },
   ];
+  const routeAllUrl = buildMultiStopUrl(jobs);
 
   return (
     <>
@@ -1192,6 +1285,18 @@ function MapView({ jobs, selectedJobId: initialSelectedJobId = null }) {
         </div>
       </div>
 
+      {jobs.length > 1 && routeAllUrl && (
+        <div className="map-route-panel">
+          <div>
+            <strong>Multi-job route</strong>
+            <small>{jobs.length} stops in sequence</small>
+          </div>
+          <button type="button" className="primary-btn route-all-button" onClick={() => openMultiJobRoute(jobs)}>
+            Route all jobs
+          </button>
+        </div>
+      )}
+
       {selectedJob && (
         <div className="map-job-panel">
           <div>
@@ -1200,7 +1305,7 @@ function MapView({ jobs, selectedJobId: initialSelectedJobId = null }) {
             <small>{selectedJob.status} · {selectedJob.customers} customers affected</small>
           </div>
           <div className="map-job-actions">
-            <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(selectedJob.address)}`} target="_blank" rel="noreferrer">Navigate</a>
+            <button type="button" onClick={() => navigateTo(selectedJob.address)}>Turn-by-turn</button>
             <button type="button" onClick={() => setSelectedJobId(null)}>Close</button>
           </div>
         </div>
@@ -1364,7 +1469,7 @@ function Profile({ crew, onLogout }) {
    HEADER
 ========================================================= */
 
-function Header({ crew, title, onLogout }) {
+function Header({ crew, title, online, onLogout }) {
   return (
     <header className="mobile-header">
       <div>
@@ -1377,13 +1482,20 @@ function Header({ crew, title, onLogout }) {
         </small>
       </div>
 
-      <button
-        className="header-avatar"
-        onClick={onLogout}
-        title="Sign out"
-      >
-        {crew.name.charAt(5)}
-      </button>
+      <div className="header-actions">
+        <span className={`header-network ${online ? "online" : "offline"}`}>
+          <i className="network-dot" />
+          {online ? "Online" : "Offline"}
+        </span>
+
+        <button
+          className="header-avatar"
+          onClick={onLogout}
+          title="Sign out"
+        >
+          {crew.name.charAt(5)}
+        </button>
+      </div>
     </header>
   );
 }

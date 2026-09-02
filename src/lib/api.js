@@ -10,13 +10,53 @@
 // `Platform.OS` (via react-native-web on the web build) tells us which mode
 // we're in, so screens can share the exact same function signatures.
 import { Platform } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { API_BASE } from "../config";
 
 const IS_WEB = Platform.OS === "web";
 const WEB_API_URL = "/api";
+const JOBS_CACHE_KEY = "oms-jobs-cache";
+const JOBS_CACHE_SYNCED_AT_KEY = "oms-jobs-cache-synced-at";
 
 async function nativeAuth() {
   return import("./auth");
+}
+
+// Cache the last successfully-fetched job list (with locations/addresses)
+// to disk, so the Jobs list and Map screen still have real, last-known
+// data to show when the device has no connectivity — this is what
+// "offline maps" means here: cached job/location data, not offline map
+// *tiles*. Rendering actual pannable/zoomable map tiles without a network
+// connection needs a dedicated mapping SDK (e.g. react-native-maps with
+// Mapbox/Google offline packs) and API keys, which is a separate scope
+// addition from this caching layer.
+async function cacheJobs(jobs) {
+  try {
+    await AsyncStorage.setItem(JOBS_CACHE_KEY, JSON.stringify(jobs));
+    await AsyncStorage.setItem(JOBS_CACHE_SYNCED_AT_KEY, String(Date.now()));
+  } catch {
+    // best-effort — a caching failure shouldn't block the fetch result
+  }
+}
+
+async function readCachedJobs() {
+  try {
+    const stored = await AsyncStorage.getItem(JOBS_CACHE_KEY);
+    return stored ? JSON.parse(stored) : null;
+  } catch {
+    return null;
+  }
+}
+
+// When the cached job list was last successfully synced, or null if
+// nothing has ever synced. Shown in the UI as an "offline-ready" note.
+export async function getJobsLastSyncedAt() {
+  try {
+    const stored = await AsyncStorage.getItem(JOBS_CACHE_SYNCED_AT_KEY);
+    return stored ? Number(stored) : null;
+  } catch {
+    return null;
+  }
 }
 
 /* =========================================================
@@ -114,14 +154,22 @@ export async function getMyJobs() {
     if (IS_WEB) {
       const payload = await webReq("/jobs");
       const jobs = Array.isArray(payload) ? payload : payload.jobs ?? [];
-      return jobs.length ? jobs : demoJobs;
+      const result = jobs.length ? jobs : demoJobs;
+      if (jobs.length) await cacheJobs(result);
+      return result;
     }
     const { isAuthenticated, myCrewId } = await nativeAuth();
     if (!isAuthenticated()) return demoJobs;
     const jobs = await nativeReq("/mobile/crews/" + myCrewId() + "/jobs");
-    return (jobs ?? []).map(normalizeOmsJob);
+    const mapped = (jobs ?? []).map(normalizeOmsJob);
+    await cacheJobs(mapped);
+    return mapped;
   } catch {
-    return demoJobs;
+    // No connectivity / backend unreachable — prefer the last real
+    // synced job list (offline-ready data) over the static demo set,
+    // so the crew still sees their actual last-known assignments.
+    const cached = await readCachedJobs();
+    return cached && cached.length ? cached : demoJobs;
   }
 }
 

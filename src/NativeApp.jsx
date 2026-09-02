@@ -25,10 +25,11 @@ import {
 import { biometricUnlock } from './lib/biometric';
 import { getLockoutStatus, recordFailedAttempt, resetAttempts as resetLoginAttempts, MAX_ATTEMPTS, LOCKOUT_MS } from './lib/lockout';
 import { CLIENT_ID } from './config';
-import { getCurrentCrew, getMyJobs, updateJobStatus } from './lib/api.js';
+import { getCurrentCrew, getMyJobs, updateJobStatus, getJobsLastSyncedAt } from './lib/api.js';
 import { getLocation } from './lib/location';
 import { captureAndUpload } from './lib/photos';
 import { navigateTo } from './lib/navigate';
+import { openMultiJobRoute } from './lib/routing';
 import { queueUpdate, flushQueue, getQueueLength, getQueueItems } from './lib/offlineQueue';
 import SafetyChecklist from './components/SafetyChecklist';
 import QrScanner from './components/QrScanner';
@@ -750,11 +751,44 @@ function JobDetail({ job, onClose, onAdvance, onNavigate }) {
 
 function MapScreen({ jobs, selectedJobId, onSelect }) {
   const selectedJob = jobs.find((job) => job.id === selectedJobId);
+  const [lastSyncedAt, setLastSyncedAt] = useState(null);
+  const [routing, setRouting] = useState(false);
+
+  useEffect(() => {
+    getJobsLastSyncedAt().then(setLastSyncedAt).catch(() => {});
+  }, [jobs]);
+
+  const startMultiJobRoute = async () => {
+    setRouting(true);
+    try {
+      await openMultiJobRoute(jobs);
+    } finally {
+      setRouting(false);
+    }
+  };
 
   return (
     <View>
       <Text style={styles.title}>Outage map</Text>
       <Text style={styles.subtitle}>Tap an incident to focus the crew route.</Text>
+
+      <View style={styles.offlineBadgeRow}>
+        <View style={[styles.offlineDot, lastSyncedAt ? styles.offlineDotOn : styles.offlineDotOff]} />
+        <Text style={styles.offlineBadgeText}>
+          {lastSyncedAt
+            ? `Offline-ready · locations cached ${timeAgo(lastSyncedAt)}`
+            : 'Not cached yet — connect once to enable offline job locations'}
+        </Text>
+      </View>
+
+      {jobs.length > 1 && (
+        <Pressable style={styles.routeAllBtn} disabled={routing} onPress={startMultiJobRoute}>
+          <Text style={styles.routeAllBtnText}>
+            {routing ? 'Opening route…' : `Route all ${jobs.length} jobs (turn-by-turn)`}
+          </Text>
+        </Pressable>
+      )}
+
       <View style={styles.mapPanel}>
         <View style={styles.mapGrid}>
           <View style={styles.mapRoadOne} />
@@ -779,7 +813,7 @@ function MapScreen({ jobs, selectedJobId, onSelect }) {
           <Text style={styles.mapSelectedTitle}>{selectedJob.title}</Text>
           <Text style={styles.mapSelectedMeta}>{selectedJob.id} · {selectedJob.address}</Text>
           <Pressable style={styles.primaryBtn} onPress={() => navigateTo(selectedJob.address)}>
-            <Text style={styles.primaryBtnText}>Open route</Text>
+            <Text style={styles.primaryBtnText}>Start turn-by-turn navigation</Text>
           </Pressable>
         </View>
       ) : (
@@ -909,6 +943,13 @@ const styles = StyleSheet.create({
   completionSummaryTitle: { color: '#1b7a4a', fontSize: 13, fontWeight: '800' },
   completionSummaryLine: { color: '#2f5d47', fontSize: 12 },
   primaryBtnText: { color: '#fff', fontWeight: '800' },
+  offlineBadgeRow: { flexDirection: 'row', alignItems: 'center', gap: 7, marginBottom: 14 },
+  offlineDot: { width: 8, height: 8, borderRadius: 4 },
+  offlineDotOn: { backgroundColor: '#2a9d5c' },
+  offlineDotOff: { backgroundColor: '#c7d0dc' },
+  offlineBadgeText: { color: '#7c8da3', fontSize: 12, flex: 1 },
+  routeAllBtn: { backgroundColor: '#1F3864', borderRadius: 10, padding: 13, alignItems: 'center', marginBottom: 16 },
+  routeAllBtnText: { color: '#fff', fontWeight: '800', fontSize: 13 },
   mapPanel: { backgroundColor: '#fff', borderRadius: 12, padding: 12, borderWidth: 1, borderColor: '#e6ecf3' },
   mapGrid: { height: 300, overflow: 'hidden', borderRadius: 9, backgroundColor: '#dcebe3', position: 'relative' },
   mapRoadOne: { position: 'absolute', width: '130%', height: 12, top: '28%', left: '-10%', backgroundColor: 'rgba(255,255,255,.82)', transform: [{ rotate: '-25deg' }] },
