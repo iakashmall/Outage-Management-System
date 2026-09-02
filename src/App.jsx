@@ -101,6 +101,11 @@ function normalizeOmsJob(job) {
   };
 }
 
+function openMapsNavigation(address) {
+  if (!address) return;
+  navigateTo(address);
+}
+
 export default function App() {
   const role = "crew";
   const [authenticated, setAuthenticated] = useState(false);
@@ -770,12 +775,13 @@ function JobCard({ job, onUpdate, onNavigate }) {
         <button
           type="button"
           className="secondary-btn navigation-btn"
-          onClick={() => {
+          onClick={(event) => {
+            event.preventDefault();
             onNavigate?.(job);
-            navigateTo(job.address);
+            openMapsNavigation(job.address);
           }}
         >
-          Turn-by-turn
+          Navigate to site
         </button>
 
         {nextStatus[job.status] && (
@@ -1131,6 +1137,16 @@ function LeaderJobDetail({ job, onBack }) {
         <h2>Incident location</h2>
         <p>{job.address}</p>
         <div className="detail-map-placeholder">📍 OMS location preview</div>
+        <button
+          type="button"
+          className="cta ghost"
+          onClick={(event) => {
+            event.preventDefault();
+            openMapsNavigation(job.address);
+          }}
+        >
+          Navigate to site
+        </button>
       </div>
     </div>
   );
@@ -1291,7 +1307,10 @@ function MapView({ jobs, selectedJobId: initialSelectedJobId = null }) {
             <strong>Multi-job route</strong>
             <small>{jobs.length} stops in sequence</small>
           </div>
-          <button type="button" className="primary-btn route-all-button" onClick={() => openMultiJobRoute(jobs)}>
+          <button type="button" className="primary-btn route-all-button" onClick={(event) => {
+            event.preventDefault();
+            openMultiJobRoute(jobs);
+          }}>
             Route all jobs
           </button>
         </div>
@@ -1305,7 +1324,10 @@ function MapView({ jobs, selectedJobId: initialSelectedJobId = null }) {
             <small>{selectedJob.status} · {selectedJob.customers} customers affected</small>
           </div>
           <div className="map-job-actions">
-            <button type="button" onClick={() => navigateTo(selectedJob.address)}>Turn-by-turn</button>
+            <button type="button" onClick={(event) => {
+              event.preventDefault();
+              openMapsNavigation(selectedJob.address);
+            }}>Navigate to site</button>
             <button type="button" onClick={() => setSelectedJobId(null)}>Close</button>
           </div>
         </div>
@@ -1489,6 +1511,7 @@ function Header({ crew, title, online, onLogout }) {
         </span>
 
         <button
+          type="button"
           className="header-avatar"
           onClick={onLogout}
           title="Sign out"
@@ -1524,6 +1547,7 @@ function LeaderHeader({ crew, onLogout }) {
         </div>
 
         <button
+          type="button"
           className="header-avatar"
           onClick={onLogout}
         >
