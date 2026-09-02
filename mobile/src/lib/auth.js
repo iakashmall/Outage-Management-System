@@ -1,9 +1,9 @@
 import Keycloak from 'keycloak-js';
 
-// Same reasoning as frontend/src/lib/auth.js — this runs in the browser,
+// Same reasoning as frontend/src/lib/auth.js â€” this runs in the browser,
 // so "localhost" means the visitor's own machine, not the server's.
 export const keycloak = new Keycloak({
-  url: import.meta.env.VITE_KEYCLOAK_URL || 'http://localhost:8081',
+  url: import.meta.env.VITE_KEYCLOAK_URL || 'http://localhost:8080',
   realm: 'oms-upcl',
   clientId: 'oms-mobile',
 });
@@ -11,7 +11,7 @@ export const keycloak = new Keycloak({
 export function initKeycloak() {
   // checkLoginIframe disabled: it relies on a hidden cross-port iframe
   // (app on 5174, Keycloak on 8081) that modern Chrome blocks by default as
-  // part of third-party cookie restrictions — causing a permanent timeout
+  // part of third-party cookie restrictions â€” causing a permanent timeout
   // rather than a real login failure. This only disables Keycloak's
   // periodic "is my session still valid" background check; login itself
   // and token verification are unaffected.
