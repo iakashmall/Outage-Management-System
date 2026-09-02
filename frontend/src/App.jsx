@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef, Component } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
 import { socket } from './lib/api.js';
 import { Icon, useConnection, useToasts, hhmm } from './lib/ui.jsx';
-   import { currentUser, logout } from './lib/auth.js';
 import Dashboard from './screens/Dashboard.jsx';
 import Incidents from './screens/Incidents.jsx';
 import NetworkMap from './screens/NetworkMap.jsx';
@@ -11,6 +11,8 @@ import TCS from './screens/TCS.jsx';
 import Complaints from './screens/Complaints.jsx';
 import Analytics from './screens/Analytics.jsx';
 import Admin from './screens/Admin.jsx';
+import IncidentSearch from './components/IncidentSearch.jsx';
+import ProfileMenu from './components/ProfileMenu.jsx';
 
 // Isolates a screen crash so it shows an inline message instead of blanking the
 // whole app. Resets when you navigate to another screen (keyed by `tab`).
@@ -150,17 +152,29 @@ export default function App() {
           </div>
           <div className="clock mono">{clock}</div>
              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 12 }}>
-               <span style={{ fontSize: 13, opacity: 0.8 }}>{currentUser().username}</span>
-               <button onClick={logout} style={{ fontSize: 12, padding: '4px 10px', cursor: 'pointer', borderRadius: 6, border: '1px solid #ccc', background: 'transparent', color: 'inherit' }}>Logout</button>
+               <div style={{ marginLeft: 12, width: 260, position: 'relative', display: 'flex', alignItems: 'center' }}>
+                 <IncidentSearch onOpen={(inc) => openIncident(inc.id)} />
+               </div>
+               <ProfileMenu />
              </div>
            </header>
 
         <LiveTape />
 
         <div className="content">
-          <ScreenBoundary key={tab}>
-            <Screen go={setTab} openIncident={openIncident} focusIncidentId={tab === 'incidents' ? focusIncidentId : null} clearFocus={() => setFocusIncidentId(null)} />
-          </ScreenBoundary>
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={tab}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.18, ease: [0.22, 0.61, 0.36, 1] }}
+            >
+              <ScreenBoundary key={tab}>
+                <Screen go={setTab} openIncident={openIncident} focusIncidentId={tab === 'incidents' ? focusIncidentId : null} clearFocus={() => setFocusIncidentId(null)} />
+              </ScreenBoundary>
+            </motion.div>
+          </AnimatePresence>
         </div>
       </div>
 

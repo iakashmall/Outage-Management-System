@@ -1,0 +1,34 @@
+/* Utilities-only Tailwind — deliberately does NOT import "tailwindcss" (the
+   full bundle) or "tailwindcss/preflight.css". Preflight is Tailwind's
+   global CSS reset and would silently alter every element across the whole
+   app, not just the new search-bar/dropdown components. */
+@import "tailwindcss/theme.css";
+@import "tailwindcss/utilities.css";
+
+/* This app has no dark-mode toggle of its own — but Tailwind v4 defaults
+   "dark:" variants to the OS's prefers-color-scheme media query. That
+   silently flips every dark: class in these third-party components (e.g.
+   the search bar's own "bg-white dark:bg-black") whenever the browser/OS
+   is set to dark mode — which is exactly why the search dropdown was
+   rendering solid black instead of its own intended white background.
+   Redefining the variant to only match an explicit .dark class — which
+   this app never adds anywhere — permanently disables all dark: variants. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* shadcn-ui's components (dropdown-menu.jsx, etc.) use semantic color
+   classes like bg-popover / text-popover-foreground that reference these
+   theme tokens. They were never defined anywhere in this project, so those
+   classes previously generated no CSS at all. Mapped here to this app's
+   own existing palette (see index.css's --navy/--ink/--line variables) so
+   the profile menu and any future shadcn-style component matches the rest
+   of the app instead of using shadcn's own default (unrelated) colors. */
+@theme {
+  --color-popover: #ffffff;
+  --color-popover-foreground: #0b2033;
+  --color-accent: #eef4f3;
+  --color-accent-foreground: #0b2033;
+  --color-border: #d7e5e3;
+  --color-destructive: #d7382a;
+  --color-muted-foreground: #61798a;
+  --color-background: #ffffff;
+}
