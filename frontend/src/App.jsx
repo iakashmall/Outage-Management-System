@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef, Component } from 'react';
 import { socket } from './lib/api.js';
 import { Icon, useConnection, useToasts, hhmm } from './lib/ui.jsx';
-   import { currentUser, logout } from './lib/auth.js';
+import { currentUser, logout } from './lib/auth.js';
 import Dashboard from './screens/Dashboard.jsx';
 import Incidents from './screens/Incidents.jsx';
 import NetworkMap from './screens/NetworkMap.jsx';
@@ -11,6 +11,10 @@ import TCS from './screens/TCS.jsx';
 import Complaints from './screens/Complaints.jsx';
 import Analytics from './screens/Analytics.jsx';
 import Admin from './screens/Admin.jsx';
+import LandingPage from './components/LandingPage.jsx';
+import ProfileMenu from './components/ProfileMenu.jsx';
+import { motion, AnimatePresence } from 'motion/react';
+import IncidentSearch from './components/IncidentSearch.jsx';
 
 // Isolates a screen crash so it shows an inline message instead of blanking the
 // whole app. Resets when you navigate to another screen (keyed by `tab`).
@@ -22,7 +26,7 @@ class ScreenBoundary extends Component {
       return (
         <div className="screen-error">
           <h2>This screen hit an error</h2>
-          <p>The rest of the app is still working — pick another tab, or reload.</p>
+          <p>The rest of the app is still working â€” pick another tab, or reload.</p>
           <pre>{String(this.state.err.message || this.state.err)}</pre>
         </div>
       );
@@ -60,18 +64,18 @@ function LiveTape() {
     const mk = (topic) => (p) => {
       const [label, cls] = TAPE_LABEL[topic];
       let detail = '';
-      if (topic.startsWith('oms.incident')) detail = `${p.id} · ${p.zone} · ${p.status}`;
-      else if (topic.startsWith('scada')) detail = `${p.tag} · ${p.condition}`;
-      else if (topic === 'tcs.call.received') detail = `${p.customer} · ${p.category}`;
-      else if (topic === 'crew.updated') detail = `${p.name} · ${p.status}`;
-      else if (topic === 'crew.job.updated') detail = `${p.id} · ${p.status}`;
+      if (topic.startsWith('oms.incident')) detail = `${p.id} Â· ${p.zone} Â· ${p.status}`;
+      else if (topic.startsWith('scada')) detail = `${p.tag} Â· ${p.condition}`;
+      else if (topic === 'tcs.call.received') detail = `${p.customer} Â· ${p.category}`;
+      else if (topic === 'crew.updated') detail = `${p.name} Â· ${p.status}`;
+      else if (topic === 'crew.job.updated') detail = `${p.id} Â· ${p.status}`;
       setEvents((e) => [{ id: Math.random(), label, cls, detail, t: hhmm(new Date().toISOString()) }, ...e].slice(0, 14));
     };
     const hs = topics.map((t) => { const h = mk(t); socket.on(t, h); return [t, h]; });
     return () => hs.forEach(([t, h]) => socket.off(t, h));
   }, []);
 
-  const feed = events.length ? events : [{ id: 0, label: 'SYSTEM', cls: 'ok', detail: 'Field telemetry stream connected — awaiting events', t: hhmm(new Date().toISOString()) }];
+  const feed = events.length ? events : [{ id: 0, label: 'SYSTEM', cls: 'ok', detail: 'Field telemetry stream connected â€” awaiting events', t: hhmm(new Date().toISOString()) }];
   const doubled = [...feed, ...feed];
   return (
     <div className="tape" role="status" aria-label="Live event feed">
@@ -89,6 +93,15 @@ function LiveTape() {
 
 export default function App() {
   const [tab, setTab] = useState('dashboard');
+  const [openIncidentId, setOpenIncidentId] = useState(null);
+  const [entered, setEntered] = useState(false);
+  const [dashFading, setDashFading] = useState(true);
+  useEffect(() => {
+    if (entered) {
+      const t = setTimeout(() => setDashFading(false), 20);
+      return () => clearTimeout(t);
+    }
+  }, [entered]);
   const up = useConnection();
   const { items } = useToasts();
   const [clock, setClock] = useState('');
@@ -99,11 +112,24 @@ export default function App() {
 
   const active = NAV.find((n) => n[0] === tab);
   const Screen = active[3];
+  const goToIncident = (id) => {
+    setOpenIncidentId(id);
+    setTab('incidents');
+  };
+
+  if (!entered) {
+    return <LandingPage onEnter={() => setEntered(true)} username={currentUser().username} />;
+  }
 
   return (
     <div className="shell">
       <nav className="rail" aria-label="Primary">
-        <div className="brand" title="UPCL OMS"><b>Ω</b></div>
+        <div className="brand" title="GridQ">
+          <svg width="24" height="24" viewBox="0 0 120 120" fill="none">
+            <circle cx="60" cy="60" r="40" fill="none" stroke="#fff" strokeWidth="9" />
+            <path d="M64 82 L48 100 L60 100 L52 122 L78 92 L64 92 Z" fill="#fff" />
+          </svg>
+        </div>
         {NAV.map(([id, label, icon]) => (
           <button key={id} className={`navbtn ${tab === id ? 'on' : ''}`}
             onClick={() => setTab(id)} aria-current={tab === id} aria-label={label}>
@@ -118,26 +144,38 @@ export default function App() {
         <header className="cmd">
           <div>
             <h1>{active[1]}</h1>
-            <div className="sub">Uttarakhand Power Corp · Ganga Corridor Control Centre</div>
+            <div className="sub">Uttarakhand Power Corp Â· Ganga Corridor Control Centre</div>
           </div>
           <div className="grow" />
-          <div className="conn" title={up ? 'Live link to control-room backend' : 'Reconnecting…'}>
+          <div className="conn" title={up ? 'Live link to control-room backend' : 'Reconnectingâ€¦'}>
             <span className={`dot ${up ? 'up' : 'down'}`} />
             {up ? 'SCADA link live' : 'Reconnecting'}
           </div>
           <div className="clock mono">{clock}</div>
-             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 12 }}>
-               <span style={{ fontSize: 13, opacity: 0.8 }}>{currentUser().username}</span>
-               <button onClick={logout} style={{ fontSize: 12, padding: '4px 10px', cursor: 'pointer', borderRadius: 6, border: '1px solid #ccc', background: 'transparent', color: 'inherit' }}>Logout</button>
+              <div style={{ marginLeft: 12, width: 260, position: 'relative', display: 'flex', alignItems: 'center' }}>
+               <IncidentSearch onOpen={(inc) => goToIncident(inc.id)} />
              </div>
-           </header>
+             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 12 }}>
+               <ProfileMenu />
+             </div>
+        </header>
 
         <LiveTape />
 
         <div className="content">
-          <ScreenBoundary key={tab}>
-            <Screen go={setTab} />
-          </ScreenBoundary>
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={tab}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.18, ease: [0.22, 0.61, 0.36, 1] }}
+            >
+              <ScreenBoundary key={tab}>
+                <Screen go={setTab} openId={tab === 'incidents' ? openIncidentId : undefined} />
+              </ScreenBoundary>
+            </motion.div>
+          </AnimatePresence>
         </div>
       </div>
 

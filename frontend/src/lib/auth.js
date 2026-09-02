@@ -9,7 +9,7 @@ export const keycloak = new Keycloak({
 // Call once, before rendering the app. Resolves true once the user has a
 // valid session (redirecting to Keycloak's login page first if needed).
 export function initKeycloak() {
-  return keycloak.init({ onLoad: 'login-required', pkceMethod: 'S256' });
+  return keycloak.init({ onLoad: 'login-required', pkceMethod: 'S256', checkLoginIframe: false });
 }
 
 // Attach this to every API call so the backend can verify who's asking.

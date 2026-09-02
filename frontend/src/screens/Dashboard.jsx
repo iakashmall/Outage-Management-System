@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
 import { Icon, SevBadge, StatusBadge, timeAgo, useLiveRefresh } from '../lib/ui.jsx';
+import ReliabilityRings from '../components/ReliabilityRings.jsx';
 
 export default function Dashboard({ go }) {
   const [inc, setInc] = useState([]);
@@ -79,14 +80,12 @@ export default function Dashboard({ go }) {
             <div className="card-h"><h3>Reliability · IEEE 1366</h3></div>
             <div className="card-b" style={{ display: 'grid', gap: 14 }}>
               {ind && (
-                <>
-                  <IndexBar label="SAIDI" value={ind.saidi} target={ind.saidiTarget} unit="min" pct={pct(ind.saidi, ind.saidiTarget)} />
-                  <IndexBar label="SAIFI" value={ind.saifi} target={ind.saifiTarget} unit="" pct={pct(ind.saifi, ind.saifiTarget)} />
-                  <div style={{ display: 'flex', gap: 20 }}>
-                    <MiniStat label="CAIDI" value={ind.caidi} unit="min" />
-                    <MiniStat label="MAIFI" value={ind.maifi} unit="" />
-                  </div>
-                </>
+                <ReliabilityRings
+                  saidi={{ value: ind.saidi, target: ind.saidiTarget }}
+                  saifi={{ value: ind.saifi, target: ind.saifiTarget }}
+                  caidi={{ value: ind.caidi, target: ind.saidiTarget && ind.saifiTarget ? +(ind.saidiTarget / ind.saifiTarget).toFixed(1) : ind.caidi * 1.3 }}
+                  maifi={{ value: ind.maifi }}
+                />
               )}
             </div>
           </div>

@@ -1,8 +1,6 @@
-# Production topology sketch (SDP stack). Not required for `npm start` — that runs on SQLite +
+# Production topology sketch (SDP stack). Not required for `npm start` -- that runs on SQLite +
 # an in-process bus with zero infra. This file shows where the real services attach; the code
 # seams for each are documented in docs/ARCHITECTURE.md.
-version: "3.9"
-
 services:
   postgres:
     image: postgis/postgis:16-3.4
@@ -45,15 +43,10 @@ services:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
     ports: ["8080:8080"]
-
-  # backend:
-  #   build: ./backend
-  #   environment:
-  #     DATABASE_URL: postgres://oms:oms@postgres:5432/oms
-  #     KAFKA_BROKERS: kafka:9092
-  #     REDIS_URL: redis://redis:6379
-  #   depends_on: [postgres, kafka, redis]
-  #   ports: ["4000:4000"]
+    volumes:
+      - ./keycloak-themes/gridq:/opt/keycloak/themes/gridq
+      - keycloak_data:/opt/keycloak/data
 
 volumes:
   pgdata:
+  keycloak_data:
