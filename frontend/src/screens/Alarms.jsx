@@ -4,13 +4,13 @@ import { Icon, timeAgo, useLiveRefresh, toast } from '../lib/ui.jsx';
 
 const PRIO = { 1: { label: 'Critical', cls: 'crit' }, 2: { label: 'Major', cls: 'major' }, 3: { label: 'Minor', cls: 'minor' } };
 
-export default function Alarms() {
+export default function Alarms({ openIncident } = {}) {
   const [alarms, setAlarms] = useState([]);
   const [show, setShow] = useState('active'); // active | all
 
   const load = () => api.alarms().then(setAlarms);
   useEffect(() => { load(); }, []);
-  useLiveRefresh(['scada.alarm.raised', 'scada.alarm.acked'], load);
+  useLiveRefresh(['scada.alarm.raised', 'scada.alarm.acked', 'oms.incident.created'], load);
 
   const rows = useMemo(
     () => alarms.filter((a) => (show === 'active' ? !a.ack : true))
@@ -55,7 +55,7 @@ export default function Alarms() {
         <div className="card-h"><h3>Alarm list</h3><span className="eyebrow">{rows.length} shown</span></div>
         <div className="card-b" style={{ padding: 0 }}>
           <table className="tbl">
-            <thead><tr><th>Prio</th><th>UNS tag</th><th>Condition</th><th>Limit</th><th>Message</th><th>Raised</th><th></th></tr></thead>
+            <thead><tr><th>Prio</th><th>UNS tag</th><th>Condition</th><th>Limit</th><th>Message</th><th>Incident</th><th>Raised</th><th></th></tr></thead>
             <tbody>
               {rows.map((a) => {
                 const p = PRIO[a.priority] || PRIO[3];
@@ -66,6 +66,13 @@ export default function Alarms() {
                     <td><span className={`chip chip-${p.cls}`}>{a.condition}</span></td>
                     <td className="mono">{a.limit_val || '—'}</td>
                     <td style={{ maxWidth: 340 }}>{a.message}</td>
+                    <td>
+                      {a.incident_id
+                        ? <button className="btn btn-sm" onClick={() => openIncident && openIncident(a.incident_id)} title="Open the incident this alarm triggered or was correlated to">
+                            <Icon name="bolt" size={13} /> {a.incident_id}
+                          </button>
+                        : <span className="muted">—</span>}
+                    </td>
                     <td className="muted">{timeAgo(a.ts)}</td>
                     <td>{a.ack
                       ? <span className="muted" style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}><Icon name="check" size={14} /> acked</span>
@@ -73,7 +80,7 @@ export default function Alarms() {
                   </tr>
                 );
               })}
-              {!rows.length && <tr><td colSpan={7} className="empty">No {show === 'active' ? 'active ' : ''}alarms.</td></tr>}
+              {!rows.length && <tr><td colSpan={8} className="empty">No {show === 'active' ? 'active ' : ''}alarms.</td></tr>}
             </tbody>
           </table>
         </div>

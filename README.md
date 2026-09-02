@@ -9,16 +9,18 @@ TimescaleDB, Keycloak, Kong). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
 | App | Path | Port | What it is |
 |---|---|---|---|
-| **Backend** | `backend/` | 4000 | Express + SQLite + socket.io, domain state machine, IEEE 1366 indices, SCADA sim |
+| **Backend** | `backend/` | 4000 | Express + PostgreSQL/PostGIS + socket.io, domain state machine, IEEE 1366 indices, SCADA sim |
 | **Control-room web** | `frontend/` | 5173 | React — Dashboard, Incidents, Dispatch, Network map, Alarms, TCS, Analytics, Admin |
 | **Mobile crew app** | `mobile/` | 5174 | React PWA — crew login, job workflow, GPS, offline sync queue |
 
 ## Quick start
 
-**Requires Node 22.5 or newer** (Node 20 LTS users: upgrade to Node 22 LTS or 24). The database uses
-Node's built-in SQLite, so there is **nothing to compile** — no Visual Studio / build tools required.
+**Requires Node 22.5 or newer** (Node 20 LTS users: upgrade to Node 22 LTS or 24) and Docker (for
+Postgres/PostGIS/TimescaleDB, Redis, and — if you're running the Kafka event-bus driver — Kafka).
 
 ```bash
+docker compose up -d postgres redis   # backing services (add kafka if EVENT_BUS_DRIVER=kafka)
+cp backend/.env.example backend/.env  # then adjust if your ports differ
 npm install          # installs all three workspaces
 npm run seed         # load the Ganga Corridor demo data (idempotent)
 npm start            # runs backend + web + mobile together
@@ -52,8 +54,22 @@ npm test              # backend self-test (state machine, dispatch, mobile round
    crew relocated on the **Network map**, and every step is in the **Admin** audit log.
 6. **Alarms** → acknowledge a SCADA alarm. **Analytics** → SAIDI/SAIFI/CAIDI + feeder breakdown.
 
+## Event bus & cache (Phase 1 tail)
+
+Two env vars in `backend/.env` control this — both are optional at runtime:
+
+- `REDIS_URL` (default `redis://localhost:6379`) — real-time tag cache and a
+  short-TTL read-through cache on `/indicators`. If Redis is unreachable the
+  app logs a warning and serves everything straight from Postgres.
+- `EVENT_BUS_DRIVER` — `memory` (default) uses an in-process EventEmitter;
+  `kafka` uses a real KafkaJS producer/consumer against `KAFKA_BROKERS`
+  (default `localhost:9092`), auto-creating the topic list on first connect.
+  If the broker is unreachable at boot, it logs a warning and falls back to
+  the memory driver for that run rather than crashing.
+
 ## Reset the demo
 
 ```bash
-rm backend/data/oms.db*   # then: npm run seed
+docker exec -it oms-postgres psql -U oms -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+npm run seed
 ```

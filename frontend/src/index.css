@@ -76,7 +76,7 @@ button{font-family:inherit;cursor:pointer}
 .rail{background:var(--navy);display:flex;flex-direction:column;align-items:center;
   padding:14px 0;gap:6px;position:relative}
 .rail .brand{width:38px;height:38px;border-radius:9px;
-  background:linear-gradient(150deg,var(--live),#0b7d70);
+  background:linear-gradient(145deg,#16b7a2 0%,var(--live) 48%,#087b78 100%);
   display:grid;place-items:center;margin-bottom:14px;box-shadow:0 3px 10px rgba(14,159,142,.4)}
 .rail .brand b{font-family:var(--disp);color:#fff;font-size:18px;font-weight:700}
 .navbtn{width:44px;height:44px;border:0;background:transparent;border-radius:10px;
@@ -100,6 +100,20 @@ button{font-family:inherit;cursor:pointer}
 .cmd h1{font-family:var(--disp);font-size:17px;font-weight:600;margin:0;letter-spacing:-.01em}
 .cmd .sub{color:var(--muted);font-size:12px;margin-top:1px}
 .cmd .grow{flex:1}
+
+.masthead{display:flex;align-items:center;gap:12px;padding:10px 22px;
+  background:linear-gradient(135deg,#18aa9b 0%,#117f83 34%,#174b68 70%,#102f4a 100%);flex:0 0 auto;
+  animation:mastheadFadeIn .7s ease-out}
+@keyframes mastheadFadeIn{from{opacity:0}to{opacity:1}}
+.masthead .grow{flex:1}
+.masthead-brand{display:flex;align-items:center;gap:10px}
+.masthead-brand-right{text-align:right}
+.masthead-text-right{text-align:right}
+.masthead-word{font-family:var(--disp);font-size:21px;font-weight:700;color:#fff;letter-spacing:.01em;line-height:1.2}
+.masthead-tag{font-family:var(--ui);font-size:10.5px;color:rgba(255,255,255,.82);margin-top:1px;
+  text-transform:uppercase;letter-spacing:.06em}
+.masthead-logo{width:34px;height:34px;object-fit:contain}
+@media (max-width:860px){.masthead-tag{display:none}}
 .conn{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--ink-2);
   background:var(--paper);padding:6px 11px;border-radius:20px;border:1px solid var(--line)}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--faint)}
@@ -108,9 +122,9 @@ button{font-family:inherit;cursor:pointer}
 .clock{font-family:var(--mono);font-size:13px;color:var(--ink-2);font-weight:500}
 
 /* ---- live tape (signature) ---- */
-.tape{height:30px;background:var(--ink);color:#cdd9e7;display:flex;align-items:center;
+.tape{height:30px;background:linear-gradient(90deg,#0b2033,#102f4a);color:#c9dcdf;display:flex;align-items:center;
   overflow:hidden;flex:0 0 auto;font-family:var(--mono);font-size:11.5px}
-.tape .badge{background:var(--copper);color:#fff;height:100%;display:flex;align-items:center;
+.tape .badge{background:linear-gradient(135deg,#0b9f8f,#087b78);color:#fff;height:100%;display:flex;align-items:center;
   padding:0 12px;font-family:var(--disp);font-weight:600;letter-spacing:.12em;font-size:10px;
   text-transform:uppercase;flex:0 0 auto;gap:6px}
 .tape .badge i{width:6px;height:6px;border-radius:50%;background:#fff;animation:blink 1.4s infinite}
@@ -321,7 +335,7 @@ tr.row-hot td{background:var(--crit-bg)}
 .lp-row{display:flex;align-items:center;gap:9px;padding:6px 8px;font-size:12.5px;cursor:pointer;border-radius:9px;transition:background .12s,color .12s;color:var(--muted)}
 .lp-row:hover{background:var(--paper)}.lp-row.on{color:var(--ink)}
 .lp-row input{appearance:none;width:15px;height:15px;border:1.6px solid var(--line-2);border-radius:5px;flex:none;position:relative;cursor:pointer;transition:all .14s}
-.lp-row input:checked{background:#12294a;border-color:#12294a}
+.lp-row input:checked{background:var(--navy);border-color:var(--navy)}
 .lp-row input:checked::after{content:"";position:absolute;left:4px;top:1px;width:4px;height:8px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}
 .lp-swatch{width:11px;height:11px;border-radius:3px;flex:none;box-shadow:0 0 0 1px rgba(0,0,0,.05)}
 .sw-feeders{background:#3b82f6}.sw-htLines{background:#4a5f86}.sw-substations{background:#12294a;transform:rotate(45deg);border-radius:1px}
@@ -333,8 +347,8 @@ tr.row-hot td{background:var(--crit-bg)}
 .lp-clear:hover{background:var(--surface)}
 .lp-hint{margin:8px 8px 2px;padding-top:10px;border-top:1px solid var(--line);font-size:10.5px;line-height:1.5;color:var(--faint)}
 
-.map-stage{position:relative;padding:0;overflow:hidden;border-radius:14px;height:clamp(520px,76vh,900px);background:#eaf0f6}
-.leaflet-host{position:absolute;inset:0;width:100%;height:100%;background:#eaf0f6}
+.map-stage{position:relative;padding:0;overflow:hidden;border-radius:14px;height:clamp(520px,76vh,900px);background:#e7f1f0}
+.leaflet-host{position:absolute;inset:0;width:100%;height:100%;background:#e7f1f0}
 .leaflet-container{font-family:var(--body,inherit)}
 
 /* map markers */
@@ -352,7 +366,7 @@ tr.row-hot td{background:var(--crit-bg)}
 .map-tools{position:absolute;top:14px;right:64px;z-index:500;display:flex;gap:8px}
 .map-fit{display:flex;align-items:center;gap:6px;background:#fff;border:1px solid var(--line);border-radius:9px;padding:7px 11px;font-size:12.5px;font-weight:600;color:var(--ink);cursor:pointer;box-shadow:0 2px 10px rgba(15,27,45,.16)}
 .map-fit:hover{background:var(--paper)}
-.map-fit.on{background:#12294a;color:#fff;border-color:#12294a}
+.map-fit.on{background:var(--navy);color:#fff;border-color:var(--navy)}
 .lg-sym{flex:none;box-shadow:0 0 0 1px rgba(0,0,0,.06)}
 .lg-line{width:16px;height:3px;border-radius:2px}
 .lg-dia{width:10px;height:10px;transform:rotate(45deg);border-radius:1px}
@@ -403,7 +417,7 @@ tr.row-hot td{background:var(--crit-bg)}
 .ms-item:last-child{border-bottom:none}
 .ms-item:hover{background:var(--paper)}
 .ms-tag{flex:none;font-family:var(--disp,sans-serif);font-size:9.5px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:#fff;padding:2px 7px;border-radius:6px;min-width:62px;text-align:center}
-.tag-ss{background:#12294a}.tag-feeder{background:#3b82f6}.tag-incident{background:#e23b2e}.tag-crew{background:#0fb39d}
+.tag-ss{background:#99b7e0}.tag-feeder{background:#3b82f6}.tag-incident{background:#e23b2e}.tag-crew{background:#0fb39d}
 .tag-ptx{background:#e0742b}.tag-dt{background:#3b82f6}.tag-switch{background:#8b5cf6}.tag-rmu{background:#7a9e2e}.tag-fuse{background:#b98a5e}
 .ms-label{flex:1;font-size:13px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ms-sub{flex:none;font-size:11px;color:var(--faint);font-family:var(--mono)}
@@ -547,3 +561,216 @@ tr.row-hot td{background:var(--crit-bg)}
 }
 /* IncidentSearch - remove redundant label, tighten to fit inline in the header row */
 label[for='search'] { display: none !important; }
+/* =========================================================
+   OMS VISUAL THEME — TEAL GREEN × NAVY
+   Color-only polish: layout/content intentionally unchanged.
+   ========================================================= */
+
+/* Primary gradient language */
+:root{
+  --teal-1:#16b7a2;
+  --teal-2:#0b9f8f;
+  --teal-3:#087b78;
+  --navy-deep:#0b2033;
+  --navy-main:#102f4a;
+  --navy-mid:#174b68;
+  --teal-soft:#e2f6f2;
+  --teal-wash:#eef8f6;
+}
+
+/* Page background */
+body{
+  background:
+    radial-gradient(circle at 88% 0%, rgba(22,183,162,.055), transparent 28%),
+    var(--paper);
+}
+
+/* Command bar */
+.cmd{
+  background:rgba(255,255,255,.96);
+}
+
+/* Brand / active navigation */
+.rail .brand{
+  background:linear-gradient(145deg,var(--teal-1) 0%,var(--teal-2) 52%,var(--teal-3) 100%);
+  box-shadow:0 5px 16px rgba(11,159,143,.32);
+}
+.navbtn.on{
+  background:linear-gradient(135deg,rgba(22,183,162,.20),rgba(16,47,74,.34));
+}
+.navbtn.on::before{
+  background:linear-gradient(180deg,var(--teal-1),var(--teal-3));
+}
+.navbtn:hover{
+  background:rgba(22,183,162,.10);
+}
+
+/* Main masthead */
+.masthead{
+  background:linear-gradient(120deg,
+    #16b7a2 0%,
+    #0b9f8f 28%,
+    #174b68 68%,
+    #102f4a 100%);
+  box-shadow:0 3px 14px rgba(16,47,74,.16);
+}
+
+/* Connection/status accents */
+.conn{
+  background:rgba(245,250,249,.92);
+  border-color:#cfe1df;
+}
+.dot.up{
+  background:var(--teal-2);
+  box-shadow:0 0 0 3px var(--teal-soft);
+}
+
+/* Live strip */
+.tape{
+  background:linear-gradient(90deg,#0b2033,#102f4a 55%,#123e58);
+}
+.tape .badge{
+  background:linear-gradient(135deg,var(--teal-2),var(--teal-3));
+}
+.tape .ev.ok b{
+  color:#82eadc;
+}
+
+/* Cards — subtle teal edge on hover */
+.card,.stat{
+  transition:border-color .15s ease,box-shadow .15s ease;
+}
+.card:hover,.stat:hover{
+  border-color:#c5ddda;
+  box-shadow:0 5px 20px rgba(10,38,53,.09);
+}
+
+/* Primary actions */
+.btn.primary{
+  background:linear-gradient(135deg,var(--navy-main),var(--navy-mid));
+  border-color:var(--navy-main);
+}
+.btn.primary:hover{
+  background:linear-gradient(135deg,#174b68,#0b6d78);
+}
+.btn.live{
+  background:linear-gradient(135deg,var(--teal-1),var(--teal-3));
+  border-color:var(--teal-2);
+  box-shadow:0 3px 10px rgba(11,159,143,.18);
+}
+.btn.live:hover{
+  filter:brightness(1.05);
+  box-shadow:0 4px 14px rgba(11,159,143,.25);
+}
+.pill.on,.seg button.on{
+  background:linear-gradient(135deg,var(--navy-main),var(--navy-mid));
+  border-color:var(--navy-main);
+}
+
+/* Status / severity colors stay semantically distinct,
+   but successful/healthy states use the OMS teal language. */
+.sev-low,.st-resolved,.chip-ok{
+  background:var(--teal-soft);
+  color:#087b78;
+}
+.st-scheduled{
+  background:#e5f5f6;
+  color:#0b7180;
+}
+
+/* KPI / chart accents */
+.chart .bar-live{
+  fill:var(--teal-2);
+}
+.chart .bar{
+  fill:var(--navy-mid);
+}
+.meter span{
+  background:linear-gradient(90deg,var(--teal-2),var(--navy-mid));
+}
+
+/* Timeline */
+.timeline li .node{
+  border-color:var(--navy-mid);
+}
+.timeline li.crew .node{
+  border-color:var(--teal-2);
+}
+
+/* Map controls */
+.map-fit.on{
+  background:linear-gradient(135deg,var(--navy-main),var(--navy-mid));
+  border-color:var(--navy-main);
+}
+.map-stage,.leaflet-host{
+  background:#e7f1f0;
+}
+
+/* Map search / detail surfaces */
+.ms-box,.ms-results,.ms-item{
+  background:#ffffff;
+}
+.ms-item:hover{
+  background:var(--teal-wash);
+}
+.ms-clear:hover{
+  background:var(--teal-wash);
+}
+
+/* Map / layer sidebar */
+.layer-panel{
+  box-shadow:0 5px 22px rgba(10,38,53,.07);
+}
+.lp-row:hover{
+  background:var(--teal-wash);
+}
+.lp-row.on{
+  background:linear-gradient(90deg,rgba(22,183,162,.075),transparent);
+}
+.lp-row input:checked{
+  background:var(--navy-main);
+  border-color:var(--navy-main);
+}
+.lp-h::before{
+  background:linear-gradient(180deg,var(--teal-1),var(--navy-mid));
+}
+.lp-count{
+  background:var(--teal-wash);
+  border-color:#d2e5e2;
+}
+
+/* Search tags and find pin */
+.tag-crew{
+  background:var(--teal-2);
+}
+.mk-find{
+  border-color:var(--teal-2);
+  box-shadow:0 0 0 3px rgba(11,159,143,.22);
+}
+
+/* Selected rows / tracing */
+.tbl tr.row-sel{
+  box-shadow:inset 3px 0 0 var(--teal-2);
+  background:var(--teal-wash);
+}
+.chain-node.c4{
+  --nc:var(--navy-main);
+}
+
+/* IDs and small emphasis */
+.id-cell{
+  color:var(--navy-mid);
+}
+
+/* Focus state follows the brand */
+:focus-visible{
+  outline-color:var(--teal-2);
+}
+
+/* Scrollbars */
+::-webkit-scrollbar-thumb{
+  background:#bfd4d1;
+}
+::-webkit-scrollbar-thumb:hover{
+  background:#8eafa9;
+}

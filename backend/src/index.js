@@ -10,14 +10,21 @@ import { seed } from './infra/seed.js';
 import { api } from './routes/api.js';
 import { repo } from './infra/repo.js';
 import { requireAuth } from './routes/auth.js';
-import { bus } from './domain/bus.js';
+import { bus, initBus } from './domain/bus.js';
+import { connectRedis } from './infra/redis.js';
 import { startSimulator } from './realtime/simulator.js';
+import { startScadaConsumer } from './realtime/scada.js';
+import { startRestorationPublisher } from './realtime/restoration.js';
 import { startNotifier } from './realtime/notifier.js';
 
 const PORT = process.env.PORT || 4000;
 
  await migrate();
  await seed(); // idempotent — only seeds an empty DB
+ await connectRedis(); // non-fatal if unreachable — see infra/redis.js
+ await initBus();       // memory driver by default; EVENT_BUS_DRIVER=kafka for the real broker
+ startScadaConsumer();  // Phase 2: auto-detect outages from SCADA fault events
+ startRestorationPublisher(); // Phase 2: publish restoration commands back to the DMS
 
 const app = express();
 app.use(cors());

@@ -6,7 +6,7 @@ import { Drawer, DrawerContent } from '../components/ui/drawer.jsx';
 const SEVS = ['all', 'critical', 'high', 'medium', 'low'];
 const STATS = ['all', 'open', 'dispatched', 'in_progress', 'pending', 'resolved'];
 
-export default function Incidents({ openId }) {
+export default function Incidents({ openId, focusIncidentId, clearFocus } = {}) {
   const [inc, setInc] = useState([]);
   const [sev, setSev] = useState('all');
   const [st, setSt] = useState('all');
@@ -15,11 +15,23 @@ export default function Incidents({ openId }) {
 
   const load = () => api.incidents().then(setInc);
   useEffect(() => { load(); }, []);
-    useEffect(() => {
-    if (openId) api.incident(openId).then(setSel);
-  }, [openId]);
+      useEffect(() => {
+    const idToOpen = openId || focusIncidentId;
+    if (idToOpen) {
+      api.incident(idToOpen).then(setSel);
+      if (clearFocus) clearFocus();
+    }
+  }, [openId, focusIncidentId]);
   useLiveRefresh(['oms.incident.created', 'oms.incident.updated', 'crew.job.updated'], load);
   useEffect(() => { if (sel) api.incident(sel.id).then(setSel); }, [inc.length]); // eslint-disable-line
+
+  // Deep-link from another screen (currently: Alarms → "view incident").
+  // Opens the requested incident once, then clears the request so navigating
+  // away and back to Incidents normally doesn't keep re-opening it.
+  useEffect(() => {
+    if (!focusIncidentId) return;
+    api.incident(focusIncidentId).then(setSel).finally(() => clearFocus && clearFocus());
+  }, [focusIncidentId]); // eslint-disable-line
 
   const rows = inc.filter((i) => (sev === 'all' || i.severity === sev) && (st === 'all' || i.status === st));
 
@@ -201,8 +213,7 @@ function NewIncident({ onClose, onCreated }) {
       </aside>
     </>
   );
-}
-
+}  
 function MessagePanel({ incidentId }) {
   const [msgs, setMsgs] = useState([]);
   const [text, setText] = useState('');

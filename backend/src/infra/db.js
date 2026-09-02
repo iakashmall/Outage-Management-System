@@ -73,7 +73,8 @@ export async function migrate() {
       priority   INTEGER,
       message    TEXT,
       ts         TIMESTAMPTZ NOT NULL,
-      ack        INTEGER DEFAULT 0
+      ack        INTEGER DEFAULT 0,
+      incident_id TEXT REFERENCES incidents(id)
     );
 
     CREATE TABLE IF NOT EXISTS trouble_calls (
@@ -158,6 +159,7 @@ export async function migrate() {
     ALTER TABLE incidents ADD COLUMN IF NOT EXISTS geog public.geography(Point, 4326);
     ALTER TABLE crews     ADD COLUMN IF NOT EXISTS geog public.geography(Point, 4326);
     ALTER TABLE complaints ADD COLUMN IF NOT EXISTS geog public.geography(Point, 4326);
+    ALTER TABLE alarms    ADD COLUMN IF NOT EXISTS incident_id TEXT REFERENCES incidents(id);
 
     CREATE OR REPLACE FUNCTION sync_geog() RETURNS TRIGGER AS $$
     BEGIN
