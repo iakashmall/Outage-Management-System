@@ -114,6 +114,7 @@ export default function App() {
   const [omsSource, setOmsSource] = useState("syncing");
   const online = useOnline();
   const [queuedUpdates, setQueuedUpdates] = useState(() => JSON.parse(localStorage.getItem("oms-status-queue") || "[]"));
+  const [photoQueue, setPhotoQueue] = useState(() => JSON.parse(localStorage.getItem("oms-photo-queue") || "[]"));
 
   useEffect(() => {
     localStorage.setItem("oms-status-queue", JSON.stringify(queuedUpdates));
@@ -122,6 +123,16 @@ export default function App() {
       .then(() => setQueuedUpdates([]))
       .catch(() => {});
   }, [online, queuedUpdates]);
+
+  useEffect(() => {
+    localStorage.setItem("oms-photo-queue", JSON.stringify(photoQueue));
+    if (!online || !photoQueue.length) return;
+    Promise.all(
+      photoQueue.map(({ id, dataUrl, location, note }) => uploadJobPhoto(id, dataUrl, location, note))
+    )
+      .then(() => setPhotoQueue([]))
+      .catch(() => {});
+  }, [online, photoQueue]);
 
   useEffect(() => () => {
     if (navigator.mediaDevices?.getUserMedia) {
@@ -542,19 +553,55 @@ function JobCard({ job, onUpdate, onNavigate }) {
     const files = Array.from(event.target.files ?? []);
     if (!files.length) return;
     setPhotoMessage("Uploading photo...");
+
     try {
-      const uploaded = await Promise.all(files.map(async (file) => {
+      const results = await Promise.all(files.map(async (file) => {
         const dataUrl = await new Promise((resolve, reject) => {
           const reader = new FileReader();
           reader.onload = () => resolve(reader.result);
           reader.onerror = () => reject(new Error("Could not read photo"));
           reader.readAsDataURL(file);
         });
-        await uploadJobPhoto(job.id, dataUrl, await getLocation(), assetId ? `Asset: ${assetId}` : undefined);
-        return { url: URL.createObjectURL(file), file };
+
+        const location = await getLocation();
+        const note = assetId ? `Asset: ${assetId}` : undefined;
+
+        try {
+          await uploadJobPhoto(job.id, dataUrl, location, note);
+          return { url: URL.createObjectURL(file), file, queued: false };
+        } catch {
+          return {
+            url: URL.createObjectURL(file),
+            file,
+            queued: true,
+            dataUrl,
+            location,
+            note,
+          };
+        }
       }));
-      setPhotos((current) => [...current, ...uploaded]);
-      setPhotoMessage(`${uploaded.length} photo${uploaded.length === 1 ? "" : "s"} stored.`);
+
+      const queuedPhotos = results.filter((item) => item.queued).map(({ dataUrl, location, note }) => ({
+        id: job.id,
+        dataUrl,
+        location,
+        note,
+      }));
+
+      if (queuedPhotos.length) {
+        setPhotoQueue((current) => [...current, ...queuedPhotos]);
+      }
+
+      const uploadedPhotos = results.filter((item) => !item.queued);
+      setPhotos((current) => [...current, ...uploadedPhotos]);
+
+      if (queuedPhotos.length && uploadedPhotos.length) {
+        setPhotoMessage(`${uploadedPhotos.length} photo${uploadedPhotos.length === 1 ? "" : "s"} stored and ${queuedPhotos.length} queued for sync.`);
+      } else if (queuedPhotos.length) {
+        setPhotoMessage(`${queuedPhotos.length} photo${queuedPhotos.length === 1 ? "" : "s"} queued for sync when the server is available.`);
+      } else {
+        setPhotoMessage(`${uploadedPhotos.length} photo${uploadedPhotos.length === 1 ? "" : "s"} stored.`);
+      }
     } catch (error) {
       setPhotoMessage(error?.message || "Photo upload failed.");
     } finally {
@@ -1003,11 +1050,14 @@ function LeaderJobs({ jobs, omsSource, onSelectJob }) {
   const pendingJobs = jobs.filter(
     (job) => job.status === "Pending Acceptance"
   );
+  const completedJobs = jobs.filter((job) =>
+    ["work complete", "completed", "closed"].includes(String(job.status).toLowerCase())
+  );
   const filteredJobs = jobs.filter((job) => {
     if (filter === "Pending") return job.status === "Pending Acceptance";
     if (filter === "Urgent") return job.priority === "Urgent";
-    if (filter === "Active") return job.status !== "Work Complete";
-    if (filter === "Completed") return job.status === "Work Complete";
+    if (filter === "Active") return !completedJobs.includes(job);
+    if (filter === "Completed") return completedJobs.includes(job);
     return true;
   });
 
@@ -1017,6 +1067,27 @@ function LeaderJobs({ jobs, omsSource, onSelectJob }) {
         title="All Jobs"
         subtitle={`${pendingJobs.length} pending acceptance · ${omsSource === "oms" ? "Live OMS assignment feed" : "Demo OMS assignment feed"}`}
       />
+
+      <div className="summary-row">
+        <SummaryCard
+          label="Total Jobs"
+          value={jobs.length}
+          active={filter === "All"}
+          onClick={() => setFilter("All")}
+        />
+        <SummaryCard
+          label="Pending Jobs"
+          value={pendingJobs.length}
+          active={filter === "Pending"}
+          onClick={() => setFilter("Pending")}
+        />
+        <SummaryCard
+          label="Jobs Done"
+          value={completedJobs.length}
+          active={filter === "Completed"}
+          onClick={() => setFilter("Completed")}
+        />
+      </div>
 
       <div className="leader-filter-row">
         {["All", "Pending", "Urgent", "Active", "Completed"].map((option) => (

@@ -52,7 +52,8 @@ const NEXT_STATUS = {
   Acknowledged: 'En Route',
   'En Route': 'On Site',
   'On Site': 'Work Started',
-  'Work Started': 'Work Complete',
+  'Work Started': 'Work Finished',
+  'Work Finished': null,
 };
 
 // Severity color coding: High -> orange, Medium -> blue, Low -> green,
@@ -117,7 +118,7 @@ function NativeAppScreen() {
   const [biometricOn, setBiometricOn] = useState(false);
   const [crew, setCrew] = useState({ name: 'Crew Gamma-2', role: 'Field Technician', id: 'C003' });
   const [jobs, setJobs] = useState(FALLBACK_JOBS);
-  const [tab, setTab] = useState('Jobs');
+  const [tab, setTab] = useState('Dashboard');
   const [activeJob, setActiveJob] = useState(null);
   const [mapJobId, setMapJobId] = useState(null);
   const [pendingCount, setPendingCount] = useState(0);
@@ -233,6 +234,7 @@ function NativeAppScreen() {
   const handleAdvance = useCallback(async (job, nextStatus) => {
     const location = await getLocation();
     setJobs((current) => current.map((j) => (j.id === job.id ? { ...j, status: nextStatus } : j)));
+    setActiveJob((current) => current?.id === job.id ? { ...current, status: nextStatus } : current);
 
     // Demo mode has no real backend to sync with — queue immediately so
     // the pending-sync section actually shows something, instead of the
@@ -332,14 +334,22 @@ function NativeAppScreen() {
         </View>
       </View>
       <ScrollView contentContainerStyle={styles.content}>
-        {tab === 'Jobs' ? (
+        {tab === 'Dashboard' ? (
           <>
             <Text style={styles.title}>Today&apos;s field work</Text>
             <Text style={styles.subtitle}>Priority outages assigned to your crew.</Text>
             <View style={styles.stats}>
-              <Stat value={String(jobs.length)} label="Active jobs" />
-              <Stat value={jobs[0]?.distance ?? '—'} label="Next location" />
-              <Stat value={String(jobs.reduce((sum, j) => sum + (j.customers || 0), 0))} label="Customers" />
+              <Stat value={String(jobs.length)} label="Total jobs" />
+              <Stat
+                value={String(jobs.filter((job) => job.status === 'Pending Acceptance').length)}
+                label="Pending jobs"
+              />
+              <Stat
+                value={String(jobs.filter((job) =>
+                  ['work complete', 'completed', 'closed'].includes(String(job.status).toLowerCase())
+                ).length)}
+                label="Jobs done"
+              />
             </View>
 
             {pendingItems.length > 0 && (
@@ -372,6 +382,8 @@ function NativeAppScreen() {
               <JobCard key={job.id} job={job} onPress={() => setActiveJob(job)} />
             ))}
           </>
+        ) : tab === 'Jobs' ? (
+          <NativeJobsPage jobs={jobs} onPressJob={setActiveJob} />
         ) : tab === 'Map' ? (
           <MapScreen jobs={jobs} selectedJobId={mapJobId} onSelect={setMapJobId} />
         ) : tab === 'Profile' ? (
@@ -390,10 +402,10 @@ function NativeAppScreen() {
         {['Dashboard', 'Jobs', 'Map', 'Profile'].map((item) => (
           <Pressable
             key={item}
-            onPress={() => setTab(item === 'Dashboard' ? 'Jobs' : item)}
+            onPress={() => setTab(item)}
             style={styles.navItem}
           >
-            <Text style={[styles.navText, tab === (item === 'Dashboard' ? 'Jobs' : item) && styles.navActive]}>
+            <Text style={[styles.navText, tab === item && styles.navActive]}>
               {item}
             </Text>
           </Pressable>
@@ -415,6 +427,29 @@ function NativeAppScreen() {
         )}
       </Modal>
     </SafeAreaView>
+  );
+}
+
+function NativeJobsPage({ jobs, onPressJob }) {
+  const pendingJobs = jobs.filter((job) => job.status === 'Pending Acceptance');
+  const completedJobs = jobs.filter((job) =>
+    ['work complete', 'completed', 'closed'].includes(String(job.status).toLowerCase())
+  );
+
+  return (
+    <>
+      <Text style={styles.title}>Jobs</Text>
+      <Text style={styles.subtitle}>Track every assignment and its current status.</Text>
+      <View style={styles.stats}>
+        <Stat value={String(jobs.length)} label="Total jobs" />
+        <Stat value={String(pendingJobs.length)} label="Pending jobs" />
+        <Stat value={String(completedJobs.length)} label="Jobs done" />
+      </View>
+      <Text style={styles.section}>ALL JOBS</Text>
+      {jobs.map((job) => (
+        <JobCard key={job.id} job={job} onPress={() => onPressJob(job)} />
+      ))}
+    </>
   );
 }
 
@@ -455,8 +490,12 @@ function CrewLogin({ onSuccess }) {
     setBusy(true);
     setError('');
     try {
-      const ok = await login(promptAsync, request);
-      if (!ok) {
+      const loginResult = await login(promptAsync, request);
+      if (!loginResult?.success) {
+        if (!loginResult?.countFailure) {
+          setError('Sign-in was cancelled.');
+          return;
+        }
         const status = await recordFailedAttempt();
         setLockStatus(status);
         setError(
@@ -575,6 +614,7 @@ function JobDetail({ job, onClose, onAdvance, onNavigate }) {
   const [assetId, setAssetId] = useState('');
   const [uploading, setUploading] = useState(false);
   const [message, setMessage] = useState('');
+  const [advancing, setAdvancing] = useState(false);
 
   // Completion flow: fault diagnosis -> parts used -> crew-lead sign-off.
   // Gates the final "Work Started" -> "Work Complete" transition.
@@ -585,7 +625,7 @@ function JobDetail({ job, onClose, onAdvance, onNavigate }) {
 
   const next = NEXT_STATUS[job.status];
 
-  const requestAdvance = () => {
+  const requestAdvance = async () => {
     if (!next) return;
     if (job.status === 'On Site') {
       setShowSafety(true);
@@ -595,7 +635,12 @@ function JobDetail({ job, onClose, onAdvance, onNavigate }) {
       setCompletionStep('diagnosis');
       return;
     }
-    onAdvance(job, next);
+    setAdvancing(true);
+    try {
+      await onAdvance(job, next);
+    } finally {
+      setAdvancing(false);
+    }
   };
 
   const finishCompletion = (finalSignOff) => {
@@ -605,7 +650,8 @@ function JobDetail({ job, onClose, onAdvance, onNavigate }) {
     // OMS mobile contract only defines status + photo endpoints. They're
     // captured here and shown in-app; ask the integration track for a
     // completion-details endpoint if this should be persisted server-side.
-    onAdvance(job, next);
+    setAdvancing(true);
+    Promise.resolve(onAdvance(job, next)).finally(() => setAdvancing(false));
   };
 
   const takePhoto = async () => {
@@ -653,7 +699,8 @@ function JobDetail({ job, onClose, onAdvance, onNavigate }) {
           <SafetyChecklist
             onPass={() => {
               setShowSafety(false);
-              onAdvance(job, next);
+              setAdvancing(true);
+              Promise.resolve(onAdvance(job, next)).finally(() => setAdvancing(false));
             }}
             onCancel={() => setShowSafety(false)}
           />
@@ -738,9 +785,9 @@ function JobDetail({ job, onClose, onAdvance, onNavigate }) {
         {message ? <Text style={styles.assetValue}>{message}</Text> : null}
 
         {next && !completionStep && (
-          <Pressable style={styles.primaryBtn} onPress={requestAdvance}>
+          <Pressable style={styles.primaryBtn} onPress={requestAdvance} disabled={advancing}>
             <Text style={styles.primaryBtnText}>
-              {job.status === 'Pending Acceptance' ? 'Accept task' : `${next} →`}
+              {advancing ? 'Updating status…' : job.status === 'Pending Acceptance' ? 'Accept task' : `${next} →`}
             </Text>
           </Pressable>
         )}

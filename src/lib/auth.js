@@ -97,13 +97,16 @@ async function exchangeCode(code, codeVerifier) {
 }
 
 // Call from a login screen with the `promptAsync`/`request` pair returned by
-// `AuthSession.useAuthRequest`. Returns true on success.
+// `AuthSession.useAuthRequest`. Returns a result so callers can distinguish
+// cancellation/network errors from an actual rejected sign-in.
 export async function login(promptAsync, request) {
   const result = await promptAsync();
-  if (result?.type !== "success") return false;
+  if (result?.type !== "success") {
+    return { success: false, countFailure: result?.type === "error" };
+  }
 
   const data = await exchangeCode(result.params.code, request.codeVerifier);
-  if (!data.access_token) return false;
+  if (!data.access_token) return { success: false, countFailure: true };
 
   accessToken = data.access_token;
   refreshToken = data.refresh_token ?? null;
@@ -111,7 +114,7 @@ export async function login(promptAsync, request) {
 
   await SafeStore.setItemAsync("oms_token", accessToken);
   if (refreshToken) await SafeStore.setItemAsync("oms_refresh_token", refreshToken);
-  return true;
+  return { success: true };
 }
 
 // Attempt to restore a session from SecureStore (e.g. on app relaunch).

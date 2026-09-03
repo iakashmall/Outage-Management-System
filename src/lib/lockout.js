@@ -14,10 +14,16 @@ export const LOCKOUT_MS = 5 * 60 * 1000; // 5 minutes
 
 export async function getLockoutStatus() {
   try {
-    const lockUntil = Number((await AsyncStorage.getItem(LOCK_UNTIL_KEY)) || 0);
-    const attempts = Number((await AsyncStorage.getItem(ATTEMPTS_KEY)) || 0);
+    const storedLockUntil = Number((await AsyncStorage.getItem(LOCK_UNTIL_KEY)) || 0);
+    const storedAttempts = Number((await AsyncStorage.getItem(ATTEMPTS_KEY)) || 0);
+    const lockUntil = Number.isFinite(storedLockUntil) && storedLockUntil > 0 ? storedLockUntil : 0;
+    const attempts = Number.isFinite(storedAttempts) && storedAttempts >= 0 ? storedAttempts : 0;
     const remainingMs = lockUntil - Date.now();
     if (remainingMs > 0) return { locked: true, remainingMs, attempts };
+    if (lockUntil || storedAttempts !== attempts) {
+      await AsyncStorage.removeItem(LOCK_UNTIL_KEY);
+      if (storedAttempts !== attempts) await AsyncStorage.setItem(ATTEMPTS_KEY, String(attempts));
+    }
     return { locked: false, remainingMs: 0, attempts };
   } catch {
     return { locked: false, remainingMs: 0, attempts: 0 };

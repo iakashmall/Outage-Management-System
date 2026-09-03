@@ -59,7 +59,7 @@ export async function getJobsLastSyncedAt() {
   }
 }
 
-/* =========================================================
+/* ========================================================
    DEMO FALLBACK DATA
    Used only when the real backend can't be reached, so the app is still
    demoable without a live backend/Keycloak instance.

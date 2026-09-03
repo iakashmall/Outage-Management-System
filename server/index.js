@@ -21,6 +21,23 @@ const pool = new Pool({
   ssl,
 });
 const maxUploadBytes = 20 * 1024 * 1024;
+const photoSchemaSql = `
+  CREATE TABLE IF NOT EXISTS job_photos (
+    id BIGSERIAL PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    image_data BYTEA NOT NULL,
+    content_type TEXT NOT NULL DEFAULT 'image/webp',
+    original_content_type TEXT NOT NULL,
+    width INTEGER NOT NULL,
+    height INTEGER NOT NULL,
+    latitude DOUBLE PRECISION,
+    longitude DOUBLE PRECISION,
+    note TEXT,
+    captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+
+  CREATE INDEX IF NOT EXISTS job_photos_job_id_idx ON job_photos (job_id);
+`;
 
 function sendJson(response, status, payload) {
   response.writeHead(status, {
@@ -78,6 +95,10 @@ async function storePhoto(jobId, payload) {
   return { ...result.rows[0], originalBytes: original.buffer.length };
 }
 
+async function ensureDatabaseSchema() {
+  await pool.query(photoSchemaSql);
+}
+
 const server = http.createServer(async (request, response) => {
   if (request.method === "OPTIONS") return sendJson(response, 204, {});
   const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
@@ -103,9 +124,19 @@ const server = http.createServer(async (request, response) => {
   }
 });
 
-server.listen(port, () => {
-  console.log(`OMS photo API listening on http://localhost:${port}`);
-});
+async function startServer() {
+  try {
+    await ensureDatabaseSchema();
+    server.listen(port, () => {
+      console.log(`OMS photo API listening on http://localhost:${port}`);
+    });
+  } catch (error) {
+    console.error("Failed to initialize PostgreSQL schema:", error);
+    process.exit(1);
+  }
+}
+
+startServer();
 
 process.on("SIGTERM", async () => {
   await pool.end();
