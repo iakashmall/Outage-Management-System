@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef, Component } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
 import { socket } from './lib/api.js';
 import { Icon, useConnection, useToasts, hhmm } from './lib/ui.jsx';
-import { currentUser, logout } from './lib/auth.js';
 import Dashboard from './screens/Dashboard.jsx';
 import Incidents from './screens/Incidents.jsx';
 import NetworkMap from './screens/NetworkMap.jsx';
@@ -11,11 +11,11 @@ import TCS from './screens/TCS.jsx';
 import Complaints from './screens/Complaints.jsx';
 import Analytics from './screens/Analytics.jsx';
 import Admin from './screens/Admin.jsx';
-import LandingPage from './components/LandingPage.jsx';
-import ProfileMenu from './components/ProfileMenu.jsx';
-import { motion, AnimatePresence } from 'motion/react';
 import IncidentSearch from './components/IncidentSearch.jsx';
+import ProfileMenu from './components/ProfileMenu.jsx';
 
+// Isolates a screen crash so it shows an inline message instead of blanking the
+// whole app. Resets when you navigate to another screen (keyed by `tab`).
 class ScreenBoundary extends Component {
   constructor(p) { super(p); this.state = { err: null }; }
   static getDerivedStateFromError(err) { return { err }; }
@@ -91,16 +91,7 @@ function LiveTape() {
 
 export default function App() {
   const [tab, setTab] = useState('dashboard');
-  const [openIncidentId, setOpenIncidentId] = useState(null);
-  const [entered, setEntered] = useState(false);
-  const [dashFading, setDashFading] = useState(true);
   const [focusIncidentId, setFocusIncidentId] = useState(null);
-  useEffect(() => {
-    if (entered) {
-      const t = setTimeout(() => setDashFading(false), 20);
-      return () => clearTimeout(t);
-    }
-  }, [entered]);
   const up = useConnection();
   const { items } = useToasts();
   const [clock, setClock] = useState('');
@@ -112,27 +103,15 @@ export default function App() {
   // Jump to the Incidents screen with a specific incident pre-selected -
   // used by the Alarms table so an operator can go straight from "this alarm
   // fired" to "here's the incident it created" in one click.
-  const openIncident = (id) => {
-    setFocusIncidentId(id);
-    setOpenIncidentId(id);
-    setTab('incidents');
-  };
-  const goToIncident = openIncident;
+  const openIncident = (id) => { setFocusIncidentId(id); setTab('incidents'); };
 
   const active = NAV.find((n) => n[0] === tab);
   const Screen = active[3];
 
-  
-
   return (
     <div className="shell">
       <nav className="rail" aria-label="Primary">
-        <div className="brand" title="GridQ">
-          <svg width="24" height="24" viewBox="0 0 120 120" fill="none">
-            <circle cx="60" cy="60" r="40" fill="none" stroke="#fff" strokeWidth="9" />
-            <path d="M64 82 L48 100 L60 100 L52 122 L78 92 L64 92 Z" fill="#fff" />
-          </svg>
-        </div>
+        <div className="brand" title="GridQ"><img src="/gridq-mark.png" alt="GridQ" className="brand-img" /></div>
         {NAV.map(([id, label, icon]) => (
           <button key={id} className={`navbtn ${tab === id ? 'on' : ''}`}
             onClick={() => setTab(id)} aria-current={tab === id} aria-label={label}>
@@ -144,24 +123,41 @@ export default function App() {
       </nav>
 
       <div className="main">
+        <div className="masthead">
+          <div className="masthead-brand">
+            <div className="masthead-text">
+              <div className="masthead-word">GridQ</div>
+              {/* Real tagline - update here if it changes */}
+              <div className="masthead-tag">Predict. Prevent. Power.</div>
+            </div>
+          </div>
+          <div className="grow" />
+          <div className="masthead-brand masthead-brand-right">
+            <div className="masthead-text masthead-text-right">
+              <div className="masthead-tag">Uttarakhand Power Corporation Limited</div>
+            </div>
+            <img src="/upcl-logo.png" alt="UPCL" className="masthead-logo" />
+          </div>
+        </div>
+
         <header className="cmd">
           <div>
             <h1>{active[1]}</h1>
             <div className="sub">Uttarakhand Power Corp . Ganga Corridor Control Centre</div>
           </div>
           <div className="grow" />
-          <div className="conn" title={up ? 'Live link to control-room backend' : 'Reconnecting...'}>
+          <div className="conn" title={up ? 'Live link to control-room backend' : 'ReconnectingΓÇª'}>
             <span className={`dot ${up ? 'up' : 'down'}`} />
             {up ? 'SCADA link live' : 'Reconnecting'}
           </div>
           <div className="clock mono">{clock}</div>
-          <div style={{ marginLeft: 12, width: 260, position: 'relative', display: 'flex', alignItems: 'center' }}>
-            <IncidentSearch onOpen={(inc) => goToIncident(inc.id)} />
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 12 }}>
-            <ProfileMenu />
-          </div>
-        </header>
+             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 12 }}>
+               <div style={{ marginLeft: 12, width: 260, position: 'relative', display: 'flex', alignItems: 'center' }}>
+                 <IncidentSearch onOpen={(inc) => openIncident(inc.id)} />
+               </div>
+               <ProfileMenu />
+             </div>
+           </header>
 
         <LiveTape />
 
@@ -175,13 +171,7 @@ export default function App() {
               transition={{ duration: 0.18, ease: [0.22, 0.61, 0.36, 1] }}
             >
               <ScreenBoundary key={tab}>
-                <Screen
-                  go={setTab}
-                  openId={tab === 'incidents' ? openIncidentId : undefined}
-                  openIncident={openIncident}
-                  focusIncidentId={tab === 'incidents' ? focusIncidentId : null}
-                  clearFocus={() => setFocusIncidentId(null)}
-                />
+                <Screen go={setTab} openIncident={openIncident} focusIncidentId={tab === 'incidents' ? focusIncidentId : null} clearFocus={() => setFocusIncidentId(null)} />
               </ScreenBoundary>
             </motion.div>
           </AnimatePresence>

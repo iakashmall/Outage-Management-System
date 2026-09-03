@@ -774,3 +774,10 @@ body{
 ::-webkit-scrollbar-thumb:hover{
   background:#8eafa9;
 }
+
+.brand-img {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+  display: block;
+}
