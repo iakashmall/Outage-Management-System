@@ -76,8 +76,8 @@ button{font-family:inherit;cursor:pointer}
 .rail{background:var(--navy);display:flex;flex-direction:column;align-items:center;
   padding:14px 0;gap:6px;position:relative}
 .rail .brand{width:38px;height:38px;border-radius:9px;
-  background:linear-gradient(145deg,#16b7a2 0%,var(--live) 48%,#087b78 100%);
-  display:grid;place-items:center;margin-bottom:14px;box-shadow:0 3px 10px rgba(14,159,142,.4)}
+ /* background:linear-gradient(145deg,#16b7a2 0%,var(--live) 48%,#087b78 100%);*/
+  display:grid;place-items:center;margin-bottom:14px}
 .rail .brand b{font-family:var(--disp);color:#fff;font-size:18px;font-weight:700}
 .navbtn{width:44px;height:44px;border:0;background:transparent;border-radius:10px;
   display:grid;place-items:center;color:#8fa6c4;transition:.15s;position:relative}
@@ -562,7 +562,7 @@ tr.row-hot td{background:var(--crit-bg)}
 /* IncidentSearch - remove redundant label, tighten to fit inline in the header row */
 label[for='search'] { display: none !important; }
 /* =========================================================
-   OMS VISUAL THEME — TEAL GREEN × NAVY
+   OMS VISUAL THEME Ã¢â‚¬â€ TEAL GREEN Ãƒâ€” NAVY
    Color-only polish: layout/content intentionally unchanged.
    ========================================================= */
 
@@ -592,8 +592,8 @@ body{
 
 /* Brand / active navigation */
 .rail .brand{
-  background:linear-gradient(145deg,var(--teal-1) 0%,var(--teal-2) 52%,var(--teal-3) 100%);
-  box-shadow:0 5px 16px rgba(11,159,143,.32);
+  /*background:linear-gradient(145deg,var(--teal-1) 0%,var(--teal-2) 52%,var(--teal-3) 100%);
+  box-shadow:0 5px 16px rgba(11,159,143,.32);*/
 }
 .navbtn.on{
   background:linear-gradient(135deg,rgba(22,183,162,.20),rgba(16,47,74,.34));
@@ -636,7 +636,7 @@ body{
   color:#82eadc;
 }
 
-/* Cards — subtle teal edge on hover */
+/* Cards Ã¢â‚¬â€ subtle teal edge on hover */
 .card,.stat{
   transition:border-color .15s ease,box-shadow .15s ease;
 }
@@ -781,3 +781,6 @@ body{
   object-fit: contain;
   display: block;
 }
+
+.brand-img { width: 30px !important; height: 30px !important; }
+.rail .brand { width: 44px !important; height: 44px !important; }
