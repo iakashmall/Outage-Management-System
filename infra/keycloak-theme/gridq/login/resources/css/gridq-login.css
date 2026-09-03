@@ -119,6 +119,25 @@ body::before {
   font-weight: 700;
   letter-spacing: 0.3px;
   text-shadow: none !important;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+#gridq-logo {
+  width: 64px;
+  height: 64px;
+  object-fit: contain;
+  animation: gridqLogoPulse 2.6s ease-in-out infinite;
+}
+@keyframes gridqLogoPulse {
+  0%, 100% { transform: scale(1); filter: drop-shadow(0 8px 20px rgba(14,159,142,0.35)); }
+  25% { transform: scale(1.06); filter: drop-shadow(0 8px 26px rgba(14,159,142,0.55)); }
+  70% { transform: scale(1.035); filter: drop-shadow(0 8px 30px rgba(14,159,142,0.55)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #gridq-logo { animation: none; }
 }
 
 .card-pf {

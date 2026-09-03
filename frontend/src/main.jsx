@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import App from './App.jsx';
 import Splash from './Splash.jsx';
 import './index.css';
+import './tailwind-utilities.css';
 import { initKeycloak } from './lib/auth.js';
 
 initKeycloak()

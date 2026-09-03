@@ -3,6 +3,14 @@
 // the same live animations. Runs on every login-flow page (login, OTP,
 // forgot-password, etc.) via theme.properties' `scripts=`.
 (function () {
+  // Keycloak serves theme resources with an auto-generated cache-key
+  // prefix (e.g. /resources/abc123/login/gridq/...) that isn't predictable
+  // ahead of time. document.currentScript.src gives us this script's own
+  // real, correct URL — resolving the logo path relative to THAT (not the
+  // current page's URL) is what makes this work regardless of the hash.
+  var scriptSrc = document.currentScript && document.currentScript.src;
+  var logoUrl = scriptSrc ? new URL('../img/gridq-mark.png', scriptSrc).href : '/gridq-mark.png';
+
   function inject() {
     if (document.getElementById('gridq-scene')) return; // don't double-inject on partial reloads
 
@@ -54,6 +62,18 @@
       '</svg>';
 
     document.body.insertBefore(wrap, document.body.firstChild);
+
+    // Logo, injected into Keycloak's own header element (#kc-header-wrapper
+    // — confirmed against Keycloak 24's real base template) rather than a
+    // separate fixed element, so it sits naturally with the realm title.
+    var headerWrap = document.getElementById('kc-header-wrapper');
+    if (headerWrap && !document.getElementById('gridq-logo')) {
+      var logo = document.createElement('img');
+      logo.id = 'gridq-logo';
+      logo.src = logoUrl;
+      logo.alt = 'GridQ';
+      headerWrap.insertBefore(logo, headerWrap.firstChild);
+    }
   }
 
   function buildPulses() {
