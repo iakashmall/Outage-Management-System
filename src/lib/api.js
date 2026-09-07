@@ -22,14 +22,8 @@ async function nativeAuth() {
   return import("./auth");
 }
 
-// Cache the last successfully-fetched job list (with locations/addresses)
-// to disk, so the Jobs list and Map screen still have real, last-known
-// data to show when the device has no connectivity — this is what
-// "offline maps" means here: cached job/location data, not offline map
-// *tiles*. Rendering actual pannable/zoomable map tiles without a network
-// connection needs a dedicated mapping SDK (e.g. react-native-maps with
-// Mapbox/Google offline packs) and API keys, which is a separate scope
-// addition from this caching layer.
+// Cache the last successfully-fetched job list, including coordinates, so
+// the native map can render the last known work area without a network.
 async function cacheJobs(jobs) {
   try {
     await AsyncStorage.setItem(JOBS_CACHE_KEY, JSON.stringify(jobs));
@@ -111,6 +105,8 @@ async function nativeReq(path, method = "GET", body) {
 }
 
 function normalizeOmsJob(job) {
+  const lat = Number(job.lat ?? job.latitude ?? job.location?.lat ?? job.location?.latitude);
+  const lon = Number(job.lon ?? job.lng ?? job.longitude ?? job.location?.lon ?? job.location?.longitude);
   return {
     id: job.id ?? job.jobId,
     title: job.title ?? job.incident?.type ?? "Priority outage",
@@ -125,6 +121,7 @@ function normalizeOmsJob(job) {
     assignedCrewId: job.assignedCrewId ?? job.crewId ?? null,
     assignedDistance: job.assignedDistance ?? job.distance ?? "Nearest available",
     incidentId: job.incident_id ?? job.incidentId ?? null,
+    coordinates: Number.isFinite(lat) && Number.isFinite(lon) ? { lat, lon } : null,
   };
 }
 

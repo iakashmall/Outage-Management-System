@@ -26,7 +26,7 @@ import { biometricUnlock } from './lib/biometric';
 import { getLockoutStatus, recordFailedAttempt, resetAttempts as resetLoginAttempts, MAX_ATTEMPTS, LOCKOUT_MS } from './lib/lockout';
 import { CLIENT_ID } from './config';
 import { getCurrentCrew, getMyJobs, updateJobStatus, getJobsLastSyncedAt } from './lib/api.js';
-import { getLocation } from './lib/location';
+import { getLocation, getLastKnownLocation } from './lib/location';
 import { captureAndUpload } from './lib/photos';
 import { navigateTo } from './lib/navigate';
 import { openMultiJobRoute } from './lib/routing';
@@ -42,9 +42,9 @@ import CrewLeadSignOff from './components/CrewLeadSignOff';
 WebBrowser.maybeCompleteAuthSession();
 
 const FALLBACK_JOBS = [
-  { id: 'JOB-1005', title: 'Pending Line Inspection', address: 'Mussoorie Road, Dehradun', severity: 'High', status: 'Pending Acceptance', customers: 386, distance: '1.6 km' },
-  { id: 'JOB-1001', title: 'Transformer Failure', address: 'Rajpur Road, Dehradun', severity: 'Critical', status: 'Acknowledged', customers: 842, distance: '2.4 km' },
-  { id: 'JOB-1002', title: 'Line Fault', address: 'Haridwar Road, Rishikesh', severity: 'High', status: 'En Route', customers: 531, distance: '5.8 km' },
+  { id: 'JOB-1005', title: 'Pending Line Inspection', address: 'Mussoorie Road, Dehradun', coordinates: { lat: 30.3606, lon: 78.0647 }, severity: 'High', status: 'Pending Acceptance', customers: 386, distance: '1.6 km' },
+  { id: 'JOB-1001', title: 'Transformer Failure', address: 'Rajpur Road, Dehradun', coordinates: { lat: 30.3476, lon: 78.0808 }, severity: 'Critical', status: 'Acknowledged', customers: 842, distance: '2.4 km' },
+  { id: 'JOB-1002', title: 'Line Fault', address: 'Haridwar Road, Rishikesh', coordinates: { lat: 30.3136, lon: 78.0322 }, severity: 'High', status: 'En Route', customers: 531, distance: '5.8 km' },
 ];
 
 const NEXT_STATUS = {
@@ -799,11 +799,71 @@ function JobDetail({ job, onClose, onAdvance, onNavigate }) {
 function MapScreen({ jobs, selectedJobId, onSelect }) {
   const selectedJob = jobs.find((job) => job.id === selectedJobId);
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
+  const [mapLocation, setMapLocation] = useState({});
+  const [mapCenter, setMapCenter] = useState({});
+  const [zoom, setZoom] = useState(1);
   const [routing, setRouting] = useState(false);
 
   useEffect(() => {
     getJobsLastSyncedAt().then(setLastSyncedAt).catch(() => {});
-  }, [jobs]);
+    getLocation()
+      .then((location) => {
+        if (location.lat && location.lon) setMapLocation(location);
+        else return getLastKnownLocation().then(setMapLocation);
+      })
+      .catch(() => getLastKnownLocation().then(setMapLocation).catch(() => {}));
+  }, []);
+
+  const hasLocation = Number.isFinite(mapLocation.lat) && Number.isFinite(mapLocation.lon);
+  const jobsWithCoordinates = jobs.filter((job) =>
+    Number.isFinite(job.coordinates?.lat) && Number.isFinite(job.coordinates?.lon)
+  );
+  const defaultCenter = hasLocation
+    ? mapLocation
+    : jobsWithCoordinates.length
+      ? jobsWithCoordinates.reduce(
+        (center, job) => ({ lat: center.lat + job.coordinates.lat, lon: center.lon + job.coordinates.lon }),
+        { lat: 0, lon: 0 }
+      )
+      : {};
+  if (jobsWithCoordinates.length && !hasLocation) {
+    defaultCenter.lat /= jobsWithCoordinates.length;
+    defaultCenter.lon /= jobsWithCoordinates.length;
+  }
+  const center = Number.isFinite(mapCenter.lat) && Number.isFinite(mapCenter.lon) ? mapCenter : defaultCenter;
+  const hasCenter = Number.isFinite(center.lat) && Number.isFinite(center.lon);
+  const markerPositions = jobs.map((job, index) => {
+    const coordinates = job.coordinates;
+    if (!hasCenter || !coordinates) {
+      return { top: [20, 40, 64, 76][index % 4], left: [20, 72, 38, 68][index % 4] };
+    }
+    const horizontal = ((coordinates.lon - center.lon) / 0.04) * 38 * zoom;
+    const vertical = ((center.lat - coordinates.lat) / 0.04) * 38 * zoom;
+    return {
+      left: Math.max(8, Math.min(84, 50 + horizontal)),
+      top: Math.max(8, Math.min(82, 50 + vertical)),
+    };
+  });
+
+  const setCrewCenter = () => {
+    if (hasLocation) {
+      setMapCenter(mapLocation);
+      setZoom(1);
+    }
+  };
+
+  const fitJobs = () => {
+    if (!jobsWithCoordinates.length) return;
+    const fitted = jobsWithCoordinates.reduce(
+      (next, job) => ({ lat: next.lat + job.coordinates.lat, lon: next.lon + job.coordinates.lon }),
+      { lat: 0, lon: 0 }
+    );
+    setMapCenter({
+      lat: fitted.lat / jobsWithCoordinates.length,
+      lon: fitted.lon / jobsWithCoordinates.length,
+    });
+    setZoom(0.85);
+  };
 
   const startMultiJobRoute = async () => {
     setRouting(true);
@@ -817,14 +877,16 @@ function MapScreen({ jobs, selectedJobId, onSelect }) {
   return (
     <View>
       <Text style={styles.title}>Outage map</Text>
-      <Text style={styles.subtitle}>Tap an incident to focus the crew route.</Text>
+      <Text style={styles.subtitle}>Cached map area for the crew&apos;s last known location.</Text>
 
       <View style={styles.offlineBadgeRow}>
         <View style={[styles.offlineDot, lastSyncedAt ? styles.offlineDotOn : styles.offlineDotOff]} />
         <Text style={styles.offlineBadgeText}>
-          {lastSyncedAt
-            ? `Offline-ready · locations cached ${timeAgo(lastSyncedAt)}`
-            : 'Not cached yet — connect once to enable offline job locations'}
+          {hasLocation
+            ? `Offline map ready · crew position ${mapLocation.lat.toFixed(4)}, ${mapLocation.lon.toFixed(4)}`
+            : lastSyncedAt
+              ? `Offline map ready · locations cached ${timeAgo(lastSyncedAt)}`
+              : 'No cached location yet — connect and enable GPS once'}
         </Text>
       </View>
 
@@ -841,19 +903,41 @@ function MapScreen({ jobs, selectedJobId, onSelect }) {
           <View style={styles.mapRoadOne} />
           <View style={styles.mapRoadTwo} />
           <View style={styles.mapRiver} />
-          <View style={styles.mapCrewMarker}>●</View>
+          <View style={styles.mapCrewMarker}>
+            <Text style={styles.mapCrewMarkerText}>●</Text>
+          </View>
           {jobs.map((job, index) => (
             <Pressable
               key={job.id}
-              style={[styles.mapJobMarker, styles[`mapMarker${index % 4}`], selectedJobId === job.id && styles.mapJobMarkerSelected]}
+              style={[
+                styles.mapJobMarker,
+                { top: `${markerPositions[index].top}%`, left: `${markerPositions[index].left}%` },
+                selectedJobId === job.id && styles.mapJobMarkerSelected,
+              ]}
               onPress={() => onSelect(job.id)}
               accessibilityLabel={`Focus ${job.title}`}
             >
               <Text style={styles.mapMarkerText}>!</Text>
             </Pressable>
           ))}
+          <View style={styles.mapZoomControls}>
+            <Pressable style={styles.mapZoomButton} onPress={() => setZoom((value) => Math.min(2, value + 0.25))}>
+              <Text style={styles.mapZoomText}>+</Text>
+            </Pressable>
+            <Pressable style={styles.mapZoomButton} onPress={() => setZoom((value) => Math.max(0.5, value - 0.25))}>
+              <Text style={styles.mapZoomText}>−</Text>
+            </Pressable>
+          </View>
         </View>
-        <Text style={styles.mapLegend}>● Crew  • Incidents  • Selected task</Text>
+        <Text style={styles.mapLegend}>● Crew  • Incidents  • Selected task · Works without internet</Text>
+      </View>
+      <View style={styles.mapControls}>
+        <Pressable style={styles.mapControlButton} onPress={setCrewCenter} disabled={!hasLocation}>
+          <Text style={[styles.mapControlText, !hasLocation && styles.mapControlDisabled]}>Center on crew</Text>
+        </Pressable>
+        <Pressable style={styles.mapControlButton} onPress={fitJobs} disabled={!jobsWithCoordinates.length}>
+          <Text style={[styles.mapControlText, !jobsWithCoordinates.length && styles.mapControlDisabled]}>Fit jobs</Text>
+        </Pressable>
       </View>
       {selectedJob ? (
         <View style={styles.mapSelectedCard}>
@@ -1002,7 +1086,8 @@ const styles = StyleSheet.create({
   mapRoadOne: { position: 'absolute', width: '130%', height: 12, top: '28%', left: '-10%', backgroundColor: 'rgba(255,255,255,.82)', transform: [{ rotate: '-25deg' }] },
   mapRoadTwo: { position: 'absolute', width: '130%', height: 10, top: '64%', left: '-10%', backgroundColor: 'rgba(255,255,255,.82)', transform: [{ rotate: '19deg' }] },
   mapRiver: { position: 'absolute', height: '130%', width: 28, top: '-10%', right: '25%', backgroundColor: '#acd6d5', transform: [{ rotate: '17deg' }], opacity: 0.8 },
-  mapCrewMarker: { position: 'absolute', top: '52%', left: '53%', width: 30, height: 30, borderRadius: 15, backgroundColor: '#0e9f8e', color: '#fff', textAlign: 'center', lineHeight: 30, fontSize: 18 },
+  mapCrewMarker: { position: 'absolute', top: '50%', left: '50%', width: 30, height: 30, borderRadius: 15, backgroundColor: '#0e9f8e', alignItems: 'center', justifyContent: 'center', transform: [{ translateX: -15 }, { translateY: -15 }] },
+  mapCrewMarkerText: { color: '#fff', fontSize: 18, lineHeight: 20 },
   mapJobMarker: { position: 'absolute', width: 30, height: 30, borderRadius: 15, backgroundColor: '#d13d2f', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#fff' },
   mapMarkerText: { color: '#fff', fontSize: 16, fontWeight: '800' },
   mapMarker0: { top: '20%', left: '20%' },
@@ -1010,7 +1095,14 @@ const styles = StyleSheet.create({
   mapMarker2: { bottom: '18%', left: '38%', backgroundColor: '#2f6fd6' },
   mapMarker3: { bottom: '10%', right: '28%', backgroundColor: '#2a9d5c' },
   mapJobMarkerSelected: { transform: [{ scale: 1.25 }], borderColor: '#173355' },
+  mapZoomControls: { position: 'absolute', top: 10, right: 10, gap: 6 },
+  mapZoomButton: { width: 34, height: 34, borderRadius: 8, backgroundColor: 'rgba(255,255,255,.94)', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#d5e0eb' },
+  mapZoomText: { color: '#173355', fontSize: 22, fontWeight: '700', lineHeight: 24 },
   mapLegend: { color: '#7c8da3', fontSize: 11, marginTop: 10 },
+  mapControls: { flexDirection: 'row', gap: 9, marginTop: 10 },
+  mapControlButton: { flex: 1, backgroundColor: '#fff', borderRadius: 9, borderWidth: 1, borderColor: '#d5e0eb', paddingVertical: 10, alignItems: 'center' },
+  mapControlText: { color: '#1F3864', fontSize: 12, fontWeight: '800' },
+  mapControlDisabled: { color: '#aab6c4' },
   mapSelectedCard: { backgroundColor: '#fff', borderRadius: 12, padding: 14, marginTop: 12, borderWidth: 1, borderColor: '#b9dcd3', gap: 8 },
   mapSelectedTitle: { color: '#173355', fontSize: 15, fontWeight: '800' },
   mapSelectedMeta: { color: '#7c8da3', fontSize: 12 },
