@@ -13,7 +13,7 @@ import { cacheGet, cacheSet, cacheDel } from '../infra/redis.js';
 export const api = Router();
 const actor = (req) => req.header('x-user') || 'operator';
 
-// ---------- network topology (real Haridwar GIS, loaded once — unchanged, no DB) ----------
+// ---------- network topology (real Haridwar GIS, loaded once â€” unchanged, no DB) ----------
 const _dir = dirname(fileURLToPath(import.meta.url));
 let NETWORK = null;
 try { NETWORK = JSON.parse(readFileSync(join(_dir, '..', 'infra', 'network.json'), 'utf8')); }
@@ -68,7 +68,7 @@ api.post('/incidents', async (req, res) => {
     lat: b.lat ?? null, lon: b.lon ?? null, crew_id: null, opened_at: opened,
     ert: null, sla_due_at: new Date(Date.now() + SLA * 60000).toISOString(), source: b.source || 'MANUAL',
   });
-  await repo.addIncidentEvent(id, actor(req), 'created', `Manually created — ${b.cause || 'Unknown'}`);
+  await repo.addIncidentEvent(id, actor(req), 'created', `Manually created â€” ${b.cause || 'Unknown'}`);
   await repo.audit(actor(req), 'incident.create', id);
   bus.publish(TOPICS.INCIDENT_CREATED, inc);
   await cacheDel('indicators');
@@ -80,11 +80,11 @@ api.patch('/incidents/:id/status', requireRole('oms_operator', 'system_admin'), 
   if (!inc) return res.status(404).json({ error: 'not found' });
   const to = req.body?.status;
   if (!canTransition(inc.status, to))
-    return res.status(409).json({ error: `illegal transition ${inc.status} → ${to}`, allowed: nextStates(inc.status) });
+    return res.status(409).json({ error: `illegal transition ${inc.status} â†’ ${to}`, allowed: nextStates(inc.status) });
   const patch = { status: to };
   if (to === 'resolved') patch.ert = null;
   const updated = await repo.updateIncident(inc.id, patch);
-  await repo.addIncidentEvent(inc.id, actor(req), 'status', `${LABELS[inc.status]} → ${LABELS[to]}${req.body?.note ? ' — ' + req.body.note : ''}`);
+  await repo.addIncidentEvent(inc.id, actor(req), 'status', `${LABELS[inc.status]} â†’ ${LABELS[to]}${req.body?.note ? ' â€” ' + req.body.note : ''}`);
   await repo.audit(actor(req), 'incident.status', `${inc.id}:${to}`);
   bus.publish(TOPICS.INCIDENT_UPDATED, updated);
   await pushIndices();
@@ -141,7 +141,7 @@ api.post('/incidents/:id/assign', requireRole('oms_operator', 'system_admin'), a
     updated_at: new Date().toISOString(),
   });
   await repo.addIncidentEvent(inc.id, actor(req), 'assigned', `${crew.name} assigned`);
-  await repo.audit(actor(req), 'dispatch.assign', `${inc.id}→${crew.id}`);
+  await repo.audit(actor(req), 'dispatch.assign', `${inc.id}â†’${crew.id}`);
   const updated = await repo.incident(inc.id);
   const updatedCrew = await repo.crew(crew.id);
   bus.publish(TOPICS.INCIDENT_UPDATED, updated);
@@ -156,7 +156,7 @@ api.get('/crews', async (req, res) => res.json(await repo.crews()));
 // Nearest available crews to an incident (PostGIS distance-ranked).
 // Was previously registered *inside* the POST /assign handler, which meant it
 // only existed after the first assign call (and got re-registered on every
-// call after that). Hoisted to top-level route registration — fixed as part
+// call after that). Hoisted to top-level route registration â€” fixed as part
 // of the Phase 1 regression pass.
 api.get('/incidents/:id/nearest-crews', async (req, res) => {
   const inc = await repo.incident(req.params.id);
@@ -178,7 +178,7 @@ api.post('/alarms/:id/ack', async (req, res) => {
 // ---------- mock DMS endpoint (Phase 2, INT-002) ----------
 // Stands in for the utility's real DMS REST interface so the restoration
 // publisher (realtime/restoration.js) is testable end-to-end without a real
-// SCADA/DMS connection — exactly like /scada/fault stands in for a live feed.
+// SCADA/DMS connection â€” exactly like /scada/fault stands in for a live feed.
 // A real DMS integration would replace DMS_RESTORATION_URL in .env with the
 // utility's actual endpoint; this route then becomes dead code, kept only
 // for local dev/demo.
@@ -187,7 +187,7 @@ api.post('/dms/restore', async (req, res) => {
   const { idempotencyKey, incidentId, feeder, action } = req.body || {};
   if (!idempotencyKey || !incidentId) return res.status(400).json({ error: 'idempotencyKey and incidentId are required' });
   if (seenIdempotencyKeys.has(idempotencyKey)) {
-    return res.json({ accepted: true, duplicate: true, message: 'already processed — idempotent no-op' });
+    return res.json({ accepted: true, duplicate: true, message: 'already processed â€” idempotent no-op' });
   }
   seenIdempotencyKeys.add(idempotencyKey);
   console.log(`[mock-dms] restoration command: ${action} on ${feeder || incidentId}`);
@@ -198,7 +198,7 @@ api.post('/dms/restore', async (req, res) => {
 // Lets an operator (or the demo) push a synthetic SCADA fault through the exact
 // same auto-detection path the live DNP3/IEC-61968 adapter will use in
 // production. Publishes to the ALARM_RAISED topic; the SCADA consumer does the
-// rest (detect → dedup → classify → auto-create). INT-001.
+// rest (detect â†’ dedup â†’ classify â†’ auto-create). INT-001.
 api.post('/scada/fault', async (req, res) => {
   const { tag, condition = 'CRITICAL', limit_val = 'TRIP', customers, feeder, substation, lat, lon } = req.body || {};
   if (!tag) return res.status(400).json({ error: 'tag is required' });
@@ -217,7 +217,7 @@ api.post('/scada/fault', async (req, res) => {
 });
 
 api.post('/alarms/ack-all', async (req, res) => {
-  // NOTE: was `.forEach(async ...)` — that pattern doesn't await, so it's a
+  // NOTE: was `.forEach(async ...)` â€” that pattern doesn't await, so it's a
   // correctness bug once repo calls are async. Use a real loop instead.
   const alarms = await repo.alarms();
   for (const a of alarms.filter(a => !a.ack)) {
@@ -249,7 +249,7 @@ api.post('/calls/:id/to-incident', async (req, res) => {
   res.status(201).json(inc);
 });
 
-// ---------- complaints (external REST intake → dedup → merge → traceability) ----------
+// ---------- complaints (external REST intake â†’ dedup â†’ merge â†’ traceability) ----------
 const CATEGORY_TYPE = { 'No Supply': 'Power Outage', 'Partial Supply': 'Partial Power', 'Voltage': 'Power Quality', 'Wire Down': 'Safety Hazard', 'Meter': 'Metering', 'Other': 'Power Outage' };
 const CATEGORY_SEV = { 'Wire Down': 'critical', 'No Supply': 'high', 'Partial Supply': 'medium', 'Voltage': 'medium', 'Meter': 'low', 'Other': 'medium' };
 
@@ -270,7 +270,7 @@ async function ingestComplaint(body, who) {
   const category = body.category || 'No Supply';
   const lat = typeof body.lat === 'number' ? body.lat : null;
   const lon = typeof body.lon === 'number' ? body.lon : null;
-  const loc = resolveAsset(lat, lon);                       // → nearest DT, feeder, substation (in-memory, sync)
+  const loc = resolveAsset(lat, lon);                       // â†’ nearest DT, feeder, substation (in-memory, sync)
 
   const candidates = loc.substation ? await repo.activeIncidentsAtSubstation(loc.substation) : [];
   const match = pickIncident(candidates, category);
@@ -279,7 +279,7 @@ async function ingestComplaint(body, who) {
   if (match) {                                              // MERGE
     incidentId = match.id; action = 'merged';
     await repo.updateIncident(match.id, { customers: (match.customers || 0) + 1 });
-    await repo.addIncidentEvent(match.id, who, 'complaint', `Merged complaint ${qid}${body.externalId ? ' (ext ' + body.externalId + ')' : ''} — ${category}, ${body.customer || 'customer'}`);
+    await repo.addIncidentEvent(match.id, who, 'complaint', `Merged complaint ${qid}${body.externalId ? ' (ext ' + body.externalId + ')' : ''} â€” ${category}, ${body.customer || 'customer'}`);
     bus.publish(TOPICS.INCIDENT_UPDATED, await repo.incident(match.id));
   } else {                                                  // NEW
     incidentId = await repo.nextIncidentId(); action = 'created';
@@ -290,7 +290,7 @@ async function ingestComplaint(body, who) {
       opened_at: ts, ert: null, sla_due_at: new Date(Date.now() + 180 * 60000).toISOString(),
       source: 'Customer', substation: loc.substation,
     });
-    await repo.addIncidentEvent(incidentId, who, 'created', `Opened from complaint ${qid} — ${category} near ${loc.substation || 'unknown'}`);
+    await repo.addIncidentEvent(incidentId, who, 'created', `Opened from complaint ${qid} â€” ${category} near ${loc.substation || 'unknown'}`);
     bus.publish(TOPICS.INCIDENT_CREATED, inc);
   }
   await cacheDel('indicators');
@@ -315,7 +315,7 @@ api.post('/complaints', async (req, res) => {
   });
 });
 
-// Full traceback: complaint → query → incident/problem → feeder → substation
+// Full traceback: complaint â†’ query â†’ incident/problem â†’ feeder â†’ substation
 api.get('/complaints/:qid/trace', async (req, res) => {
   const c = await repo.complaint(req.params.qid);
   if (!c) return res.status(404).json({ error: 'not found' });
@@ -347,7 +347,7 @@ api.post('/complaints/simulate', async (req, res) => {
 });
 
 // ---------- indicators / analytics ----------
-// Read-through cache (Redis RTDB, SDP §3): dashboards poll this endpoint
+// Read-through cache (Redis RTDB, SDP Â§3): dashboards poll this endpoint
 // frequently and the underlying computation re-scans every incident, so a
 // short TTL cache takes the repeat load off Postgres without risking a
 // stale value for more than a few seconds. Cache is invalidated explicitly
@@ -364,7 +364,7 @@ api.get('/analytics/monthly', async (req, res) =>
 
 // ---------- crew app (mobile) ----------
 api.get('/mobile/crews/:id/jobs', async (req, res) => {
-  // NOTE: was a sync `.map()` with a repo lookup inside — under async repo
+  // NOTE: was a sync `.map()` with a repo lookup inside â€” under async repo
   // calls that returns an array of unresolved Promises. Use Promise.all instead.
   const rawJobs = await repo.jobsForCrew(req.params.id);
   const jobs = await Promise.all(rawJobs.map(async (j) => ({ ...j, incident: await repo.incident(j.incident_id) })));
@@ -415,7 +415,7 @@ api.patch('/mobile/jobs/:id/status', async (req, res) => {
   if (status === 'On Site' && job.incident_id) await repo.updateIncident(job.incident_id, { status: 'in_progress' });
   if (status === 'Work Complete' && job.incident_id) {
     await repo.updateIncident(job.incident_id, { status: 'pending' });
-    await repo.addIncidentEvent(job.incident_id, 'Crew', 'field', 'Work complete — awaiting verification');
+    await repo.addIncidentEvent(job.incident_id, 'Crew', 'field', 'Work complete â€” awaiting verification');
   }
   if (job.incident_id) await cacheDel('indicators');
   const updated = await repo.job(job.id);
