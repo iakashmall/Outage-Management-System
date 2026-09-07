@@ -6,7 +6,7 @@ import { nanoid } from 'nanoid';
 // Named params use pg-promise's $/name/ syntax instead of the old bare @name.
 const parseSkills = (r) => r ? { ...r, skills: r.skills ? r.skills.split(',') : [] } : r;
 
-// Builds a "col=$/col/" SET clause from a patch object — same dynamic-update
+// Builds a "col=$/col/" SET clause from a patch object ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â same dynamic-update
 // pattern as before, just async at the call site now.
 const setClause = (patch) => Object.keys(patch).map(k => `${k}=$/${k}/`).join(',');
 
@@ -20,7 +20,28 @@ export const repo = {
     return 'INC-2026-' + String(Number(c) + 1).padStart(6, '0');
   },
   createIncident: async (i) => {
-    const row = { substation: null, ...i };
+    // Known zone centroids for the Ganga Corridor network -- lets manually
+    // created incidents (from the "New Incident" form, which has no map
+    // picker) still get a real lat/lon so nearest-crew matching works,
+    // instead of silently going geog=NULL and matching zero crews forever.
+    const ZONE_COORDS = {
+      'Mayapur': [29.940311, 78.147653],
+      'Bhoopatwala': [29.971419, 78.182491],
+      'Industrial Area': [29.921, 78.152],
+      'Jwalapur-I': [29.930, 78.170],
+      'Kankhal-2': [29.937, 78.174],
+      'Dehradun Central': [30.3165, 78.0322],
+      'Clement Town, Dehradun': [30.279, 77.977],
+      'Ballupur, Dehradun': [30.348, 78.038],
+      'Jwalapur, Haridwar': [29.930, 78.170],
+    };
+    let lat = i.lat;
+    let lon = i.lon;
+    if ((lat == null || lon == null) && i.zone && ZONE_COORDS[i.zone]) {
+      lat = ZONE_COORDS[i.zone][0];
+      lon = ZONE_COORDS[i.zone][1];
+    }
+    const row = { substation: null, ...i, lat, lon };
     await db.none(`INSERT INTO incidents
       (id,type,severity,status,zone,feeder,customers,cause,lat,lon,crew_id,opened_at,ert,sla_due_at,source,substation)
       VALUES ($/id/,$/type/,$/severity/,$/status/,$/zone/,$/feeder/,$/customers/,$/cause/,$/lat/,$/lon/,$/crew_id/,$/opened_at/,$/ert/,$/sla_due_at/,$/source/,$/substation/)`,
@@ -73,7 +94,7 @@ export const repo = {
     await db.none(`UPDATE crews SET ${setClause(patch)} WHERE id=$/id/`, { ...patch, id });
     return repo.crew(id);
   },
-  // Available crews nearest an incident, using real PostGIS distance — replaces
+  // Available crews nearest an incident, using real PostGIS distance ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â replaces
   // picking "any available crew" with a distance-ranked list.
   nearestAvailableCrews: (incidentId, limit = 6) =>
     db.any(`
