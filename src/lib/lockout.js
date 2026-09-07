@@ -19,7 +19,9 @@ export async function getLockoutStatus() {
     const lockUntil = Number.isFinite(storedLockUntil) && storedLockUntil > 0 ? storedLockUntil : 0;
     const attempts = Number.isFinite(storedAttempts) && storedAttempts >= 0 ? storedAttempts : 0;
     const remainingMs = lockUntil - Date.now();
-    if (remainingMs > 0) return { locked: true, remainingMs, attempts };
+    if (remainingMs > 0 && attempts >= MAX_ATTEMPTS) {
+      return { locked: true, remainingMs, attempts };
+    }
     if (lockUntil || storedAttempts !== attempts) {
       await AsyncStorage.removeItem(LOCK_UNTIL_KEY);
       if (storedAttempts !== attempts) await AsyncStorage.setItem(ATTEMPTS_KEY, String(attempts));
