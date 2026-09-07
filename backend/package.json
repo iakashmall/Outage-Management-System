@@ -21,7 +21,8 @@
     "nodemailer": "^9.0.5",
     "pg-promise": "^11",
     "redis": "^6.2.1",
-    "socket.io": "^4.7.5"
+    "socket.io": "^4.7.5",
+    "sharp": "^0.34.3"
   },
   "engines": {
     "node": ">=22.5.0"

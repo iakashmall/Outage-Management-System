@@ -129,6 +129,17 @@ export const repo = {
       VALUES ($/id/,$/job_id/,$/status/,$/lat/,$/lon/,$/note/,$/ts/)`, u);
     return u;
   },
+  addAssetScan: async (scan) => {
+    await db.none(
+      `INSERT INTO asset_scans
+       (id,job_id,crew_id,asset_id,raw_value,asset_details,lat,lon,scanned_at)
+       VALUES ($/id/,$/job_id/,$/crew_id/,$/asset_id/,$/raw_value/,$/asset_details/,$/lat/,$/lon/,$/scanned_at/)`,
+      scan
+    );
+    return db.one('SELECT * FROM asset_scans WHERE id=$1', [scan.id]);
+  },
+  assetScansForJob: (jobId) =>
+    db.any('SELECT * FROM asset_scans WHERE job_id=$1 ORDER BY scanned_at DESC', [jobId]),
 
   // ---- admin / audit
   audit: async (actor, action, target) => {
@@ -137,25 +148,33 @@ export const repo = {
   },
   auditLog: () => db.any('SELECT * FROM audit_log ORDER BY ts DESC LIMIT 50'),
 
-    addJobPhoto: async (jobId, dataUrl, lat, lon, note) => {
+    addJobPhoto: async (jobId, photo) => {
     const ph = {
       id: 'PH' + nanoid(8),
       job_id: jobId,
-      data_url: dataUrl,
-      lat: lat ?? null,
-      lon: lon ?? null,
-      note: note ?? null,
+      image_data: photo.imageData,
+      content_type: photo.contentType || 'image/webp',
+      original_content_type: photo.originalContentType || null,
+      width: photo.width ?? null,
+      height: photo.height ?? null,
+      lat: photo.lat ?? null,
+      lon: photo.lon ?? null,
+      note: photo.note ?? null,
+      captured_at: photo.capturedAt || new Date().toISOString(),
+      technician_id: photo.technicianId || null,
+      metadata: photo.metadata || {},
       ts: new Date().toISOString(),
     };
     await db.none(
-      `INSERT INTO job_photos (id,job_id,data_url,lat,lon,note,ts)
-       VALUES ($/id/,$/job_id/,$/data_url/,$/lat/,$/lon/,$/note/,$/ts/)`,
+      `INSERT INTO job_photos
+       (id,job_id,image_data,content_type,original_content_type,width,height,lat,lon,note,captured_at,technician_id,metadata,ts)
+       VALUES ($/id/,$/job_id/,$/image_data/,$/content_type/,$/original_content_type/,$/width/,$/height/,$/lat/,$/lon/,$/note/,$/captured_at/,$/technician_id/,$/metadata/,$/ts/)`,
       ph
     );
     return ph;
   },
   jobPhotos: (jobId) =>
-    db.any('SELECT id, job_id, lat, lon, note, ts FROM job_photos WHERE job_id=$1 ORDER BY ts DESC', [jobId]),
+    db.any('SELECT id, job_id, content_type, width, height, octet_length(image_data) AS bytes, lat, lon, note, captured_at, technician_id, metadata, ts FROM job_photos WHERE job_id=$1 ORDER BY captured_at DESC', [jobId]),
   jobPhotoById: (id) => db.oneOrNone('SELECT * FROM job_photos WHERE id=$1', [id]),
 
     addMessage: async (incidentId, sender, senderRole, body) => {
@@ -176,6 +195,15 @@ export const repo = {
   },
   messages: (incidentId) =>
     db.any('SELECT * FROM messages WHERE incident_id=$1 ORDER BY ts ASC', [incidentId]),
+  messagesForCrew: (crewId) =>
+    db.any(
+      `SELECT m.*, j.id AS job_id, j.address AS job_address
+       FROM messages m
+       JOIN jobs j ON j.incident_id = m.incident_id
+       WHERE j.crew_id=$1
+       ORDER BY m.ts DESC`,
+      [crewId]
+    ),
 
     setOptOut: async (recipient, channel) => {
     await db.none(
