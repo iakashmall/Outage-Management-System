@@ -72,3 +72,51 @@ export function computeMTTR(incidents, events) {
     .map((z) => ({ zone: z.zone, mttrMinutes: +(z.totalMinutes / z.count).toFixed(1), incidentCount: z.count }))
     .sort((a, b) => b.mttrMinutes - a.mttrMinutes);
 }
+
+// ============================================================
+// P7.1 -- SLA compliance (supervisor dashboard).
+// Every incident has an sla_due_at deadline. This checks, for each incident
+// that has actually been resolved, whether that happened before or after
+// its deadline. Incidents still open past their deadline count separately
+// as "at risk" rather than compliant or breached, since they haven't been
+// decided yet.
+// ============================================================
+export function computeSLACompliance(incidents, events) {
+  const resolvedAt = {};
+  for (const e of events) {
+    if (e.kind === 'status' && (e.note || '').includes('Resolved')) {
+      const t = new Date(e.ts).getTime();
+      if (!resolvedAt[e.incident_id] || t < resolvedAt[e.incident_id]) {
+        resolvedAt[e.incident_id] = t;
+      }
+    }
+  }
+  const now = Date.now();
+  let compliant = 0, breached = 0, atRisk = 0;
+  const byZone = {};
+  for (const i of incidents) {
+    if (!i.sla_due_at) continue;
+    const dueTime = new Date(i.sla_due_at).getTime();
+    const resolvedTime = resolvedAt[i.id];
+    let outcome;
+    if (resolvedTime) {
+      outcome = resolvedTime <= dueTime ? 'compliant' : 'breached';
+    } else if (now > dueTime) {
+      outcome = 'atRisk';
+    } else {
+      continue;
+    }
+    if (outcome === 'compliant') compliant++;
+    else if (outcome === 'breached') breached++;
+    else atRisk++;
+    const zone = i.zone || 'Unknown';
+    byZone[zone] = byZone[zone] || { zone, compliant: 0, breached: 0, atRisk: 0 };
+    byZone[zone][outcome]++;
+  }
+  const decided = compliant + breached;
+  const complianceRate = decided ? +((compliant / decided) * 100).toFixed(1) : null;
+  return {
+    compliant, breached, atRisk, complianceRate,
+    byZone: Object.values(byZone).sort((a, b) => b.breached - a.breached),
+  };
+}
