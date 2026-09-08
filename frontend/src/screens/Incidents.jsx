@@ -14,6 +14,10 @@ export default function Incidents({ openId, focusIncidentId, clearFocus } = {}) 
   const [showNew, setShowNew] = useState(false);
 
   const load = () => api.incidents().then(setInc);
+  const refreshSel = () => {
+    load();
+    if (sel) api.incident(sel.id).then(setSel);
+  };
   useEffect(() => { load(); }, []);
       useEffect(() => {
     const idToOpen = openId || focusIncidentId;
@@ -25,7 +29,7 @@ export default function Incidents({ openId, focusIncidentId, clearFocus } = {}) 
   useLiveRefresh(['oms.incident.created', 'oms.incident.updated', 'crew.job.updated'], load);
   useEffect(() => { if (sel) api.incident(sel.id).then(setSel); }, [inc.length]); // eslint-disable-line
 
-  // Deep-link from another screen (currently: Alarms → "view incident").
+  // Deep-link from another screen (currently: Alarms ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ "view incident").
   // Opens the requested incident once, then clears the request so navigating
   // away and back to Incidents normally doesn't keep re-opening it.
   useEffect(() => {
@@ -72,7 +76,7 @@ export default function Incidents({ openId, focusIncidentId, clearFocus } = {}) 
         </table>
       </div>
 
-      {sel && <IncidentDrawer inc={sel} onClose={() => setSel(null)} onChange={load} />}
+      {sel && <IncidentDrawer inc={sel} onClose={() => setSel(null)} onChange={refreshSel} />}
       {showNew && <NewIncident onClose={() => setShowNew(false)} onCreated={(i) => { setShowNew(false); load(); open(i); }} />}
     </>
   );
@@ -105,7 +109,7 @@ function IncidentDrawer({ inc, onClose, onChange }) {
   };
 
   return (
-    <Drawer direction="right" open={true} onOpenChange={(open) => { if (!open) onClose(); }}>
+    <Drawer direction="right" open={true} onOpenChange={(open) => { if (!open) onClose(); }} dismissible={false}>
       <DrawerContent style={{ width: 'min(440px, 94vw)', height: '100vh', borderRadius: 0 }}>
         <div className="drawer-h">
           <div>
@@ -202,7 +206,10 @@ function NewIncident({ onClose, onCreated }) {
           <button className="iconbtn" onClick={onClose}><Icon name="x" size={16} /></button>
         </div>
         <div className="drawer-b">
-          {field('Zone *', <input style={inp} value={f.zone} onChange={set('zone')} placeholder="e.g. Dehradun Central" />)}
+          {field('Zone *', <select style={inp} value={f.zone} onChange={set('zone')}>
+  <option value="">Select a zone...</option>
+  {['Mayapur', 'Bhoopatwala', 'Industrial Area', 'Jwalapur-I', 'Kankhal-2', 'Dehradun Central', 'Clement Town, Dehradun', 'Ballupur, Dehradun', 'Jwalapur, Haridwar'].map((z) => <option key={z} value={z}>{z}</option>)}
+</select>)}
           {field('Severity', <select style={inp} value={f.severity} onChange={set('severity')}>{['critical', 'high', 'medium', 'low'].map((s) => <option key={s}>{s}</option>)}</select>)}
           {field('Type', <select style={inp} value={f.type} onChange={set('type')}>{['Power Outage', 'Partial Power', 'Scheduled'].map((s) => <option key={s}>{s}</option>)}</select>)}
           {field('Feeder', <input style={inp} value={f.feeder} onChange={set('feeder')} placeholder="FDR-SE01-F02" />)}
