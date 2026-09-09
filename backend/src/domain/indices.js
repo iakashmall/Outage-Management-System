@@ -120,3 +120,48 @@ export function computeSLACompliance(incidents, events) {
     byZone: Object.values(byZone).sort((a, b) => b.breached - a.breached),
   };
 }
+
+// ============================================================
+// P7.1 -- Crew productivity (supervisor dashboard).
+// Jobs completed per crew, plus average minutes from Acknowledged to Work
+// Complete per crew -- both computed from the real timestamped job_updates
+// history, not just current job status.
+// ============================================================
+export function computeCrewProductivity(jobs, jobUpdates, crews) {
+  // Per job: earliest Acknowledged timestamp and earliest Work Complete timestamp.
+  const ackAt = {};
+  const completeAt = {};
+  for (const u of jobUpdates) {
+    const t = new Date(u.ts).getTime();
+    if (u.status === 'Acknowledged') {
+      if (!ackAt[u.job_id] || t < ackAt[u.job_id]) ackAt[u.job_id] = t;
+    }
+    if (u.status === 'Work Complete') {
+      if (!completeAt[u.job_id] || t < completeAt[u.job_id]) completeAt[u.job_id] = t;
+    }
+  }
+  const byCrew = {};
+  for (const j of jobs) {
+    const crewId = j.crew_id;
+    if (!crewId) continue;
+    byCrew[crewId] = byCrew[crewId] || { crewId, jobsTotal: 0, jobsCompleted: 0, totalMinutes: 0, minutesCount: 0 };
+    byCrew[crewId].jobsTotal += 1;
+    if (j.status === 'Work Complete') byCrew[crewId].jobsCompleted += 1;
+    const ack = ackAt[j.id];
+    const done = completeAt[j.id];
+    if (ack && done && done >= ack) {
+      byCrew[crewId].totalMinutes += (done - ack) / 60000;
+      byCrew[crewId].minutesCount += 1;
+    }
+  }
+  const nameById = Object.fromEntries((crews || []).map((c) => [c.id, c.name]));
+  return Object.values(byCrew)
+    .map((c) => ({
+      crewId: c.crewId,
+      crewName: nameById[c.crewId] || c.crewId,
+      jobsTotal: c.jobsTotal,
+      jobsCompleted: c.jobsCompleted,
+      avgMinutesPerJob: c.minutesCount ? +(c.totalMinutes / c.minutesCount).toFixed(1) : null,
+    }))
+    .sort((a, b) => b.jobsCompleted - a.jobsCompleted);
+}
