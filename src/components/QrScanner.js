@@ -1,17 +1,35 @@
 // src/components/QrScanner.js
-// expo-camera has a built-in barcode/QR scanner — no extra library needed.
 import { CameraView, useCameraPermissions } from "expo-camera";
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { View, Text, Pressable, TextInput, StyleSheet } from "react-native";
 
-export default function QrScanner({ onScan, onClose }) {
+export default function QrScanner({ onScan, onClose, visible = true }) {
   const [perm, requestPerm] = useCameraPermissions();
   const [done, setDone] = useState(false);
   const [error, setError] = useState("");
   const [manualValue, setManualValue] = useState("");
   const [detectedValue, setDetectedValue] = useState("");
+  const wasVisible = useRef(visible);
+  const scanLockRef = useRef(false);
 
-  if (!perm) return <Text>Loading camera…</Text>;
+  useEffect(() => {
+    if (visible && !wasVisible.current) {
+      resetScanner();
+    }
+    wasVisible.current = visible;
+  }, [visible]);
+
+  function resetScanner() {
+    scanLockRef.current = false;
+    setDone(false);
+    setError("");
+    setManualValue("");
+    setDetectedValue("");
+  }
+
+  if (!visible) return null;
+
+  if (!perm) return <Text>Loading camera�</Text>;
   if (!perm.granted) {
     return (
       <View style={s.center}>
@@ -29,21 +47,36 @@ export default function QrScanner({ onScan, onClose }) {
         style={s.camera}
         facing="back"
         active={!done}
+        autofocus="on"
         barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
         onMountError={(mountError) => setError(mountError?.message || "Could not open the camera")}
-        onCameraReady={() => setError("")}
+        onCameraReady={() => {
+          console.log("[QrScanner] camera ready");
+          setError("");
+        }}
         onBarcodeScanned={
           done
             ? undefined
             : ({ data }) => {
+                if (scanLockRef.current) return;
+                scanLockRef.current = true;
+                console.log("[QrScanner] barcode scanned:", data);
                 setDetectedValue(data);
                 setDone(true);
                 onScan(data);
               }
         }
       />
+
       {detectedValue ? <Text style={s.detected}>QR detected: {detectedValue}</Text> : null}
       {error ? <Text style={s.error}>{error}</Text> : null}
+
+      {done && (
+        <Pressable style={s.rescanBtn} onPress={resetScanner}>
+          <Text style={s.rescanText}>Scan another QR</Text>
+        </Pressable>
+      )}
+
       <View style={s.manual}>
         <Text style={s.manualLabel}>Camera not scanning?</Text>
         <TextInput
@@ -59,6 +92,9 @@ export default function QrScanner({ onScan, onClose }) {
           style={[s.btn, !manualValue.trim() && s.btnOff]}
           disabled={!manualValue.trim()}
           onPress={() => {
+            if (scanLockRef.current) return;
+            scanLockRef.current = true;
+            setDetectedValue(manualValue.trim());
             setDone(true);
             onScan(manualValue.trim());
           }}
@@ -68,6 +104,8 @@ export default function QrScanner({ onScan, onClose }) {
         <Pressable
           style={s.testBtn}
           onPress={() => {
+            if (scanLockRef.current) return;
+            scanLockRef.current = true;
             const testValue = JSON.stringify({
               assetId: "TEST-TRANSFORMER-001",
               serialNumber: "DEMO-QR-001",
@@ -82,8 +120,15 @@ export default function QrScanner({ onScan, onClose }) {
           <Text style={s.testBtnText}>Use test asset QR</Text>
         </Pressable>
       </View>
+
       {onClose && (
-        <Pressable style={s.closeBtn} onPress={onClose}>
+        <Pressable
+          style={s.closeBtn}
+          onPress={() => {
+            resetScanner();
+            onClose();
+          }}
+        >
           <Text style={s.closeText}>Cancel</Text>
         </Pressable>
       )}
@@ -101,6 +146,15 @@ const s = StyleSheet.create({
   btnOff: { opacity: 0.45 },
   error: { color: "#ffb5a8", padding: 10, fontSize: 12 },
   detected: { color: "#b9fff3", paddingHorizontal: 10, paddingTop: 8, fontSize: 11 },
+  rescanBtn: {
+    marginHorizontal: 10,
+    marginTop: 8,
+    backgroundColor: "#274a78",
+    paddingVertical: 9,
+    borderRadius: 8,
+    alignItems: "center",
+  },
+  rescanText: { color: "#fff", fontWeight: "700", fontSize: 12 },
   manual: { padding: 10, gap: 8 },
   manualLabel: { color: "#d8e7e2", fontSize: 12, fontWeight: "700" },
   input: { backgroundColor: "#fff", borderRadius: 8, paddingHorizontal: 10, paddingVertical: 9, color: "#1c2e43" },

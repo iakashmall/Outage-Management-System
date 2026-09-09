@@ -12,7 +12,9 @@
 import { Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { API_BASE, PHOTO_API_BASE } from "../config";
-
+console.log("DEBUG_API_BASE", API_BASE, "DEBUG_PHOTO_BASE", PHOTO_API_BASE);
+console.log("🔍 DEBUG — API_BASE is:", API_BASE);
+console.log("🔍 DEBUG — PHOTO_API_BASE is:", PHOTO_API_BASE);
 const IS_WEB = Platform.OS === "web";
 const WEB_API_URL = "/api";
 const JOBS_CACHE_KEY = "oms-jobs-cache";

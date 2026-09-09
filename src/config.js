@@ -12,18 +12,14 @@
 const isAndroidEmulator = false; // flip manually if you're on an Android emulator
 
 export const API_BASE = isAndroidEmulator
-  ? "http://10.0.2.2:4000/api"
-  : "http://192.168.0.108:4000/api";
-
-// Temporary local photo service. Point this to API_BASE when the OMS backend
-// photo endpoint is deployed and ready to receive compressed uploads.
-export const PHOTO_API_BASE = isAndroidEmulator
   ? "http://10.0.2.2:4001/api"
-  : "http://192.168.0.108:4001/api";
+  : "http://192.168.0.105:4001/api";
+
+export const PHOTO_API_BASE = API_BASE;
 
 export const KEYCLOAK_URL = isAndroidEmulator
   ? "http://10.0.2.2:8080"
-  : "http://192.168.0.108:8080";
+  : "http://192.168.0.105:8080";
 
 export const REALM = "oms-upcl";
 export const CLIENT_ID = "oms-mobile";

@@ -1,5 +1,6 @@
-import http from "node:http";
+﻿import http from "node:http";
 import fs from "node:fs";
+import crypto from "node:crypto";
 import { URL } from "node:url";
 import pg from "pg";
 import sharp from "sharp";
@@ -21,6 +22,7 @@ const pool = new Pool({
   ssl,
 });
 const maxUploadBytes = 20 * 1024 * 1024;
+
 const photoSchemaSql = `
   CREATE TABLE IF NOT EXISTS job_photos (
     id BIGSERIAL PRIMARY KEY,
@@ -39,6 +41,22 @@ const photoSchemaSql = `
   );
 
   CREATE INDEX IF NOT EXISTS job_photos_job_id_idx ON job_photos (job_id);
+`;
+
+const assetScanSchemaSql = `
+  CREATE TABLE IF NOT EXISTS asset_scans (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    crew_id TEXT,
+    asset_id TEXT,
+    raw_value TEXT,
+    asset_details JSONB NOT NULL DEFAULT '{}'::jsonb,
+    lat DOUBLE PRECISION,
+    lon DOUBLE PRECISION,
+    scanned_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+
+  CREATE INDEX IF NOT EXISTS asset_scans_job_id_idx ON asset_scans (job_id);
 `;
 
 function sendJson(response, status, payload) {
@@ -104,8 +122,35 @@ async function storePhoto(jobId, payload) {
   return { ...result.rows[0], originalBytes: original.buffer.length };
 }
 
+async function storeAssetScan(jobId, payload) {
+  const latitude = Number(payload.lat);
+  const longitude = Number(payload.lon);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    throw new Error("Latitude and longitude are required; asset scan was not stored");
+  }
+  const id = crypto.randomUUID();
+  const result = await pool.query(
+    `INSERT INTO asset_scans
+      (id, job_id, crew_id, asset_id, raw_value, asset_details, lat, lon)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING id, job_id, crew_id, asset_id, raw_value, asset_details, lat, lon, scanned_at`,
+    [
+      id,
+      jobId,
+      payload.crewId ?? null,
+      payload.assetId ?? null,
+      payload.rawValue ?? null,
+      payload.assetDetails && typeof payload.assetDetails === "object" ? payload.assetDetails : {},
+      latitude,
+      longitude,
+    ]
+  );
+  return result.rows[0];
+}
+
 async function ensureDatabaseSchema() {
   await pool.query(photoSchemaSql);
+  await pool.query(assetScanSchemaSql);
   await pool.query(`
     ALTER TABLE job_photos ADD COLUMN IF NOT EXISTS technician_id TEXT;
     ALTER TABLE job_photos ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
@@ -129,6 +174,13 @@ const server = http.createServer(async (request, response) => {
       return sendJson(response, 201, { photo });
     }
 
+    const assetScanMatch = url.pathname.match(/^\/api\/mobile\/jobs\/([^/]+)\/assets\/scans$/);
+    if (request.method === "POST" && assetScanMatch) {
+      const payload = await readJson(request);
+      const scan = await storeAssetScan(decodeURIComponent(assetScanMatch[1]), payload);
+      return sendJson(response, 201, scan);
+    }
+
     return sendJson(response, 404, { error: "Not found" });
   } catch (error) {
     const status = error.message === "Photo payload is too large" ? 413 : 400;
@@ -141,7 +193,7 @@ async function startServer() {
   try {
     await ensureDatabaseSchema();
     server.listen(port, () => {
-      console.log(`OMS photo API listening on http://localhost:${port}`);
+      console.log(`OMS API listening on http://localhost:${port}`);
     });
   } catch (error) {
     console.error("Failed to initialize PostgreSQL schema:", error);
