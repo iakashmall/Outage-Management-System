@@ -56,6 +56,50 @@ api.post('/incidents/:id/messages', async (req, res) => {
   res.status(201).json(msg);
 });
 
+// Combined photos for an incident, across every job ever tied to it
+// (crew reassignments mean more than one job can share an incident_id).
+api.get('/incidents/:id/photos', async (req, res) => {
+  const photos = await repo.photosForIncident(req.params.id);
+  res.json(photos);
+});
+
+// ---------- crew app job/crew messages ----------
+// These reuse the SAME messages thread the web app's incident drawer shows --
+// a job's messages ARE that job's incident's messages. No separate storage;
+// just resolving job/crew -> incident_id and delegating to the existing
+// repo.messages()/repo.addMessage() functions above.
+api.get('/mobile/jobs/:id/messages', async (req, res) => {
+  const job = await repo.job(req.params.id);
+  if (!job) return res.status(404).json({ error: 'not found' });
+  if (!job.incident_id) return res.json([]);
+  res.json(await repo.messages(job.incident_id));
+});
+
+api.post('/mobile/jobs/:id/messages', async (req, res) => {
+  const job = await repo.job(req.params.id);
+  if (!job) return res.status(404).json({ error: 'not found' });
+  if (!job.incident_id) return res.status(400).json({ error: 'job has no linked incident' });
+  const { body } = req.body || {};
+  if (!body || !String(body).trim()) {
+    return res.status(400).json({ error: 'body required' });
+  }
+  const sender = req.user?.username || 'crew';
+  const msg = await repo.addMessage(job.incident_id, sender, 'field_crew_coordinator', String(body).trim());
+  bus.publish(TOPICS.MESSAGE_POSTED, msg);
+  res.status(201).json(msg);
+});
+
+// A crew's "inbox" -- combined messages across every job currently assigned
+// to them, newest last. Simple default: there's no single ongoing crew
+// thread, so this unions each active job's incident thread instead.
+api.get('/mobile/crews/:id/messages', async (req, res) => {
+  const jobs = await repo.jobsForCrew(req.params.id);
+  const incidentIds = [...new Set(jobs.map((j) => j.incident_id).filter(Boolean))];
+  const threads = await Promise.all(incidentIds.map((id) => repo.messages(id)));
+  const all = threads.flat().sort((a, b) => new Date(a.ts) - new Date(b.ts));
+  res.json(all);
+});
+
 api.post('/incidents', async (req, res) => {
   const b = req.body || {};
   if (!b.zone || !b.severity) return res.status(400).json({ error: 'zone and severity are required (FR-OMS-002)' });
@@ -440,11 +484,11 @@ api.get('/mobile/jobs/:id/history', async (req, res) => res.json(await repo.jobU
 api.post('/mobile/jobs/:id/photos', async (req, res) => {
   const job = await repo.job(req.params.id);
   if (!job) return res.status(404).json({ error: 'not found' });
-  const { dataUrl, lat, lon, note } = req.body || {};
+  const { dataUrl, lat, lon, note, technicianId, metadata } = req.body || {};
   if (!dataUrl || typeof dataUrl !== 'string') {
     return res.status(400).json({ error: 'dataUrl required' });
   }
-  const photo = await repo.addJobPhoto(req.params.id, dataUrl, lat, lon, note);
+  const photo = await repo.addJobPhoto(req.params.id, dataUrl, lat, lon, note, technicianId, metadata);
   const { data_url, ...meta } = photo;
   res.status(201).json(meta);
 });
@@ -464,13 +508,15 @@ api.get('/mobile/photos/:photoId', async (req, res) => {
 api.patch('/mobile/jobs/:id/status', async (req, res) => {
   const job = await repo.job(req.params.id);
   if (!job) return res.status(404).json({ error: 'not found' });
-  const { status, lat, lon, note } = req.body || {};
+  const { lat, lon, note } = req.body || {};
+  const status = req.body?.status === 'Work Finished' ? 'Work Complete' : req.body?.status;
   await repo.updateJob(job.id, { status, updated_at: new Date().toISOString() });
   await repo.addJobUpdate(job.id, status, lat ?? null, lon ?? null, note ?? null);
   // reflect crew status + incident progress back to control room
   const map = { 'En Route': 'in_transit', 'On Site': 'in_service', 'Work Started': 'in_service', 'Work Complete': 'available' };
   if (map[status]) await repo.updateCrew(job.crew_id, { status: map[status] });
   if (status === 'On Site' && job.incident_id) await repo.updateIncident(job.incident_id, { status: 'in_progress' });
+  if (job.incident_id) { await repo.addIncidentEvent(job.incident_id, 'Crew', 'field', 'Status: ' + status); }
   if (status === 'Work Complete' && job.incident_id) {
     await repo.updateIncident(job.incident_id, { status: 'pending' });
     await repo.addIncidentEvent(job.incident_id, 'Crew', 'field', 'Work complete - awaiting verification');

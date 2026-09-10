@@ -6,7 +6,7 @@ import { nanoid } from 'nanoid';
 // Named params use pg-promise's $/name/ syntax instead of the old bare @name.
 const parseSkills = (r) => r ? { ...r, skills: r.skills ? r.skills.split(',') : [] } : r;
 
-// Builds a "col=$/col/" SET clause from a patch object ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â same dynamic-update
+// Builds a "col=$/col/" SET clause from a patch object -- same dynamic-update
 // pattern as before, just async at the call site now.
 const setClause = (patch) => Object.keys(patch).map(k => `${k}=$/${k}/`).join(',');
 
@@ -96,7 +96,7 @@ export const repo = {
     await db.none(`UPDATE crews SET ${setClause(patch)} WHERE id=$/id/`, { ...patch, id });
     return repo.crew(id);
   },
-  // Available crews nearest an incident, using real PostGIS distance ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â replaces
+  // Available crews nearest an incident, using real PostGIS distance -- replaces
   // picking "any available crew" with a distance-ranked list.
   nearestAvailableCrews: (incidentId, limit = 6) =>
     db.any(`
@@ -136,6 +136,13 @@ export const repo = {
   jobs: () => db.any('SELECT * FROM jobs ORDER BY updated_at DESC'),
   jobsForCrew: (crewId) => db.any('SELECT * FROM jobs WHERE crew_id=$1 ORDER BY updated_at DESC', [crewId]),
   jobUpdates: (jobId) => db.any('SELECT * FROM job_updates WHERE job_id=$1 ORDER BY ts ASC', [jobId]),
+  jobsForIncident: (incidentId) => db.any('SELECT * FROM jobs WHERE incident_id=$1 ORDER BY updated_at DESC', [incidentId]),
+  photosForIncident: (incidentId) => db.any(
+    `SELECT p.id, p.job_id, p.lat, p.lon, p.note, p.ts, p.technician_id, p.metadata
+     FROM job_photos p JOIN jobs j ON p.job_id = j.id
+     WHERE j.incident_id = $1 ORDER BY p.ts DESC`,
+    [incidentId]
+  ),
   job: (id) => db.oneOrNone('SELECT * FROM jobs WHERE id=$1', [id]),
   createJob: async (j) => {
     await db.none(`INSERT INTO jobs (id,incident_id,crew_id,priority,status,address,updated_at)
@@ -160,7 +167,7 @@ export const repo = {
   },
   auditLog: () => db.any('SELECT * FROM audit_log ORDER BY ts DESC LIMIT 50'),
 
-    addJobPhoto: async (jobId, dataUrl, lat, lon, note) => {
+  addJobPhoto: async (jobId, dataUrl, lat, lon, note, technicianId, metadata) => {
     const ph = {
       id: 'PH' + nanoid(8),
       job_id: jobId,
@@ -169,19 +176,21 @@ export const repo = {
       lon: lon ?? null,
       note: note ?? null,
       ts: new Date().toISOString(),
+      technician_id: technicianId ?? null,
+      metadata: JSON.stringify(metadata ?? {}),
     };
     await db.none(
-      `INSERT INTO job_photos (id,job_id,data_url,lat,lon,note,ts)
-       VALUES ($/id/,$/job_id/,$/data_url/,$/lat/,$/lon/,$/note/,$/ts/)`,
+      `INSERT INTO job_photos (id,job_id,data_url,lat,lon,note,ts,technician_id,metadata)
+       VALUES ($/id/,$/job_id/,$/data_url/,$/lat/,$/lon/,$/note/,$/ts/,$/technician_id/,$/metadata/::jsonb)`,
       ph
     );
     return ph;
   },
   jobPhotos: (jobId) =>
-    db.any('SELECT id, job_id, lat, lon, note, ts FROM job_photos WHERE job_id=$1 ORDER BY ts DESC', [jobId]),
+    db.any('SELECT id, job_id, lat, lon, note, ts, technician_id, metadata FROM job_photos WHERE job_id=$1 ORDER BY ts DESC', [jobId]),
   jobPhotoById: (id) => db.oneOrNone('SELECT * FROM job_photos WHERE id=$1', [id]),
 
-    addMessage: async (incidentId, sender, senderRole, body) => {
+  addMessage: async (incidentId, sender, senderRole, body) => {
     const m = {
       id: 'MSG' + nanoid(8),
       incident_id: incidentId,
@@ -200,7 +209,7 @@ export const repo = {
   messages: (incidentId) =>
     db.any('SELECT * FROM messages WHERE incident_id=$1 ORDER BY ts ASC', [incidentId]),
 
-    setOptOut: async (recipient, channel) => {
+  setOptOut: async (recipient, channel) => {
     await db.none(
       `INSERT INTO opt_outs (id, recipient, channel, ts) VALUES ($/id/, $/recipient/, $/channel/, $/ts/)`,
       { id: 'OPT' + nanoid(8), recipient, channel, ts: new Date().toISOString() }
