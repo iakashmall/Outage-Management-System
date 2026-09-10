@@ -24,7 +24,8 @@
     "dev:backend": "npm --workspace backend start",
     "dev:web": "npm --workspace frontend run dev",
     "dev:mobile": "npm --workspace mobile run dev",
-    "test": "npm --workspace backend run test"
+    "test": "npm --workspace backend run test",
+    "start": "concurrently -n backend,web,mobile -c cyan,green,magenta \"npm:dev:backend\" \"npm:dev:web\" \"npm:dev:mobile\""
   },
   "dependencies": {
     "@expo/metro-runtime": "~5.0.5",

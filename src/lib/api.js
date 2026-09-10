@@ -1,7 +1,7 @@
 // src/lib/api.js
 //
 // The SINGLE file that talks to the backend. The UI (App.jsx / NativeApp.jsx
-// and their screens) should never call fetch() directly — only these
+// and their screens) should never call fetch() directly â€” only these
 // functions. That keeps the backend swappable without touching any screen.
 //
 // This file works for BOTH builds:
@@ -13,8 +13,8 @@ import { Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { API_BASE, PHOTO_API_BASE } from "../config";
 console.log("DEBUG_API_BASE", API_BASE, "DEBUG_PHOTO_BASE", PHOTO_API_BASE);
-console.log("🔍 DEBUG — API_BASE is:", API_BASE);
-console.log("🔍 DEBUG — PHOTO_API_BASE is:", PHOTO_API_BASE);
+console.log("ðŸ” DEBUG â€” API_BASE is:", API_BASE);
+console.log("ðŸ” DEBUG â€” PHOTO_API_BASE is:", PHOTO_API_BASE);
 const IS_WEB = Platform.OS === "web";
 const WEB_API_URL = "/api";
 const JOBS_CACHE_KEY = "oms-jobs-cache";
@@ -31,7 +31,7 @@ async function cacheJobs(jobs) {
     await AsyncStorage.setItem(JOBS_CACHE_KEY, JSON.stringify(jobs));
     await AsyncStorage.setItem(JOBS_CACHE_SYNCED_AT_KEY, String(Date.now()));
   } catch {
-    // best-effort — a caching failure shouldn't block the fetch result
+    // best-effort â€” a caching failure shouldn't block the fetch result
   }
 }
 
@@ -66,7 +66,7 @@ const DEMO_CREW = {
   name: "Crew Gamma-2",
   lead: "Priya Singh",
   role: "Field Technician",
-  shift: "06:00–18:00",
+  shift: "06:00â€“18:00",
   skills: ["HV", "Transformer"],
 };
 
@@ -107,9 +107,10 @@ async function nativeReq(path, method = "GET", body) {
 }
 
 async function photoReq(path, body) {
+  const { authHeader } = await nativeAuth();
   const response = await fetch(PHOTO_API_BASE + path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeader() },
     body: JSON.stringify(body),
   });
   if (!response.ok) throw new Error(await response.text());
@@ -123,13 +124,13 @@ function normalizeOmsJob(job) {
     id: job.id ?? job.jobId,
     title: job.title ?? job.incident?.type ?? "Priority outage",
     address: job.address ?? job.incident?.zone ?? job.location ?? "Location unavailable",
-    feeder: job.feeder ?? job.incident?.feeder ?? job.feederId ?? "—",
+    feeder: job.feeder ?? job.incident?.feeder ?? job.feederId ?? "â€”",
     severity: job.severity ?? job.incident?.severity ?? "Medium",
     priority: job.priority ?? "Urgent",
     customers: job.customers ?? job.incident?.customers ?? job.affectedCustomers ?? 0,
     status: job.status ?? "Pending Acceptance",
-    distance: job.distance ?? (job.distanceKm ? `${job.distanceKm} km` : "—"),
-    eta: job.eta ?? "—",
+    distance: job.distance ?? (job.distanceKm ? `${job.distanceKm} km` : "â€”"),
+    eta: job.eta ?? "â€”",
     assignedCrewId: job.assignedCrewId ?? job.crewId ?? null,
     assignedDistance: job.assignedDistance ?? job.distance ?? "Nearest available",
     incidentId: job.incident_id ?? job.incidentId ?? null,
@@ -138,7 +139,7 @@ function normalizeOmsJob(job) {
 }
 
 /* =========================================================
-   PUBLIC API — same function names/shapes on web and native
+   PUBLIC API â€” same function names/shapes on web and native
 ========================================================= */
 
 // GET current crew record.
@@ -174,7 +175,7 @@ export async function getMyJobs() {
     await cacheJobs(mapped);
     return mapped;
   } catch {
-    // No connectivity / backend unreachable — prefer the last real
+    // No connectivity / backend unreachable â€” prefer the last real
     // synced job list (offline-ready data) over the static demo set,
     // so the crew still sees their actual last-known assignments.
     const cached = await readCachedJobs();
@@ -206,7 +207,7 @@ export async function updateJobStatus(id, status, location = {}, job) {
   });
 }
 
-// POST a photo for a job (native only — the web app uses local object URLs).
+// POST a photo for a job (native only â€” the web app uses local object URLs).
 // Native: POST /api/mobile/jobs/:id/photos  { dataUrl, lat, lon, note }
 export async function uploadJobPhoto(id, dataUrl, location = {}, note, metadata = {}) {
   if (IS_WEB) {
