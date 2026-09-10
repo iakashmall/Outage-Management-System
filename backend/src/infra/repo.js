@@ -159,6 +159,17 @@ export const repo = {
       VALUES ($/id/,$/job_id/,$/status/,$/lat/,$/lon/,$/note/,$/ts/)`, u);
     return u;
   },
+  addAssetScan: async (scan) => {
+    await db.none(
+      `INSERT INTO asset_scans
+       (id,job_id,crew_id,asset_id,raw_value,asset_details,lat,lon,scanned_at)
+       VALUES ($/id/,$/job_id/,$/crew_id/,$/asset_id/,$/raw_value/,$/asset_details/,$/lat/,$/lon/,$/scanned_at/)`,
+      scan
+    );
+    return db.one('SELECT * FROM asset_scans WHERE id=$1', [scan.id]);
+  },
+  assetScansForJob: (jobId) =>
+    db.any('SELECT * FROM asset_scans WHERE job_id=$1 ORDER BY scanned_at DESC', [jobId]),
 
   // ---- admin / audit
   audit: async (actor, action, target) => {
@@ -208,6 +219,15 @@ export const repo = {
   },
   messages: (incidentId) =>
     db.any('SELECT * FROM messages WHERE incident_id=$1 ORDER BY ts ASC', [incidentId]),
+  messagesForCrew: (crewId) =>
+    db.any(
+      `SELECT m.*, j.id AS job_id, j.address AS job_address
+       FROM messages m
+       JOIN jobs j ON j.incident_id = m.incident_id
+       WHERE j.crew_id=$1
+       ORDER BY m.ts DESC`,
+      [crewId]
+    ),
 
   setOptOut: async (recipient, channel) => {
     await db.none(

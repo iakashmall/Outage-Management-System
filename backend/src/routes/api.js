@@ -9,6 +9,7 @@ import { canTransition, nextStates, LABELS } from '../domain/lifecycle.js';
 import { computeIndices, computeMTTR, computeSLACompliance, computeCrewProductivity, computeOutageFrequency } from '../domain/indices.js';
 import { resolve as resolveAsset, substations as netSubstations } from '../infra/geo.js';
 import { cacheGet, cacheSet, cacheDel } from '../infra/redis.js';
+import sharp from 'sharp';
 
 export const api = Router();
 const actor = (req) => req.header('x-user') || 'operator';
@@ -479,8 +480,57 @@ api.get('/mobile/crews/:id', async (req, res) => {
   res.json(crew);
 });
 
+api.get('/mobile/crews/:id/messages', async (req, res) => {
+  const crew = await repo.crew(req.params.id);
+  if (!crew) return res.status(404).json({ error: 'not found' });
+  res.json(await repo.messagesForCrew(req.params.id));
+});
+
+api.get('/mobile/jobs/:id/messages', async (req, res) => {
+  const job = await repo.job(req.params.id);
+  if (!job) return res.status(404).json({ error: 'not found' });
+  res.json(job.incident_id ? await repo.messages(job.incident_id) : []);
+});
+
 api.get('/mobile/jobs/:id/history', async (req, res) => res.json(await repo.jobUpdates(req.params.id)));
-// Upload a photo for a job (base64 data URL in body.dataUrl)
+
+api.post('/mobile/jobs/:id/assets/scans', async (req, res) => {
+  const job = await repo.job(req.params.id);
+  if (!job) return res.status(404).json({ error: 'job not found' });
+  const { rawValue, assetId, assetDetails, lat, lon, crewId } = req.body || {};
+  if (!rawValue || typeof rawValue !== 'string') {
+    return res.status(400).json({ error: 'rawValue is required' });
+  }
+  if (!Number.isFinite(Number(lat)) || !Number.isFinite(Number(lon))) {
+    return res.status(400).json({ error: 'latitude and longitude are required' });
+  }
+  const scan = await repo.addAssetScan({
+    id: `AS${Date.now()}${Math.random().toString(36).slice(2, 8)}`,
+    job_id: job.id,
+    crew_id: crewId || job.crew_id || null,
+    asset_id: assetId || rawValue,
+    raw_value: rawValue,
+    asset_details: assetDetails && typeof assetDetails === 'object' ? assetDetails : {},
+    lat: Number(lat),
+    lon: Number(lon),
+    scanned_at: new Date().toISOString(),
+  });
+  res.status(201).json(scan);
+});
+
+api.get('/mobile/jobs/:id/assets/scans', async (req, res) => {
+  const job = await repo.job(req.params.id);
+  if (!job) return res.status(404).json({ error: 'job not found' });
+  res.json(await repo.assetScansForJob(job.id));
+});
+
+function decodePhotoDataUrl(dataUrl) {
+  const match = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl || '');
+  if (!match) throw new Error('Expected a JPEG, PNG, or WebP data URL');
+  return { contentType: match[1], buffer: Buffer.from(match[2], 'base64') };
+}
+
+// Compress every incoming photo before PostgreSQL storage.
 api.post('/mobile/jobs/:id/photos', async (req, res) => {
   const job = await repo.job(req.params.id);
   if (!job) return res.status(404).json({ error: 'not found' });
