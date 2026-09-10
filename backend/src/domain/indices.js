@@ -165,3 +165,21 @@ export function computeCrewProductivity(jobs, jobUpdates, crews) {
     }))
     .sort((a, b) => b.jobsCompleted - a.jobsCompleted);
 }
+
+// ============================================================
+// P7.1 -- Outage frequency by zone (supervisor dashboard).
+// Simple count of incidents per zone, split by severity so a supervisor
+// can see not just "which zone has the most outages" but "how many of
+// those are actually critical."
+// ============================================================
+export function computeOutageFrequency(incidents) {
+  const byZone = {};
+  for (const i of incidents) {
+    const zone = i.zone || 'Unknown';
+    byZone[zone] = byZone[zone] || { zone, total: 0, critical: 0, high: 0, medium: 0, low: 0 };
+    byZone[zone].total += 1;
+    const sev = (i.severity || '').toLowerCase();
+    if (byZone[zone][sev] !== undefined) byZone[zone][sev] += 1;
+  }
+  return Object.values(byZone).sort((a, b) => b.total - a.total);
+}
