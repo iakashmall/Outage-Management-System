@@ -13,7 +13,6 @@ import sharp from 'sharp';
 
 export const api = Router();
 const actor = (req) => req.header('x-user') || 'operator';
-
 // ---------- network topology (real Haridwar GIS, loaded once - unchanged, no DB) ----------
 const _dir = dirname(fileURLToPath(import.meta.url));
 let NETWORK = null;

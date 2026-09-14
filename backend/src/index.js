@@ -20,8 +20,8 @@ import { startNotifier } from './realtime/notifier.js';
 const PORT = process.env.PORT || 4000;
 
  await migrate();
- await seed(); // idempotent — only seeds an empty DB
- await connectRedis(); // non-fatal if unreachable — see infra/redis.js
+ await seed(); // idempotent â€” only seeds an empty DB
+ await connectRedis(); // non-fatal if unreachable â€” see infra/redis.js
  await initBus();       // memory driver by default; EVENT_BUS_DRIVER=kafka for the real broker
  startScadaConsumer();  // Phase 2: auto-detect outages from SCADA fault events
  startRestorationPublisher(); // Phase 2: publish restoration commands back to the DMS
@@ -32,6 +32,10 @@ app.use(express.json({ limit: '12mb' }));
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 app.use('/portal', express.static(path.join(__dirname, '..', 'public')));
 app.get('/api/health', (req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
+app.get('/api/health/ready', async (req, res) => {
+  try { await repo.incidents(); res.json({ status: 'ready' }); }
+  catch (e) { res.status(503).json({ status: 'not ready', error: e.message }); }
+});
 // Public, no-login outage status lookup for customers.
 app.get('/api/public/outage-status', async (req, res) => {
   try {
@@ -67,9 +71,9 @@ io.on('connection', (socket) => {
 
 http.listen(PORT, () => {
   console.log(`\n  OMS backend running`);
-  console.log(`  REST   → http://localhost:${PORT}/api`);
-  console.log(`  WS     → ws://localhost:${PORT}`);
-  console.log(`  Health → http://localhost:${PORT}/api/health\n`);
+  console.log(`  REST   â†’ http://localhost:${PORT}/api`);
+  console.log(`  WS     â†’ ws://localhost:${PORT}`);
+  console.log(`  Health â†’ http://localhost:${PORT}/api/health\n`);
   startSimulator();
   startNotifier();
 });
