@@ -1,0 +1,43 @@
+# Kong routing for the OMS backend.
+#
+# This does NOT replace oms-backend's own Service -- it sits IN FRONT of it.
+# Traffic now flows: client -> Kong (rate limiting, eventually JWT check) ->
+# oms-backend Service (unchanged) -> backend pods.
+#
+# Apply with: kubectl apply -f kong-routes.yaml
+
+# --- Rate limiting plugin ---
+# 60 requests/minute per consumer IP is a reasonable starting point for a
+# control-room app with a handful of real operators -- tight enough to stop
+# a runaway script or genuine abuse, loose enough that no real dispatcher
+# clicking around normally would ever notice it exists.
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: oms-rate-limit
+plugin: rate-limiting
+config:
+  minute: 60
+  policy: local
+
+---
+# --- Ingress: routes traffic through Kong to the existing backend Service ---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: oms-backend-ingress
+  annotations:
+    konghq.com/plugins: oms-rate-limit
+    konghq.com/strip-path: "false"
+spec:
+  ingressClassName: kong
+  rules:
+    - http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: oms-backend
+                port:
+                  number: 4000
