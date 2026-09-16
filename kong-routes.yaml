@@ -1,16 +1,14 @@
-# Kong routing for the OMS backend.
-#
-# This does NOT replace oms-backend's own Service -- it sits IN FRONT of it.
-# Traffic now flows: client -> Kong (rate limiting, eventually JWT check) ->
-# oms-backend Service (unchanged) -> backend pods.
+# Kong routing for the OMS backend -- now with TLS.
 #
 # Apply with: kubectl apply -f kong-routes.yaml
+#
+# NOTE: oms-tls-cert is a SELF-SIGNED test certificate (created for local
+# verification that TLS termination works at all). Browsers and strict
+# HTTP clients will show a trust warning for it -- that's expected. Real
+# production deployment needs a certificate from a real authority (Let's
+# Encrypt, or UPCL's own internal CA if the deployment stays fully
+# internal/on-premises).
 
-# --- Rate limiting plugin ---
-# 60 requests/minute per consumer IP is a reasonable starting point for a
-# control-room app with a handful of real operators -- tight enough to stop
-# a runaway script or genuine abuse, loose enough that no real dispatcher
-# clicking around normally would ever notice it exists.
 apiVersion: configuration.konghq.com/v1
 kind: KongPlugin
 metadata:
@@ -21,18 +19,22 @@ config:
   policy: local
 
 ---
-# --- Ingress: routes traffic through Kong to the existing backend Service ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: oms-backend-ingress
   annotations:
-    konghq.com/plugins: oms-rate-limit
+    konghq.com/plugins: oms-rate-limit,oms-jwt-check
     konghq.com/strip-path: "false"
 spec:
   ingressClassName: kong
+  tls:
+    - hosts:
+        - oms-upcl.local
+      secretName: oms-tls-cert
   rules:
-    - http:
+    - host: oms-upcl.local
+      http:
         paths:
           - path: /api
             pathType: Prefix
