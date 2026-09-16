@@ -5,13 +5,13 @@ import { resolve as resolveAsset } from '../infra/geo.js';
 import { setTag } from '../infra/redis.js';
 
 // ============================================================
-// Phase 2 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â SCADA & DMS integration: fault-event ingest + auto-detection
+// Phase 2 ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â SCADA & DMS integration: fault-event ingest + auto-detection
 //
 // This is the piece that turns the OMS from "operators manually raise
 // incidents" into "the grid tells us it faulted and an incident appears on
 // its own." It consumes SCADA fault events off the event bus (Kafka topic
-// scada.alarm.raised ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â INT-001), and for each genuine fault:
-//   1. resolves WHICH part of the network faulted (feeder/substation) ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â via
+// scada.alarm.raised ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â INT-001), and for each genuine fault:
+//   1. resolves WHICH part of the network faulted (feeder/substation) ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â via
 //      the existing PostGIS-backed geo resolver;
 //   2. de-duplicates against outages already open on the same asset within a
 //      short window, so one feeder trip doesn't spawn 20 incidents
@@ -30,7 +30,7 @@ import { setTag } from '../infra/redis.js';
 // treated as the same outage. 60s per FR-OMS-003.
 const DEDUP_WINDOW_MS = 60_000;
 
-// SCADA "condition" ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ base severity. TRIP/CRITICAL is a confirmed outage;
+// SCADA "condition" ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ base severity. TRIP/CRITICAL is a confirmed outage;
 // MAJOR is likely; MINOR is usually a warning that isn't an outage on its own.
 const CONDITION_SEVERITY = {
   CRITICAL: 'critical',
@@ -41,10 +41,10 @@ const CONDITION_SEVERITY = {
 
 // Rough customers-per-kVA heuristic used only when we can't get a real count,
 // so severity has *something* to weigh. Documented as an assumption, not a
-// measurement ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Phase 3's load model will replace this.
+// measurement ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â Phase 3's load model will replace this.
 const CUSTOMERS_PER_KVA = 2;
 
-// In-memory index of "asset ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ most recent open incident id + time", so dedup
+// In-memory index of "asset ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ most recent open incident id + time", so dedup
 // is O(1) and doesn't hammer the DB on every tag. Rebuilt lazily; the DB is
 // still the source of truth (we double-check there before creating).
 const recentByAsset = new Map(); // key: feeder||substation, val: { incidentId, ts }
@@ -55,10 +55,10 @@ function assetKey(loc) {
 
 // Is this SCADA condition actually an outage we should open an incident for?
 // MINOR alarms (e.g. a load approaching a limit) are recorded but don't by
-// themselves create an outage ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â that would flood the control room.
+// themselves create an outage ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â that would flood the control room.
 function isOutageCondition(condition) {
   const sev = CONDITION_SEVERITY[(condition || '').toUpperCase()];
-  return sev === 'critical' || sev === 'major';
+  return sev === 'critical' || sev === 'high';
 }
 
 // Pull lat/lon out of a SCADA event if it carries them; otherwise fall back to
@@ -106,7 +106,7 @@ function classifySeverity(condition, customers) {
 // The core handler: one SCADA fault event in, at most one incident out.
 export async function handleScadaEvent(evt) {
   try {
-    // Always push the raw value into the RTDB tag cache first ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â even non-outage
+    // Always push the raw value into the RTDB tag cache first ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â even non-outage
     // conditions matter for the live HMI (Phase 2's live tag view). Non-fatal
     // if Redis is down.
     if (evt.tag) {
@@ -123,7 +123,7 @@ export async function handleScadaEvent(evt) {
     // 1) fast in-memory check
     const recent = recentByAsset.get(key);
     if (recent && now - recent.ts < DEDUP_WINDOW_MS) {
-      // Same asset, same window ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ attach as evidence to the existing incident
+      // Same asset, same window ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ attach as evidence to the existing incident
       // instead of opening a new one.
       await repo.addIncidentEvent(recent.incidentId, 'SCADA', 'field',
         `Correlated SCADA ${evt.condition} on ${evt.tag || key} (deduplicated)`);
@@ -131,7 +131,7 @@ export async function handleScadaEvent(evt) {
       recentByAsset.set(key, { incidentId: recent.incidentId, ts: now });
       return { deduplicated: true, incidentId: recent.incidentId };
     }
-    // 2) authoritative DB check ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â covers restarts / multiple app instances,
+    // 2) authoritative DB check ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â covers restarts / multiple app instances,
     //    where the in-memory index is cold. Reuses the same helper the
     //    trouble-call path uses.
     if (loc.substation) {
