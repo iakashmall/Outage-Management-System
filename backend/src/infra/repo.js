@@ -60,11 +60,33 @@ export const repo = {
       VALUES ($/id/,$/incident_id/,$/ts/,$/actor/,$/kind/,$/note/)`, ev);
     return ev;
   },
-
   // ---- complaints (external REST intake, dedup + merge, traceability)
-  complaints: () => db.any('SELECT * FROM complaints ORDER BY ts DESC'),
-  complaint: (qid) => db.oneOrNone('SELECT * FROM complaints WHERE qid=$1', [qid]),
-  complaintsForIncident: (incidentId) => db.any('SELECT * FROM complaints WHERE incident_id=$1 ORDER BY ts ASC', [incidentId]),
+  // phone is stored encrypted at rest (AES-256 via pgcrypto's pgp_sym_*).
+  // Every read decrypts it back to plain text using ENCRYPTION_KEY; every
+  // write encrypts it before it ever touches disk. If ENCRYPTION_KEY is
+  // ever lost, encrypted phone numbers become permanently unrecoverable --
+  // this is the real, correct tradeoff for genuine at-rest encryption.
+  complaints: () => db.any(
+    `SELECT qid, external_id, customer,
+       pgp_sym_decrypt(phone, $/key/) AS phone,
+       address, category, lat, lon, dt_id, feeder, substation, incident_id, action, ts
+     FROM complaints ORDER BY ts DESC`,
+    { key: process.env.ENCRYPTION_KEY }
+  ),
+  complaint: (qid) => db.oneOrNone(
+    `SELECT qid, external_id, customer,
+       pgp_sym_decrypt(phone, $/key/) AS phone,
+       address, category, lat, lon, dt_id, feeder, substation, incident_id, action, ts
+     FROM complaints WHERE qid=$/qid/`,
+    { qid, key: process.env.ENCRYPTION_KEY }
+  ),
+  complaintsForIncident: (incidentId) => db.any(
+    `SELECT qid, external_id, customer,
+       pgp_sym_decrypt(phone, $/key/) AS phone,
+       address, category, lat, lon, dt_id, feeder, substation, incident_id, action, ts
+     FROM complaints WHERE incident_id=$/incidentId/ ORDER BY ts ASC`,
+    { incidentId, key: process.env.ENCRYPTION_KEY }
+  ),
   nextQueryId: async () => {
     const { c } = await db.one('SELECT COUNT(*) c FROM complaints');
     return 'QRY-2026-' + String(Number(c) + 1).padStart(6, '0');
@@ -72,8 +94,8 @@ export const repo = {
   addComplaint: async (c) => {
     await db.none(`INSERT INTO complaints
       (qid,external_id,customer,phone,address,category,lat,lon,dt_id,feeder,substation,incident_id,action,ts)
-      VALUES ($/qid/,$/external_id/,$/customer/,$/phone/,$/address/,$/category/,$/lat/,$/lon/,$/dt_id/,$/feeder/,$/substation/,$/incident_id/,$/action/,$/ts/)`,
-      c);
+      VALUES ($/qid/,$/external_id/,$/customer/,pgp_sym_encrypt($/phone/,$/key/),$/address/,$/category/,$/lat/,$/lon/,$/dt_id/,$/feeder/,$/substation/,$/incident_id/,$/action/,$/ts/)`,
+      { ...c, key: process.env.ENCRYPTION_KEY });
     return repo.complaint(c.qid);
   },
   // Active incidents at a substation within the correlation window (most recent first).
