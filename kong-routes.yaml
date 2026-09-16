@@ -15,7 +15,8 @@ metadata:
   name: oms-rate-limit
 plugin: rate-limiting
 config:
-  minute: 60
+  minute: 300
+  limit_by: credential
   policy: local
 
 ---
