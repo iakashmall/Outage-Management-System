@@ -19,3 +19,4 @@ dist/
 .env
  crew-app-update
 backend/.env.docker-test
+tls.key
