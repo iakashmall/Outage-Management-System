@@ -17,14 +17,14 @@ await migrate();
 await seed({ force: true });
 await connectRedis();
 await initBus();
-startScadaConsumer(); // subscribes to scada.alarm.raised — needed for the DNP3 adapter's bus-integration test below
+startScadaConsumer(); // subscribes to scada.alarm.raised â€” needed for the DNP3 adapter's bus-integration test below
 
 const app = express();
 app.use(express.json());
 // The real app authenticates via Keycloak (see routes/auth.js's requireAuth/
 // requireRole, wired in index.js). This test harness builds its own bare
 // app and doesn't run a real Keycloak server, so it injects a trusted
-// system_admin identity directly — the same shape requireAuth would attach
+// system_admin identity directly â€” the same shape requireAuth would attach
 // to req.user after a real token verifies, letting the role-gated routes
 // (assign, status, audit) be exercised without standing up Keycloak.
 app.use((req, res, next) => { req.user = { username: 'test-harness', roles: ['system_admin', 'oms_operator'] }; next(); });
@@ -50,10 +50,10 @@ const server = app.listen(4100, async () => {
     `saidi=${ind.body.saidi} saifi=${ind.body.saifi} caidi=${ind.body.caidi}`);
 
   const bad = await j('PATCH', '/incidents/INC-2026-000003/status', { status: 'closed' });
-  check('state machine rejects open→closed', bad.status === 409, `(${bad.status})`);
+  check('state machine rejects openâ†’closed', bad.status === 409, `(${bad.status})`);
 
   const good = await j('PATCH', '/incidents/INC-2026-000003/status', { status: 'dispatched' });
-  check('state machine allows open→dispatched', good.body.status === 'dispatched');
+  check('state machine allows openâ†’dispatched', good.body.status === 'dispatched');
 
   const created = await j('POST', '/incidents', { zone: 'Test Zone', severity: 'high', cause: 'Test', feeder: 'FDR-X' });
   check('manual incident create (FR-OMS-002)', created.status === 201 && /INC-2026-/.test(created.body.id), created.body.id);
@@ -65,21 +65,21 @@ const server = app.listen(4100, async () => {
   const mob = await j('PATCH', `/mobile/jobs/${jobId}/status`, { status: 'On Site', lat: 30.1, lon: 78.2 });
   check('mobile status update accepted', mob.body.status === 'On Site');
   const incAfter = await j('GET', '/incidents/INC-2026-000006');
-  check('mobile On Site flips incident → in_progress', incAfter.body.status === 'in_progress', incAfter.body.status);
+  check('mobile On Site flips incident â†’ in_progress', incAfter.body.status === 'in_progress', incAfter.body.status);
 
   const ack = await j('POST', '/alarms/ack-all');
   check('ack-all clears unacked alarms', ack.body.every(a => a.ack === 1));
 
   const tcs = await j('POST', '/calls/CALL-002/to-incident');
-  check('trouble call → incident (FR-OMS-005)', tcs.status === 201);
+  check('trouble call â†’ incident (FR-OMS-005)', tcs.status === 201);
 
-  // Phase 1 tail — Redis read-through cache on /indicators
+  // Phase 1 tail â€” Redis read-through cache on /indicators
   const first = await j('GET', '/indicators');
   const second = await j('GET', '/indicators');
   check('indicators cache-hit returns consistent payload', JSON.stringify(first.body) === JSON.stringify(second.body));
-  check(`redis connected (${isRedisConnected() ? 'live' : 'unavailable — degraded mode, cache no-ops'})`, true);
+  check(`redis connected (${isRedisConnected() ? 'live' : 'unavailable â€” degraded mode, cache no-ops'})`, true);
 
-  // ---- Phase 2 — SCADA auto-detection, dedup, severity ----
+  // ---- Phase 2 â€” SCADA auto-detection, dedup, severity ----
   _resetDedupState();
   const beforeCount = (await j('GET', '/incidents')).body.length;
 
@@ -95,7 +95,25 @@ const server = app.listen(4100, async () => {
   // 3) A second fault on the same feeder within the window is deduplicated (FR-OMS-003)
   const r2 = await handleScadaEvent({ tag: 'DEHRA.FDR7.RELAY2.OC', condition: 'MAJOR', customers: 900 });
   const afterTwo = (await j('GET', '/incidents')).body.length;
-  check('SCADA duplicate on same asset deduplicated (FR-OMS-003)', r2 && r2.deduplicated === true && afterTwo === afterOne, `same→${r2 && r2.incidentId}`);
+  check('SCADA duplicate on same asset deduplicated (FR-OMS-003)', r2 && r2.deduplicated === true && afterTwo === afterOne, `sameâ†’${r2 && r2.incidentId}`);
+
+  // 3b) A SCADA confirmation on a customer-reported-only incident should
+  // upgrade its severity if SCADA classifies it higher, and log a real
+  // "confirmed" event -- not treat it as just another duplicate report.
+  _resetDedupState();
+  const custInc = await repo.createIncident({
+    id: await repo.nextIncidentId(), type: 'Power Outage', severity: 'medium', status: 'open',
+    zone: 'TESTSUB', feeder: null, substation: 'TESTSUB', customers: 1, cause: 'No Supply',
+    lat: null, lon: null, crew_id: null, opened_at: new Date().toISOString(),
+    ert: null, sla_due_at: new Date(Date.now() + 180 * 60000).toISOString(), source: 'Customer',
+  });
+  const r3b = await handleScadaEvent({ tag: 'TESTSUB.FDR9.CB1.TRIP', condition: 'CRITICAL', customers: 1500 });
+  const upgraded = await repo.incident(custInc.id);
+  const events3b = await repo.incidentEvents(custInc.id);
+  const hasConfirmedEvent = events3b.some((e) => e.kind === 'confirmed');
+  check('SCADA confirmation upgrades a customer-reported incident\'s severity',
+    r3b && r3b.deduplicated === true && upgraded.severity === 'critical' && hasConfirmedEvent,
+    `${upgraded.severity}, confirmed event: ${hasConfirmedEvent}`);
 
   // 4) A MINOR alarm does NOT create an outage
   _resetDedupState();
@@ -104,8 +122,8 @@ const server = app.listen(4100, async () => {
   const after4 = (await j('GET', '/incidents')).body.length;
   check('SCADA MINOR does not open an outage', r4 === null && after4 === before4);
 
-  // 5) The originating alarm row gets linked to the incident it triggered (P2.5 —
-  //    this is what lets the control-room Alarms table show "this alarm → that incident")
+  // 5) The originating alarm row gets linked to the incident it triggered (P2.5 â€”
+  //    this is what lets the control-room Alarms table show "this alarm â†’ that incident")
   _resetDedupState();
   const scadaAlarm = { id: 'ALM-linktest', tag: 'MAYA.FDR2.CB1.TRIP', condition: 'CRITICAL', limit_val: 'TRIP', priority: 1, message: 'test', ts: new Date().toISOString(), ack: 0 };
   await repo.createAlarm(scadaAlarm);
@@ -113,7 +131,7 @@ const server = app.listen(4100, async () => {
   const linkedAlarm = (await j('GET', '/alarms')).body.find(a => a.id === 'ALM-linktest');
   check('alarm row linked to the incident it auto-created (P2.5)', !!r5 && linkedAlarm && linkedAlarm.incident_id === r5.incidentId, linkedAlarm && linkedAlarm.incident_id);
 
-  // ---- Phase 2 — restoration command publisher (INT-002) ----
+  // ---- Phase 2 â€” restoration command publisher (INT-002) ----
   _resetPublishedState();
   const resolvable = await j('POST', '/incidents', { zone: 'Restore Test', severity: 'high', cause: 'Test', feeder: 'FDR-RESTORE' });
   const rid = resolvable.body.id;
@@ -127,9 +145,9 @@ const server = app.listen(4100, async () => {
   check('restoration command published to DMS on resolve (INT-002)', pub1.skipped === false && pub1.response?.accepted === true, JSON.stringify(pub1.response));
 
   const pub2 = await publishRestoration(resolvedInc);
-  check('restoration command is idempotent — no duplicate send', pub2.skipped === true);
+  check('restoration command is idempotent â€” no duplicate send', pub2.skipped === true);
 
-  // ---- Phase 2 — P2.2 DNP3-over-IP protocol adapter (INT-003) ----
+  // ---- Phase 2 â€” P2.2 DNP3-over-IP protocol adapter (INT-003) ----
   // Link layer correctness, independent of any network/hardware:
   const crcOk = dnp3Internal.crc16dnp(Buffer.from('123456789', 'ascii')) === 0xea82;
   check('DNP3 CRC-16/DNP matches the standard test vector', crcOk);
@@ -144,7 +162,7 @@ const server = app.listen(4100, async () => {
 
   // End-to-end: real TCP socket, real framing, simulated outstation reports a
   // trip, master decodes it, and it flows through the SAME auto-detection
-  // pipeline as every other alarm source (P2.1/P2.3) — proving the adapter's
+  // pipeline as every other alarm source (P2.1/P2.3) â€” proving the adapter's
   // integration seam, not just its byte-level correctness.
   _resetDedupState();
   const outstation = new Dnp3TestOutstation({ port: 20101 });
@@ -157,7 +175,7 @@ const server = app.listen(4100, async () => {
   await master.connect();
   outstation.triggerTrip(7);
   master.requestBinaryInputEvents();
-  await new Promise((r) => setTimeout(r, 400)); // let the async bus→scada.js pipeline finish
+  await new Promise((r) => setTimeout(r, 400)); // let the async busâ†’scada.js pipeline finish
   const afterDnp3 = (await j('GET', '/incidents')).body.length;
   const dnp3Incidents = (await j('GET', '/incidents')).body.filter(i => i.cause && i.cause.includes('DNP3TEST'));
   check('DNP3 trip over real TCP auto-creates an incident via the existing pipeline (P2.2)',
