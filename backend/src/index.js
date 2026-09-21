@@ -1,4 +1,5 @@
 import 'dotenv/config'; // loads .env into process.env
+console.log('DATABASE_URL loaded as:', process.env.DATABASE_URL);
 import express from 'express';
 import cors from 'cors';
 import path from 'node:path';

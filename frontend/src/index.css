@@ -79,6 +79,9 @@ button{font-family:inherit;cursor:pointer}
  /* background:linear-gradient(145deg,#16b7a2 0%,var(--live) 48%,#087b78 100%);*/
   display:grid;place-items:center;margin-bottom:14px}
 .rail .brand b{font-family:var(--disp);color:#fff;font-size:18px;font-weight:700}
+.rail .brand-btn{border:0;background:transparent;padding:0;cursor:pointer;transition:.15s}
+.rail .brand-btn:hover{background:rgba(255,255,255,.10)}
+.rail .brand-btn:focus-visible{outline:2px solid var(--live);outline-offset:2px}
 .navbtn{width:44px;height:44px;border:0;background:transparent;border-radius:10px;
   display:grid;place-items:center;color:#8fa6c4;transition:.15s;position:relative}
 .navbtn:hover{background:rgba(255,255,255,.08);color:#dce7f4}
