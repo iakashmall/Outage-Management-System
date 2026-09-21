@@ -66,23 +66,29 @@ export const repo = {
   // write encrypts it before it ever touches disk. If ENCRYPTION_KEY is
   // ever lost, encrypted phone numbers become permanently unrecoverable --
   // this is the real, correct tradeoff for genuine at-rest encryption.
+  // safe_decrypt_text (db/migrations/safe_decrypt_phone.sql) wraps
+  // pgp_sym_decrypt in a PL/pgSQL exception handler: a row whose phone
+  // can't be decrypted with the current key (e.g. legacy/seeded data
+  // encrypted under a different key) returns NULL instead of aborting
+  // the whole query -- and, since these queries were previously called
+  // with no try/catch, taking down the whole process.
   complaints: () => db.any(
     `SELECT qid, external_id, customer,
-       pgp_sym_decrypt(phone, $/key/) AS phone,
+       safe_decrypt_text(phone, $/key/) AS phone,
        address, category, lat, lon, dt_id, feeder, substation, incident_id, action, ts
      FROM complaints ORDER BY ts DESC`,
     { key: process.env.ENCRYPTION_KEY }
   ),
   complaint: (qid) => db.oneOrNone(
     `SELECT qid, external_id, customer,
-       pgp_sym_decrypt(phone, $/key/) AS phone,
+       safe_decrypt_text(phone, $/key/) AS phone,
        address, category, lat, lon, dt_id, feeder, substation, incident_id, action, ts
      FROM complaints WHERE qid=$/qid/`,
     { qid, key: process.env.ENCRYPTION_KEY }
   ),
   complaintsForIncident: (incidentId) => db.any(
     `SELECT qid, external_id, customer,
-       pgp_sym_decrypt(phone, $/key/) AS phone,
+       safe_decrypt_text(phone, $/key/) AS phone,
        address, category, lat, lon, dt_id, feeder, substation, incident_id, action, ts
      FROM complaints WHERE incident_id=$/incidentId/ ORDER BY ts ASC`,
     { incidentId, key: process.env.ENCRYPTION_KEY }
