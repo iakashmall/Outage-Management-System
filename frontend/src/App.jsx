@@ -181,6 +181,11 @@ export default function App() {
             </motion.div>
           </AnimatePresence>
         </div>
+
+        <div className="powered-by">
+          <img src="/spintech-logo.png" alt="" />
+          Powered by Sharika SpinTech
+        </div>
       </div>
 
       <div className="toast-wrap">

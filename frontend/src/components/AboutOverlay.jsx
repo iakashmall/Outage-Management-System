@@ -55,37 +55,32 @@ export default function AboutOverlay({ onClose }) {
           <Section title="Software">
             <Row k="Name" v="GridQ Action.NET ADMS — Outage Management System" />
             <Row k="Version" v="1.0.0" />
-            <Row k="Build" v="2026.07 · FDD-GridQ-003 Rev 1.0 / OMS SDP v1.0" />
-            <Row k="Deployment" v="UPCL — Ganga Corridor · Haridwar Distribution Network" />
-            <Row k="Data model" v="CIM · IEC 61970-301 / IEC 61968-9 / IEC 61968-11" />
+            <Row k="Build" v="2026.07.V.1.0" />
+            <Row k="Date of Deployment" v="" />
+            
           </Section>
 
-          <Section title="Standards compliance">
-            <Row k="Telecontrol" v="IEC 60870-5-104 / 101" />
-            <Row k="Reliability indices" v="IEEE 1366 (SAIDI · SAIFI · CAIDI · MAIFI)" />
-            <Row k="Security" v="CERT-In Cyber Security Framework" />
-          </Section>
-
+          
           <Section title="License">
             <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.6 }}>
               Confidential &amp; Proprietary. This software and its documentation are provided
               for the exclusive use of Uttarakhand Power Corporation Limited under the RDSS
-              scheme and may not be copied, distributed, or disclosed without written consent.
+              scheme and may not be copied, distributed, or disclosed without written consent from Sharika SpinTech Pvt. Ltd.
             </p>
           </Section>
 
           <Section title="Company">
             <Row k="Software OEM" v="Sharika SpinTech Pvt. Ltd." />
             <Row k="Technology partner" v="Sharika Enterprises Limited" />
-            <Row k="JV partner" v="Spin Engenharia" />
-            <Row k="System integrator" v="East India Udyog Limited" />
-            <Row k="Project management agency" v="Medhaj Techno Concept Pvt. Ltd." />
+            
           </Section>
 
           <Section title="Client & scheme">
             <Row k="End client" v="Uttarakhand Power Corporation Ltd. (UPCL)" />
-            <Row k="Scheme" v="Revamped Distribution Sector Scheme (RDSS)" />
+            <Row k="Scheme" v="Ganga Corridor(RDSS)" />
             <Row k="Nodal agency" v="Power Finance Corporation Ltd." />
+            <Row k="Town" v="Dehradun, Haridwar, Rishikesh" />
+
           </Section>
         </div>
       </div>
