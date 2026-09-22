@@ -3,7 +3,7 @@
 const pgp = pgPromise({
 });
 
-const connectionString = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/oms';
+const connectionString = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:15432/oms';
 export const db = pgp(connectionString);
 
 export async function migrate() {

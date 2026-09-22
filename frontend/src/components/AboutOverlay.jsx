@@ -55,7 +55,7 @@ export default function AboutOverlay({ onClose }) {
           <Section title="Software">
             <Row k="Name" v="GridQ Action.NET ADMS — Outage Management System" />
             <Row k="Version" v="1.0.0" />
-            <Row k="Build" v="2026.07.V.1.0" />
+            <Row k="Build" v="2026.07.1.0" />
             <Row k="Date of Deployment" v="" />
             
           </Section>
