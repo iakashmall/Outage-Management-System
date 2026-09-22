@@ -491,6 +491,17 @@ api.get('/mobile/jobs/:id/messages', async (req, res) => {
   res.json(job.incident_id ? await repo.messages(job.incident_id) : []);
 });
 
+// Background location ping (src/lib/backgroundLocation.js in mobile-native-fixed,
+// sent every ~30s/50m while a crew member has tracking enabled).
+api.post('/mobile/crews/:id/location', async (req, res) => {
+  const { lat, lon } = req.body || {};
+  if (!Number.isFinite(Number(lat)) || !Number.isFinite(Number(lon))) {
+    return res.status(400).json({ error: 'latitude and longitude are required' });
+  }
+  const location = await repo.addCrewLocation(req.params.id, Number(lat), Number(lon));
+  res.status(201).json(location);
+});
+
 api.get('/mobile/jobs/:id/history', async (req, res) => res.json(await repo.jobUpdates(req.params.id)));
 
 api.post('/mobile/jobs/:id/assets/scans', async (req, res) => {

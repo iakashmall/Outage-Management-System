@@ -198,6 +198,12 @@ export const repo = {
   },
   assetScansForJob: (jobId) =>
     db.any('SELECT * FROM asset_scans WHERE job_id=$1 ORDER BY scanned_at DESC', [jobId]),
+  addCrewLocation: async (crewId, lat, lon) =>
+    db.one(
+      `INSERT INTO crew_locations (crew_id, lat, lon) VALUES ($1, $2, $3)
+       RETURNING id, crew_id, lat, lon, recorded_at`,
+      [crewId, lat, lon]
+    ),
 
   // ---- admin / audit
   audit: async (actor, action, target) => {
