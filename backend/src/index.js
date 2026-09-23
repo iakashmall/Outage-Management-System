@@ -74,6 +74,16 @@ app.get('/api/public/outage-status', async (req, res) => {
 });
 app.use('/api', requireAuth, api);
 
+// Global safety net: any request that reaches here already failed to get a
+// response from its own route (an unhandled/forwarded error). Without this,
+// such requests hang until the client times out instead of getting a clean
+// JSON error - see docs/P8_6_CROSS_SOURCE_CORRELATION_RESULTS.md.
+app.use((err, req, res, next) => {
+  console.error('[unhandled route error]', err?.stack || err);
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: 'internal server error' });
+});
+
 const http = createServer(app);
 const io = new Server(http, { cors: { origin: '*' } });
 

@@ -292,7 +292,36 @@ backend alive after malformed request: health=200
 
 The guard logged it with timestamp and full stack, and **the process survived** -- before this change, that single malformed request would have killed the backend, the SCADA consumer, and every operator's session.
 
-**Lesser finding, reported rather than glossed over:** the offending request itself returned `http_status=000` -- no response at all; the client hangs until it times out. The crash guard keeps the *server* alive but does not make the *failed request* return a proper error, because `api.post('/complaints')` has no try/catch and Express never learns the promise rejected. This is strictly better than before (one hung request instead of a total outage) but it is not the finished state: an Express error-handling middleware, or an async-handler wrapper that forwards rejections to `next(err)`, should be added so these return a clean `500` instead of hanging. **This is not fixed here** -- it is a smaller, separate piece of work, flagged honestly rather than claimed as done.
+**Lesser finding, reported rather than glossed over:** the offending request itself returned `http_status=000` -- no response at all; the client hangs until it times out. The crash guard keeps the *server* alive but does not make the *failed request* return a proper error, because `api.post('/complaints')` has no try/catch and Express never learns the promise rejected. This is strictly better than before (one hung request instead of a total outage) but it is not the finished state: an Express error-handling middleware, or an async-handler wrapper that forwards rejections to `next(err)`, should be added so these return a clean `500` instead of hanging.
+
+> **Update (2026-09-23, same day):** fixed. Every route registered on `api` (not just `/complaints` -- the same no-try/catch pattern was present on all of them) is now auto-wrapped so a rejected handler promise is forwarded to `next(err)`, plus a global Express error-handling middleware in `backend/src/index.js` as a last-resort safety net that returns a clean JSON `500` instead of leaving the connection open. See **"Fix verification -- hung-request fix (complaints route error handling)"** below for the before/after evidence. This closed the gap flagged just above ("This is not fixed here") -- it is fixed here.
+
+## Fix verification -- hung-request fix (complaints route error handling)
+
+Fix date: 2026-09-23 (same day as the finding above).
+
+Re-ran the exact same deliberately malformed request from the crash-guard verification above (`phone` sent as a number instead of a string), this time against the real `POST /api/complaints` route with the fix applied, to confirm it now returns a real HTTP status instead of hanging to `http_status=000`:
+
+```
+http_status=500 time=0.037194
+{"error":"internal server error"}
+```
+
+Server log for that request shows the same underlying error class as before (proving this is a genuine fix of the same failure mode, not a different, easier bug):
+
+```
+[unhandled route error] error: function pgp_sym_encrypt(bigint, unknown) does not exist
+    at parseErrorMessage (...\node_modules\pg-protocol\dist\parser.js:306:11)
+    ...
+```
+
+`/api/health` immediately after:
+
+```
+health status=200
+```
+
+The request now returns promptly with a clean JSON error instead of hanging until client timeout, and the backend keeps serving other requests normally, same as the crash-guard verification above.
 
 ## Honest scope of this verification
 

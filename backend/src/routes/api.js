@@ -12,6 +12,21 @@ import { cacheGet, cacheSet, cacheDel } from '../infra/redis.js';
 import sharp from 'sharp';
 
 export const api = Router();
+
+// Every route below is an async handler with no try/catch. If the returned
+// promise rejects, Express never learns about it and the request just hangs
+// until the client times out (http_status=000) instead of getting a JSON
+// error response - see docs/P8_6_CROSS_SOURCE_CORRELATION_RESULTS.md, "Fix
+// verification". Patch the router's registration methods so every handler
+// added from here on is auto-wrapped to forward rejections to next(err).
+for (const method of ['get', 'post', 'patch', 'put', 'delete']) {
+  const original = api[method].bind(api);
+  api[method] = (path, ...handlers) => original(path, ...handlers.map((h) =>
+    typeof h === 'function'
+      ? (req, res, next) => Promise.resolve(h(req, res, next)).catch(next)
+      : h));
+}
+
 const actor = (req) => req.header('x-user') || 'operator';
 // ---------- network topology (real Haridwar GIS, loaded once - unchanged, no DB) ----------
 const _dir = dirname(fileURLToPath(import.meta.url));
