@@ -205,6 +205,39 @@ export async function migrate() {
     ALTER TABLE job_photos ALTER COLUMN data_url DROP NOT NULL;
   `);
 
+  // ID sequences for incidents.id / complaints.qid. These replace the old
+  // SELECT COUNT(*) minting in repo.js, which raced under concurrency and
+  // crashed the process on the resulting duplicate-key error (P8.6).
+  // Mirrors db/migrations/sequence_based_id_generation.sql -- that file is
+  // for already-deployed databases, this is so a fresh one self-bootstraps.
+  // Forward-only: GREATEST() never resets a sequence back onto live IDs.
+  await db.none(`
+    CREATE SEQUENCE IF NOT EXISTS incident_id_seq   AS bigint MINVALUE 1;
+    CREATE SEQUENCE IF NOT EXISTS complaint_qid_seq AS bigint MINVALUE 1;
+
+    DO $$
+    DECLARE target bigint;
+    BEGIN
+      SELECT GREATEST(
+        COALESCE((SELECT MAX((substring(id from '[0-9]+$'))::bigint) FROM incidents
+                   WHERE id ~ '^INC-[0-9]{4}-[0-9]+$'), 0),
+        COALESCE((SELECT last_value FROM pg_sequences
+                   WHERE schemaname = 'public' AND sequencename = 'incident_id_seq'), 0)
+      ) INTO target;
+      IF target < 1 THEN PERFORM setval('incident_id_seq', 1, false);
+      ELSE PERFORM setval('incident_id_seq', target, true); END IF;
+
+      SELECT GREATEST(
+        COALESCE((SELECT MAX((substring(qid from '[0-9]+$'))::bigint) FROM complaints
+                   WHERE qid ~ '^QRY-[0-9]{4}-[0-9]+$'), 0),
+        COALESCE((SELECT last_value FROM pg_sequences
+                   WHERE schemaname = 'public' AND sequencename = 'complaint_qid_seq'), 0)
+      ) INTO target;
+      IF target < 1 THEN PERFORM setval('complaint_qid_seq', 1, false);
+      ELSE PERFORM setval('complaint_qid_seq', target, true); END IF;
+    END $$;
+  `);
+
   const postgis = await db.oneOrNone(
     "SELECT 1 FROM pg_extension WHERE extname = 'postgis'"
   );

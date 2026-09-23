@@ -17,9 +17,13 @@ export const repo = {
   incidentEvents: (id) => db.any('SELECT * FROM incident_events WHERE incident_id=$1 ORDER BY ts ASC', [id]),
   allIncidentEvents: () => db.any('SELECT * FROM incident_events ORDER BY ts ASC'),
   allJobUpdates: () => db.any('SELECT * FROM job_updates ORDER BY ts ASC'),
+  // nextval() is atomic: two concurrent callers can never receive the same
+  // number. The previous SELECT COUNT(*) version could, and the duplicate-key
+  // error that followed crashed the whole process (P8.6 -- see
+  // db/migrations/sequence_based_id_generation.sql). Same external format.
   nextIncidentId: async () => {
-    const { c } = await db.one('SELECT COUNT(*) c FROM incidents');
-    return 'INC-2026-' + String(Number(c) + 1).padStart(6, '0');
+    const { n } = await db.one("SELECT nextval('incident_id_seq') n");
+    return 'INC-2026-' + String(n).padStart(6, '0');
   },
   createIncident: async (i) => {
     // Known zone centroids for the Ganga Corridor network -- lets manually
@@ -93,9 +97,11 @@ export const repo = {
      FROM complaints WHERE incident_id=$/incidentId/ ORDER BY ts ASC`,
     { incidentId, key: process.env.ENCRYPTION_KEY }
   ),
+  // Atomic, for the same reason as nextIncidentId above -- this is the exact
+  // call that raced and took the backend down under concurrent complaints.
   nextQueryId: async () => {
-    const { c } = await db.one('SELECT COUNT(*) c FROM complaints');
-    return 'QRY-2026-' + String(Number(c) + 1).padStart(6, '0');
+    const { n } = await db.one("SELECT nextval('complaint_qid_seq') n");
+    return 'QRY-2026-' + String(n).padStart(6, '0');
   },
   addComplaint: async (c) => {
     await db.none(`INSERT INTO complaints

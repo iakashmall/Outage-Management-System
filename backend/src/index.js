@@ -19,6 +19,22 @@ import { startNotifier } from './realtime/notifier.js';
 
 const PORT = process.env.PORT || 4000;
 
+// Last-resort crash guards. Registered before the startup awaits below so
+// they also cover migrate/seed/bus init, not just post-listen traffic.
+//
+// Why this exists: a single unhandled DB error on one request used to kill
+// the whole process -- taking the SCADA Kafka consumer, the dashboard, and
+// every other operator's session down with it, not just the one request
+// that failed (see docs/P8_6_CROSS_SOURCE_CORRELATION_RESULTS.md, where a
+// burst test killed the backend ~1.2s in). Staying up degraded beats
+// vanishing: an OMS that drops SCADA fault detection during a storm because
+// one complaint insert lost a race is worse than one that logs and limps.
+function logFatal(kind, err) {
+  console.error(`[fatal] ${kind} at ${new Date().toISOString()}:`, err?.stack || err);
+}
+process.on('unhandledRejection', (reason) => logFatal('unhandledRejection', reason));
+process.on('uncaughtException', (err) => logFatal('uncaughtException', err));
+
  await migrate();
  await seed(); // idempotent â€” only seeds an empty DB
  await connectRedis(); // non-fatal if unreachable â€” see infra/redis.js
