@@ -26,7 +26,7 @@ metadata:
 type: Opaque
 stringData:
   algorithm: RS256
-  key: "http://localhost:8080/realms/oms-upcl"
+  key: "http://localhost:18080/realms/oms-upcl"
   rsa_public_key: |
     -----BEGIN PUBLIC KEY-----
     MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxzBj41Yc1+PkcaiVqci6
