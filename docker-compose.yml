@@ -86,6 +86,14 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
       KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
       KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      # Single-broker dev cluster: the KRaft defaults (replication factor 3)
+      # can never be satisfied with only one broker, which silently blocks
+      # __consumer_offsets from ever being created -- and with no offsets
+      # topic, every consumer group hangs forever on "group coordinator not
+      # available". These must be 1 for a single-node cluster to work at all.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
     volumes: ["kafkadata:/var/lib/kafka/data"]
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 --list || exit 1"]
