@@ -3,7 +3,7 @@
 const pgp = pgPromise({
 });
 
-const connectionString = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/oms';
+const connectionString = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:15432/oms';
 export const db = pgp(connectionString);
 
 export async function migrate() {
@@ -111,6 +111,20 @@ export async function migrate() {
     );
 
     CREATE INDEX IF NOT EXISTS asset_scans_job_id_idx ON asset_scans(job_id);
+
+    -- crew.mobile background-location tracking: a ping every ~30s/50m while
+    -- a crew member has tracking enabled on duty (src/lib/backgroundLocation.js
+    -- in mobile-native-fixed). No FK to crews(id) since a ping can arrive for
+    -- a crew_id the demo data doesn't recognize.
+    CREATE TABLE IF NOT EXISTS crew_locations (
+      id          BIGSERIAL PRIMARY KEY,
+      crew_id     TEXT NOT NULL,
+      lat         DOUBLE PRECISION NOT NULL,
+      lon         DOUBLE PRECISION NOT NULL,
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS crew_locations_crew_id_idx ON crew_locations(crew_id, recorded_at DESC);
 
     CREATE TABLE IF NOT EXISTS job_updates (
       id     TEXT PRIMARY KEY,
