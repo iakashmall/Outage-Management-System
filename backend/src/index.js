@@ -35,6 +35,10 @@ app.use(express.json({ limit: '12mb' }));
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 app.use('/portal', express.static(path.join(__dirname, '..', 'public')));
 app.get('/api/health', (req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
+app.get('/api/health/ready', async (req, res) => {
+  try { await repo.incidents(); res.json({ status: 'ready' }); }
+  catch (e) { res.status(503).json({ status: 'not ready', error: e.message }); }
+});
 // Public, no-login outage status lookup for customers.
 app.get('/api/public/outage-status', async (req, res) => {
   try {

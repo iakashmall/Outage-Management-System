@@ -24,6 +24,43 @@ services:
       timeout: 5s
       retries: 10
 
+  # Streaming replica of oms-postgres. On first start, this container clones
+  # the primary's entire data directory via pg_basebackup, then continuously
+  # streams every subsequent change over the replication connection we
+  # configured on the primary. If oms-postgres genuinely goes down, this
+  # replica already has (near) all its data and can be promoted to take over
+  # -- see docs/REPLICATION.md for the promotion procedure.
+  postgres-replica:
+    image: timescale/timescaledb-ha:pg16
+    container_name: oms-postgres-replica
+    environment:
+      POSTGRES_PASSWORD: oms   # only used if the entrypoint needs it; real auth is via replicator
+      PGUSER: replicator
+      PGPASSWORD: repl_pass_2026
+    ports: ["127.0.0.1:15433:5432"]   # 15433 locally so it doesn't clash with the primary on 15432
+    volumes:
+      - pgdata_replica:/home/postgres/pgdata/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: >
+      bash -c "
+      if [ ! -s /home/postgres/pgdata/data/PG_VERSION ]; then
+        echo 'No existing data -- cloning primary via pg_basebackup...';
+        rm -rf /home/postgres/pgdata/data/*;
+        pg_basebackup -h postgres -U replicator -D /home/postgres/pgdata/data -Fp -Xs -P -R;
+        chmod 700 /home/postgres/pgdata/data;
+      else
+        echo 'Existing replica data found -- skipping clone, resuming streaming.';
+      fi;
+      exec docker-entrypoint.sh postgres
+      "
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oms"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   redis:
     image: redis:7-alpine
     container_name: oms-redis
@@ -88,5 +125,6 @@ services:
 
 volumes:
   pgdata:
+  pgdata_replica:
   redisdata:
   kafkadata:

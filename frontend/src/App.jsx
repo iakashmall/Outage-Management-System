@@ -188,9 +188,9 @@ export default function App() {
         </div>
       </div>
 
-      <div className="toast-wrap">
+      <div className="toast-wrap" role="status" aria-live="polite" aria-atomic="true">
         {items.map((t) => (
-          <div key={t.id} className={`toast ${t.kind === 'err' ? 'err' : ''}`}>
+          <div key={t.id} className={`toast ${t.kind === 'err' ? 'err' : ''}`} role={t.kind === 'err' ? 'alert' : undefined}>
             <Icon name={t.kind === 'err' ? 'x' : 'check'} size={16} />{t.msg}
           </div>
         ))}
