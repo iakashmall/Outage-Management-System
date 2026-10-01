@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef, Component } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef, Component } from 'react';
 import {
   ActivityIndicator,
   Modal,
@@ -7,32 +7,43 @@ import {
   StatusBar,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { SafeAreaView, SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as AuthSession from 'expo-auth-session';
 import * as WebBrowser from 'expo-web-browser';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import * as Location from 'expo-location';
+import * as Network from 'expo-network';
 import {
-  discovery,
+  getDiscovery,
   redirectUri,
   login,
   restoreSession,
   logout as authLogout,
   isAuthenticated,
+  myCrewId,
   isBiometricEnabled,
   setBiometricEnabled,
 } from './lib/auth';
 import { biometricUnlock } from './lib/biometric';
 import { getLockoutStatus, recordFailedAttempt, resetAttempts as resetLoginAttempts, MAX_ATTEMPTS, LOCKOUT_MS } from './lib/lockout';
-import { CLIENT_ID } from './config';
-import { getCurrentCrew, getMyJobs, updateJobStatus, getJobsLastSyncedAt, getJobMessages, getJobPhotos, getCrewMessages, saveAssetScan, getAssetScans } from './lib/api.js';
+import { API_PORT, CLIENT_ID, KEYCLOAK_PORT } from './config';
+import { reportTrackingState, getCurrentCrew, getMyJobs, updateJobStatus, getJobsLastSyncedAt, getJobMessages, getJobPhotos, getCrewMessages, saveAssetScan, getAssetScans } from './lib/api.js';
 import { getLocation, getLastKnownLocation } from './lib/location';
 import { uploadCapturedPhoto } from './lib/photos';
 import { navigateTo } from './lib/navigate';
+import { isOnlineState, distanceAndDirection } from './lib/offlineNavigation';
+import { getRoadRoute, preloadRoadGraph, formatDistance, formatDuration } from './lib/roadRouting';
 import { openMultiJobRoute } from './lib/routing';
 import { queueUpdate, flushQueue, getQueueLength, getQueueItems } from './lib/offlineQueue';
-import { startCrewTracking, stopCrewTracking, isCrewTrackingActive } from './lib/backgroundLocation';
+import { startCrewTracking, stopCrewTracking, autoStartCrewTracking, setTrackingPausedByCrew } from './lib/backgroundLocation';
+import { flushLocations, getPendingLocationCount } from './lib/locationQueue';
+import { downloadPack, cancelPackDownload, getInstalledPack, getPackStatus, subscribePackStatus } from './lib/offlineMap/tileStore';
+import OfflineMap from './components/OfflineMap';
+import { usingMapTestServer } from './lib/mapServer';
+import { checkServer, getServer, setServer } from './lib/server';
 import SafetyChecklist from './components/SafetyChecklist';
 import QrScanner from './components/QrScanner';
 import * as PriorityChecklistModule from './components/PriorityChecklist';
@@ -63,6 +74,10 @@ const NEXT_STATUS = {
 // due to a missing/misnamed export in another file.
 const severityColors = { Critical: '#d7382a', High: '#e08a1e', Medium: '#2f6fd6', Low: '#2a9d5c' };
 const MAX_JOB_PHOTOS = 25;
+
+// The offline map pack and GPS uploads need either a real login or the
+// no-auth map test server (MAP_TEST_SERVER in config.js).
+const canUseMapServer = () => isAuthenticated() || usingMapTestServer;
 
 function timeAgo(timestamp) {
   const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
@@ -124,11 +139,15 @@ function NativeAppScreen() {
   const [biometricOn, setBiometricOn] = useState(false);
   const [trackingOn, setTrackingOn] = useState(false);
   const [trackingBusy, setTrackingBusy] = useState(false);
+  const [pendingLocations, setPendingLocations] = useState(0);
   const [crew, setCrew] = useState({ name: 'Crew Gamma-2', role: 'Field Technician', id: 'C003' });
   const [jobs, setJobs] = useState(FALLBACK_JOBS);
   const [tab, setTab] = useState('Dashboard');
   const [activeJob, setActiveJob] = useState(null);
   const [mapJobId, setMapJobId] = useState(null);
+  // Set by a job's "Navigate to site": the Map tab then guides to that one
+  // incident instead of showing every job. Cleared from the Map tab or nav bar.
+  const [navJobId, setNavJobId] = useState(null);
   const [pendingCount, setPendingCount] = useState(0);
   const [pendingItems, setPendingItems] = useState([]);
   const [crewMessages, setCrewMessages] = useState([]);
@@ -200,10 +219,26 @@ function NativeAppScreen() {
     if (authenticated) isBiometricEnabled().then(setBiometricOn).catch(() => {});
   }, [authenticated]);
 
+  // Tracking starts by itself once a crew is signed in (asking for location
+  // permission the first time), so dispatch sees every crew on duty without
+  // anyone having to remember the Tracking button. The crew can still switch
+  // it off; that holds until they sign in again. Demo mode never tracks.
   useEffect(() => {
-    if (authenticated && isAuthenticated()) {
-      isCrewTrackingActive().then(setTrackingOn).catch(() => {});
-    }
+    if (!authenticated || !isAuthenticated()) return undefined;
+    let cancelled = false;
+    setTrackingBusy(true);
+    const crewId = myCrewId();
+    autoStartCrewTracking(crewId)
+      .catch(() => ({ on: false, reason: 'permission_denied' }))
+      .then(({ on, reason }) => {
+        // Re-reported on every start so dispatch's view heals after an
+        // offline report was lost; the backend only alerts on a change.
+        reportTrackingState(crewId, on ? 'on' : 'off', reason).catch(() => {});
+        if (cancelled) return;
+        setTrackingOn(on);
+        setTrackingBusy(false);
+      });
+    return () => { cancelled = true; };
   }, [authenticated]);
 
   const handleBiometricUnlock = useCallback(async () => {
@@ -251,14 +286,18 @@ function NativeAppScreen() {
       if (trackingOn) {
         console.log('[toggleTracking] stopping...');
         await stopCrewTracking();
+        await setTrackingPausedByCrew(true);
         console.log('[toggleTracking] stopped.');
         setTrackingOn(false);
+        reportTrackingState(crew.id, 'off', 'turned_off').catch(() => {});
         return;
       }
       console.log('[toggleTracking] starting, crew.id =', crew.id);
-      const started = await startCrewTracking(crew.id);
-      console.log('[toggleTracking] startCrewTracking returned:', started);
-      setTrackingOn(started);
+      await setTrackingPausedByCrew(false);
+      const { on, reason } = await startCrewTracking(crew.id);
+      console.log('[toggleTracking] startCrewTracking returned:', on, reason);
+      setTrackingOn(on);
+      reportTrackingState(crew.id, on ? 'on' : 'off', reason).catch(() => {});
     } catch (err) {
       console.log('[toggleTracking] ERROR:', err?.message || err);
       setTrackingOn(false);
@@ -266,6 +305,22 @@ function NativeAppScreen() {
       setTrackingBusy(false);
     }
   }, [trackingOn, trackingBusy, crew.id]);
+
+  // Off duty = not tracked: signing out stops tracking (points already
+  // recorded still upload) and the next sign-in starts it again.
+  const signOut = useCallback(async () => {
+    // Report before the token is cleared, but never let a dead network hold
+    // up signing out.
+    await Promise.race([
+      reportTrackingState(myCrewId(), 'off', 'signed_out').catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, 3000)),
+    ]);
+    await stopCrewTracking().catch(() => {});
+    await setTrackingPausedByCrew(false);
+    setTrackingOn(false);
+    await authLogout();
+    setAuthenticated(false);
+  }, []);
 
   const refresh = useCallback(() => {
     if (!authenticated) return;
@@ -330,6 +385,38 @@ function NativeAppScreen() {
     return () => clearInterval(interval);
   }, [authenticated, refresh]);
 
+  // Upload GPS fixes recorded while offline: immediately when the network
+  // comes back, plus a periodic retry. The background task also flushes on
+  // each new fix; this covers the "app open, crew parked at a site" case
+  // where no new fix arrives to trigger it.
+  useEffect(() => {
+    if (!authenticated || !canUseMapServer()) return undefined;
+    const flush = () => flushLocations().then((r) => setPendingLocations(r.remaining)).catch(() => {});
+    getPendingLocationCount().then(setPendingLocations).catch(() => {});
+    flush();
+    const interval = setInterval(flush, 60000);
+    const subscription = Network.addNetworkStateListener((state) => {
+      if (state.isConnected) flush(); // flushLocations re-checks reachability itself
+    });
+    return () => {
+      clearInterval(interval);
+      subscription.remove();
+    };
+  }, [authenticated]);
+
+  // Fetch/refresh the offline map pack automatically, but only on Wi-Fi
+  // (it's tens of MB). A no-op when the installed pack is already current.
+  useEffect(() => {
+    if (!authenticated || !canUseMapServer()) return;
+    Network.getNetworkStateAsync()
+      .then((state) => {
+        if (state.type === Network.NetworkStateType.WIFI) {
+          downloadPack().catch(() => {});
+        }
+      })
+      .catch(() => {});
+  }, [authenticated]);
+
   const handleAdvance = useCallback(async (job, nextStatus) => {
     const location = await getLocation();
     setJobs((current) => current.map((j) => (j.id === job.id ? { ...j, status: nextStatus } : j)));
@@ -380,9 +467,8 @@ function NativeAppScreen() {
         <Pressable
           style={styles.demoBtn}
           onPress={async () => {
-            await authLogout();
+            await signOut();
             setNeedsBiometric(false);
-            setAuthenticated(false);
           }}
         >
           <Text style={styles.demoBtnText}>Sign out instead</Text>
@@ -396,61 +482,73 @@ function NativeAppScreen() {
   }
 
   return (
-    <SafeAreaView style={styles.safe}>
+    <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
       <StatusBar barStyle="light-content" backgroundColor="#173355" />
       <View style={styles.header}>
-        <View>
-          <Text style={styles.kicker}>OMS CREW</Text>
-          <Text style={styles.crewName}>{crew.name}</Text>
-          <Text style={styles.role}>{crew.role} · {crew.id}</Text>
-        </View>
-        <View style={styles.historyControls}>
-          <Pressable style={[styles.historyButton, !backStack.length && styles.historyButtonOff]} disabled={!backStack.length} onPress={goBack} accessibilityLabel="Go back">
-            <Text style={styles.historyButtonText}>‹</Text>
-          </Pressable>
-          <Pressable style={[styles.historyButton, !forwardStack.length && styles.historyButtonOff]} disabled={!forwardStack.length} onPress={goForward} accessibilityLabel="Go forward">
-            <Text style={styles.historyButtonText}>›</Text>
-          </Pressable>
-        </View>
-        <View style={styles.headerRight}>
-          {!isAuthenticated() && (
-            <View style={styles.demoBadge}>
-              <Text style={styles.demoBadgeText}>DEMO MODE</Text>
+        <View style={styles.headerTop}>
+          <View style={styles.headerIdentity}>
+            <Text style={styles.kicker}>OMS CREW</Text>
+            <Text style={styles.crewName} numberOfLines={1}>{crew.name}</Text>
+            <Text style={styles.role} numberOfLines={1}>{crew.role} · {crew.id}</Text>
+          </View>
+          <View style={styles.headerRight}>
+            <View style={styles.historyControls}>
+              <Pressable style={[styles.historyButton, !backStack.length && styles.historyButtonOff]} disabled={!backStack.length} onPress={goBack} accessibilityLabel="Go back">
+                <Text style={styles.historyButtonText}>‹</Text>
+              </Pressable>
+              <Pressable style={[styles.historyButton, !forwardStack.length && styles.historyButtonOff]} disabled={!forwardStack.length} onPress={goForward} accessibilityLabel="Go forward">
+                <Text style={styles.historyButtonText}>›</Text>
+              </Pressable>
             </View>
-          )}
-          {pendingCount > 0 && (
-            <View style={styles.pendingBadge}>
-              <Text style={styles.pendingText}>{pendingCount} queued</Text>
-            </View>
+            {!isAuthenticated() && (
+              <View style={styles.demoBadge}>
+                <Text style={styles.demoBadgeText}>DEMO MODE</Text>
+              </View>
+            )}
+            {pendingCount > 0 && (
+              <View style={styles.pendingBadge}>
+                <Text style={styles.pendingText}>{pendingCount} queued</Text>
+              </View>
+            )}
+          </View>
+        </View>
+        <View style={styles.actionBar}>
+          {isAuthenticated() && (
+            <HeaderAction
+              label="Messages"
+              count={crewMessages.length}
+              onPress={() => setMessagesVisible(true)}
+              accessibilityLabel="Open OMS messages"
+            />
           )}
           {isAuthenticated() && (
-            <Pressable style={styles.online} onPress={() => setMessagesVisible(true)} accessibilityLabel="Open OMS messages">
-              <Text style={styles.onlineText}>OMS messages{crewMessages.length ? ` (${crewMessages.length})` : ''}</Text>
-            </Pressable>
+            <HeaderAction
+              label="Biometric"
+              on={biometricOn}
+              onPress={toggleBiometric}
+              accessibilityLabel={biometricOn ? 'Biometric unlock is on, tap to turn off' : 'Turn on biometric unlock'}
+            />
           )}
-          {isAuthenticated() && (
-            <Pressable style={styles.online} onPress={toggleBiometric}>
-              <Text style={styles.onlineText}>{biometricOn ? 'Biometric: On' : 'Enable biometric'}</Text>
-            </Pressable>
-          )}
-          <Pressable style={styles.online} onPress={toggleTracking} disabled={trackingBusy}>
-            <Text style={styles.onlineText}>
-              {trackingBusy ? 'Updating…' : trackingOn ? 'Tracking: On' : 'Enable tracking'}
-            </Text>
-          </Pressable>
-          <Pressable
-            style={styles.online}
-            onPress={async () => {
-              await authLogout();
-              setAuthenticated(false);
-            }}
-          >
-            <View style={styles.dot} />
-            <Text style={styles.onlineText}>Sign out</Text>
-          </Pressable>
+          <HeaderAction
+            label={trackingBusy ? 'Updating…' : 'Tracking'}
+            on={trackingOn}
+            count={pendingLocations}
+            onPress={toggleTracking}
+            disabled={trackingBusy}
+            accessibilityLabel={
+              (trackingOn ? 'Location tracking is on, tap to turn off' : 'Turn on location tracking') +
+              (pendingLocations > 0 ? `, ${pendingLocations} locations saved offline` : '')
+            }
+          />
+          <HeaderAction
+            label="Sign out"
+            danger
+            onPress={signOut}
+            accessibilityLabel="Sign out"
+          />
         </View>
       </View>
-      <ScrollView contentContainerStyle={styles.content}>
+      <ScrollView contentContainerStyle={[styles.content, { paddingBottom: 100 + insets.bottom }]}>
         {tab === 'Dashboard' ? (
           <>
             <Text style={styles.title}>Today&apos;s field work</Text>
@@ -502,12 +600,16 @@ function NativeAppScreen() {
         ) : tab === 'Jobs' ? (
           <NativeJobsPage jobs={jobs} onPressJob={(job) => openPage({ tab: 'Jobs', jobId: job.id })} />
         ) : tab === 'Map' ? (
-          <MapScreen jobs={jobs} selectedJobId={mapJobId} onSelect={setMapJobId} crew={crew} />
+          <MapScreen
+            jobs={jobs}
+            selectedJobId={mapJobId}
+            onSelect={setMapJobId}
+            crew={crew}
+            navJobId={navJobId}
+            onExitNav={() => setNavJobId(null)}
+          />
         ) : tab === 'Profile' ? (
-          <ProfileScreen crew={crew} jobs={jobs} onLogout={async () => {
-            await authLogout();
-            setAuthenticated(false);
-          }} />
+          <ProfileScreen crew={crew} jobs={jobs} onLogout={signOut} />
         ) : (
           <View style={styles.empty}>
             <Text style={styles.title}>{tab}</Text>
@@ -519,7 +621,10 @@ function NativeAppScreen() {
         {['Dashboard', 'Jobs', 'Map', 'Profile'].map((item) => (
           <Pressable
             key={item}
-            onPress={() => openPage({ tab: item, jobId: null })}
+            onPress={() => {
+              setNavJobId(null);
+              openPage({ tab: item, jobId: null });
+            }}
             style={styles.navItem}
           >
             <Text style={[styles.navText, tab === item && styles.navActive]}>
@@ -538,6 +643,7 @@ function NativeAppScreen() {
             onAdvance={handleAdvance}
             onNavigate={(job) => {
               setMapJobId(job.id);
+              setNavJobId(job.id);
               openPage({ tab: 'Map', jobId: null });
             }}
           />
@@ -591,6 +697,11 @@ function NativeJobsPage({ jobs, onPressJob }) {
 }
 
 function CrewLogin({ onSuccess }) {
+  // The server was loaded from storage before this screen (restoreSession).
+  const [server, setServerHost] = useState(getServer);
+  const [serverDraft, setServerDraft] = useState(getServer);
+  const [serverCheck, setServerCheck] = useState(null); // null | 'checking' | { api, keycloak } | { error }
+  const discovery = useMemo(() => getDiscovery(), [server]);
   const [request, , promptAsync] = AuthSession.useAuthRequest(
     {
       clientId: CLIENT_ID,
@@ -651,9 +762,21 @@ function CrewLogin({ onSuccess }) {
     } catch {
       const status = await recordFailedAttempt();
       setLockStatus(status);
-      setError('Could not reach the sign-in server. Check your connection and API_BASE/KEYCLOAK_URL in config.js.');
+      setError(`Could not reach the sign-in server at ${server}. Tap "Check" below to see what is unreachable.`);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const saveAndCheckServer = async () => {
+    setServerCheck('checking');
+    try {
+      const host = await setServer(serverDraft);
+      setServerHost(host);
+      setServerDraft(host);
+      setServerCheck(await checkServer());
+    } catch (err) {
+      setServerCheck({ error: err.message });
     }
   };
 
@@ -662,7 +785,7 @@ function CrewLogin({ onSuccess }) {
   return (
     <SafeAreaView style={styles.loginSafe}>
       <StatusBar barStyle="light-content" backgroundColor="#10201d" />
-      <View style={styles.login}>
+      <ScrollView contentContainerStyle={styles.login} keyboardShouldPersistTaps="handled">
         <Text style={styles.loginKicker}>OMS CREW</Text>
         <Text style={styles.loginTitle}>Crew sign in</Text>
         <Text style={styles.loginSubtitle}>Access your field operations workspace.</Text>
@@ -701,13 +824,77 @@ function CrewLogin({ onSuccess }) {
         </Text>
 
         <View style={styles.demo}>
-          <Text style={styles.demoLabel}>USES YOUR OMS ACCOUNT</Text>
-          <Text style={styles.demoText}>Realm: oms-upcl · Client: oms-mobile</Text>
-          <Text style={styles.demoPassword}>Configured in src/config.js</Text>
+          <Text style={styles.demoLabel}>OMS SERVER</Text>
+          <View style={styles.serverRow}>
+            <TextInput
+              style={styles.serverInput}
+              value={serverDraft}
+              onChangeText={(text) => {
+                setServerDraft(text);
+                setServerCheck(null);
+              }}
+              placeholder="192.168.1.20"
+              placeholderTextColor="#5f7b74"
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+              returnKeyType="done"
+              onSubmitEditing={saveAndCheckServer}
+              editable={!busy}
+            />
+            <Pressable style={styles.serverBtn} onPress={saveAndCheckServer} disabled={busy || serverCheck === 'checking'}>
+              <Text style={styles.serverBtnText}>{serverCheck === 'checking' ? '…' : 'Check'}</Text>
+            </Pressable>
+          </View>
+          {serverCheck && serverCheck !== 'checking' ? (
+            serverCheck.error ? (
+              <Text style={styles.error}>{serverCheck.error}</Text>
+            ) : (
+              <>
+                <Text style={styles.demoPassword}>
+                  {serverCheck.api ? '✓' : '✗'} Backend :{API_PORT}   {serverCheck.keycloak ? '✓' : '✗'} Keycloak :{KEYCLOAK_PORT}
+                </Text>
+                {!serverCheck.api || !serverCheck.keycloak ? (
+                  <Text style={styles.error}>Not reachable — check the IP, that the service is running, and the PC firewall.</Text>
+                ) : null}
+              </>
+            )
+          ) : null}
+          <Text style={styles.demoPassword}>Realm: oms-upcl · Client: oms-mobile</Text>
         </View>
         <Text style={styles.loginFooter}>Crew access only · Offline capable</Text>
-      </View>
+      </ScrollView>
     </SafeAreaView>
+  );
+}
+
+// One chip in the header's action bar. `on` shows a status dot (green = on),
+// `count` a small bubble, `danger` the red sign-out style.
+function HeaderAction({ label, on, count, danger, onPress, disabled, accessibilityLabel }) {
+  return (
+    <Pressable
+      style={({ pressed }) => [
+        styles.action,
+        on && styles.actionOn,
+        danger && styles.actionDanger,
+        pressed && styles.actionPressed,
+        disabled && styles.actionDisabled,
+      ]}
+      onPress={onPress}
+      disabled={disabled}
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel || label}
+    >
+      {on !== undefined && <View style={[styles.actionDot, on && styles.actionDotOn]} />}
+      <Text style={[styles.actionText, danger && styles.actionTextDanger]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>
+        {label}
+      </Text>
+      {count > 0 && (
+        <View style={styles.actionCount}>
+          <Text style={styles.actionCountText}>{count > 99 ? '99+' : count}</Text>
+        </View>
+      )}
+    </Pressable>
   );
 }
 
@@ -811,6 +998,7 @@ function JobDetail({ job, crew, onClose, onAdvance, onNavigate }) {
   const [messagesOpen, setMessagesOpen] = useState(false);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [advancing, setAdvancing] = useState(false);
+  const [checklistDone, setChecklistDone] = useState(false);
 
   // Completion flow: fault diagnosis -> parts used -> crew-lead sign-off.
   // Gates the final "Work Started" -> "Work Complete" transition.
@@ -827,7 +1015,7 @@ function JobDetail({ job, crew, onClose, onAdvance, onNavigate }) {
   const next = NEXT_STATUS[job.status];
 
   const requestAdvance = async () => {
-    if (!next) return;
+    if (!next || !checklistDone) return;
     if (job.status === 'On Site') {
       setShowSafety(true);
       return;
@@ -956,9 +1144,17 @@ function JobDetail({ job, crew, onClose, onAdvance, onNavigate }) {
           </View>
         </View>
 
-        <PriorityChecklist severity={job.severity} />
+        <PriorityChecklist severity={job.severity} onChange={setChecklistDone} />
 
-        {showSafety && (
+        {!checklistDone && (
+          <View style={styles.checklistLock}>
+            <Text style={styles.checklistLockText}>
+              Complete the priority checklist above to unlock the rest of this job.
+            </Text>
+          </View>
+        )}
+
+        {checklistDone && showSafety && (
           <SafetyChecklist
             onPass={() => {
               setShowSafety(false);
@@ -969,7 +1165,7 @@ function JobDetail({ job, crew, onClose, onAdvance, onNavigate }) {
           />
         )}
 
-        {completionStep === 'diagnosis' && (
+        {checklistDone && completionStep === 'diagnosis' && (
           <FaultDiagnosisWizard
             onComplete={(answers) => {
               setDiagnosis(answers);
@@ -979,7 +1175,7 @@ function JobDetail({ job, crew, onClose, onAdvance, onNavigate }) {
           />
         )}
 
-        {completionStep === 'parts' && (
+        {checklistDone && completionStep === 'parts' && (
           <PartsPicker
             onComplete={(parts) => {
               setPartsUsed(parts);
@@ -989,14 +1185,14 @@ function JobDetail({ job, crew, onClose, onAdvance, onNavigate }) {
           />
         )}
 
-        {completionStep === 'signoff' && (
+        {checklistDone && completionStep === 'signoff' && (
           <CrewLeadSignOff
             onComplete={finishCompletion}
             onCancel={() => setCompletionStep('parts')}
           />
         )}
 
-        {signOff && (
+        {checklistDone && signOff && (
           <View style={styles.completionSummary}>
             <Text style={styles.completionSummaryTitle}>Job closed out</Text>
             {diagnosis && (
@@ -1015,17 +1211,20 @@ function JobDetail({ job, crew, onClose, onAdvance, onNavigate }) {
           </View>
         )}
 
+        {checklistDone && (
         <Pressable style={styles.secondaryBtn} onPress={() => {
           onNavigate(job);
-          navigateTo(job.address);
         }}>
           <Text style={styles.secondaryBtnText}>Navigate to site</Text>
         </Pressable>
+        )}
 
+        {checklistDone && (
         <Pressable style={styles.secondaryBtn} onPress={loadMessages}>
           <Text style={styles.secondaryBtnText}>Messages from OMS server</Text>
         </Pressable>
-        {messagesOpen && (
+        )}
+        {checklistDone && messagesOpen && (
           <View style={styles.messagesPanel}>
             <View style={styles.messagesHeader}>
               <Text style={styles.sectionSmall}>OMS JOB MESSAGES</Text>
@@ -1044,6 +1243,7 @@ function JobDetail({ job, crew, onClose, onAdvance, onNavigate }) {
           </View>
         )}
 
+        {checklistDone && (
         <View style={styles.assetRow}>
           <Text style={styles.sectionSmall}>ASSET SCAN</Text>
           {assetId ? <Text style={styles.assetValue}>Attached asset: {assetId}</Text> : null}
@@ -1053,8 +1253,9 @@ function JobDetail({ job, crew, onClose, onAdvance, onNavigate }) {
             <Text style={styles.secondaryBtnText}>Scan QR asset tag</Text>
           </Pressable>
         </View>
+        )}
 
-        {showScanner && (
+        {checklistDone && showScanner && (
           <View style={styles.scannerWrap}>
             <QrScanner
               onScan={handleAssetScan}
@@ -1063,13 +1264,15 @@ function JobDetail({ job, crew, onClose, onAdvance, onNavigate }) {
           </View>
         )}
 
+        {checklistDone && (
         <Pressable style={styles.secondaryBtn} onPress={takePhoto} disabled={uploading || photoCount >= MAX_JOB_PHOTOS}>
           <Text style={styles.secondaryBtnText}>{uploading ? 'Compressing and storing…' : `Open camera (${photoCount}/${MAX_JOB_PHOTOS})`}</Text>
         </Pressable>
-        {showPhotoCamera && <PhotoCamera onCapture={saveCapturedPhoto} onClose={() => setShowPhotoCamera(false)} />}
+        )}
+        {checklistDone && showPhotoCamera && <PhotoCamera onCapture={saveCapturedPhoto} onClose={() => setShowPhotoCamera(false)} />}
         {message ? <Text style={styles.assetValue}>{message}</Text> : null}
 
-        {next && !completionStep && (
+        {checklistDone && next && !completionStep && (
           <Pressable style={styles.primaryBtn} onPress={requestAdvance} disabled={advancing}>
             <Text style={styles.primaryBtnText}>
               {advancing ? 'Updating status…' : job.status === 'Pending Acceptance' ? 'Accept task' : `${next} →`}
@@ -1081,78 +1284,176 @@ function JobDetail({ job, crew, onClose, onAdvance, onNavigate }) {
   );
 }
 
-function MapScreen({ jobs, selectedJobId, onSelect, crew }) {
-  const selectedJob = jobs.find((job) => job.id === selectedJobId);
+function formatMb(bytes) {
+  return `${Math.max(1, Math.round((bytes || 0) / 1048576))} MB`;
+}
+
+function MapScreen({ jobs, selectedJobId, onSelect, crew, navJobId, onExitNav }) {
+  // Navigation mode: only the job being navigated to is shown and selected.
+  const navJob = navJobId ? jobs.find((job) => job.id === navJobId) || null : null;
+  const visibleJobs = navJob ? [navJob] : jobs;
+  const selectedJob = navJob || jobs.find((job) => job.id === selectedJobId);
+  const selectedId = selectedJob?.id;
+  const mapRef = useRef(null);
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
-  const [mapLocation, setMapLocation] = useState({});
-  const [mapCenter, setMapCenter] = useState({});
-  const [zoom, setZoom] = useState(1);
+  const [mapLocation, setMapLocation] = useState(null);
+  const [pack, setPack] = useState(null);
+  const [packStatus, setPackStatus] = useState(getPackStatus);
   const [routing, setRouting] = useState(false);
-  const crewLocation = { lat: Number(crew?.lat), lon: Number(crew?.lon) };
+  const [online, setOnline] = useState(true);
+
+  useEffect(() => {
+    Network.getNetworkStateAsync().then((state) => setOnline(isOnlineState(state))).catch(() => {});
+    const subscription = Network.addNetworkStateListener((state) => setOnline(isOnlineState(state)));
+    return () => subscription.remove();
+  }, []);
 
   useEffect(() => {
     getJobsLastSyncedAt().then(setLastSyncedAt).catch(() => {});
-    getLocation()
-      .then((location) => {
-        if (location.lat && location.lon) setMapLocation(location);
-        else return getLastKnownLocation().then((cached) => {
-          setMapLocation(Number.isFinite(cached.lat) && Number.isFinite(cached.lon) ? cached : crewLocation);
-        });
-      })
-      .catch(() => getLastKnownLocation().then((cached) => {
-        setMapLocation(Number.isFinite(cached.lat) && Number.isFinite(cached.lon) ? cached : crewLocation);
-      }).catch(() => setMapLocation(crewLocation)));
+    getInstalledPack().then(setPack).catch(() => {});
+    let lastPhase = getPackStatus().phase;
+    return subscribePackStatus((next) => {
+      setPackStatus(next);
+      // Re-read on phase changes so the map picks up a newly-activated pack
+      // (first tiles of a fresh install, or a completed upgrade).
+      if (next.phase !== lastPhase) getInstalledPack().then(setPack).catch(() => {});
+      lastPhase = next.phase;
+    });
   }, []);
 
-  const hasLocation = Number.isFinite(mapLocation.lat) && Number.isFinite(mapLocation.lon);
-  const jobsWithCoordinates = jobs.filter((job) =>
-    Number.isFinite(job.coordinates?.lat) && Number.isFinite(job.coordinates?.lon)
-  );
-  const defaultCenter = hasLocation
-    ? mapLocation
-    : jobsWithCoordinates.length
-      ? jobsWithCoordinates.reduce(
-        (center, job) => ({ lat: center.lat + job.coordinates.lat, lon: center.lon + job.coordinates.lon }),
-        { lat: 0, lon: 0 }
-      )
-      : {};
-  if (jobsWithCoordinates.length && !hasLocation) {
-    defaultCenter.lat /= jobsWithCoordinates.length;
-    defaultCenter.lon /= jobsWithCoordinates.length;
-  }
-  const center = Number.isFinite(mapCenter.lat) && Number.isFinite(mapCenter.lon) ? mapCenter : defaultCenter;
-  const hasCenter = Number.isFinite(center.lat) && Number.isFinite(center.lon);
-  const markerPositions = jobs.map((job, index) => {
-    const coordinates = job.coordinates;
-    if (!hasCenter || !coordinates) {
-      return { top: [20, 40, 64, 76][index % 4], left: [20, 72, 38, 68][index % 4] };
-    }
-    const horizontal = ((coordinates.lon - center.lon) / 0.04) * 38 * zoom;
-    const vertical = ((center.lat - coordinates.lat) / 0.04) * 38 * zoom;
-    return {
-      left: Math.max(8, Math.min(84, 50 + horizontal)),
-      top: Math.max(8, Math.min(82, 50 + vertical)),
+  // Live GPS dot while the map is open. GPS needs no internet; falls back
+  // to the last cached fix, then the crew record from the server.
+  useEffect(() => {
+    let sub = null;
+    let cancelled = false;
+    getLastKnownLocation().then((cached) => {
+      if (cancelled) return;
+      if (Number.isFinite(cached.lat) && Number.isFinite(cached.lon)) setMapLocation((cur) => cur || cached);
+      else if (Number.isFinite(Number(crew?.lat)) && Number.isFinite(Number(crew?.lon))) {
+        setMapLocation((cur) => cur || { lat: Number(crew.lat), lon: Number(crew.lon) });
+      }
+    }).catch(() => {});
+    Location.requestForegroundPermissionsAsync()
+      .then(({ status }) => {
+        if (cancelled || status !== 'granted') return null;
+        return Location.watchPositionAsync(
+          { accuracy: Location.Accuracy.High, timeInterval: 5000, distanceInterval: 10 },
+          (pos) => setMapLocation({
+            lat: pos.coords.latitude,
+            lon: pos.coords.longitude,
+            accuracy: pos.coords.accuracy,
+            // lets the map point the crew arrow the way they are driving
+            heading: pos.coords.heading,
+            speed: pos.coords.speed,
+          })
+        );
+      })
+      .then((subscription) => {
+        if (cancelled) subscription?.remove();
+        else sub = subscription;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      sub?.remove();
     };
-  });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  const setCrewCenter = () => {
-    if (hasLocation) {
-      setMapCenter(mapLocation);
-      setZoom(1);
-    }
+  const mapJobs = useMemo(
+    () => visibleJobs
+      .filter((job) => Number.isFinite(job.coordinates?.lat) && Number.isFinite(job.coordinates?.lon))
+      .map((job) => ({
+        id: job.id,
+        title: `${job.title} · ${job.id}`,
+        lat: job.coordinates.lat,
+        lon: job.coordinates.lon,
+        color: severityColors[job.severity] || severityColors.Critical,
+        selected: job.id === selectedId,
+      })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [jobs, navJobId, selectedId]
+  );
+
+  const hasLocation = Number.isFinite(mapLocation?.lat) && Number.isFinite(mapLocation?.lon);
+  const downloading = packStatus.phase === 'downloading' || packStatus.phase === 'checking';
+  const canDownload = canUseMapServer() && !downloading;
+
+  // In navigation mode the map follows the crew, keeping both them and the
+  // site in view, until they pan the map themselves ("Show route" resumes).
+  const [following, setFollowing] = useState(Boolean(navJobId));
+  useEffect(() => {
+    setFollowing(Boolean(navJobId));
+  }, [navJobId]);
+
+  // A marker tap or arriving from "Navigate to site": frame both the crew and
+  // the job so the dashed guide line shows the whole way there.
+  useEffect(() => {
+    if (selectedId) mapRef.current?.fit('guide');
+  }, [selectedId]);
+
+  useEffect(() => {
+    if (navJob && following && hasLocation) mapRef.current?.fit('guide');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapLocation, following]);
+
+  const showRoute = () => {
+    setFollowing(Boolean(navJob));
+    mapRef.current?.fit('guide');
   };
 
-  const fitJobs = () => {
-    if (!jobsWithCoordinates.length) return;
-    const fitted = jobsWithCoordinates.reduce(
-      (next, job) => ({ lat: next.lat + job.coordinates.lat, lon: next.lon + job.coordinates.lon }),
-      { lat: 0, lon: 0 }
-    );
-    setMapCenter({
-      lat: fitted.lat / jobsWithCoordinates.length,
-      lon: fitted.lon / jobsWithCoordinates.length,
-    });
-    setZoom(0.85);
+  const guide = selectedJob ? distanceAndDirection(mapLocation, selectedJob.coordinates) : null;
+
+  // Road route to the selected job: from the server when online, else from
+  // the road graph on the phone. Recomputed when the crew has moved ~75 m,
+  // the job changes, or connectivity changes.
+  const [route, setRoute] = useState(null);
+  // Metres left along the road from where the map draws the crew arrow, so the
+  // readout counts down while driving (null when off the route or none yet).
+  const [routeLeft, setRouteLeft] = useState(null);
+  const routeRequest = useRef({ seq: 0, key: null, from: null });
+  useEffect(() => {
+    preloadRoadGraph(pack?.roadsUri);
+  }, [pack?.roadsUri]);
+  const target = selectedJob?.coordinates;
+  useEffect(() => {
+    const req = routeRequest.current;
+    if (!selectedId || !hasLocation || !Number.isFinite(target?.lat) || !Number.isFinite(target?.lon)) {
+      req.key = null;
+      setRoute(null);
+      return;
+    }
+    const key = `${selectedId}|${online}|${pack?.roadsUri || ''}`;
+    const moved = req.from ? distanceAndDirection(req.from, mapLocation)?.meters ?? Infinity : Infinity;
+    if (key === req.key && moved < 75) return;
+    if (key !== req.key) setRoute(null); // never show another job's route
+    req.key = key;
+    req.from = { lat: mapLocation.lat, lon: mapLocation.lon };
+    const seq = ++req.seq;
+    getRoadRoute(req.from, target, { online, roadsUri: pack?.roadsUri })
+      .then((next) => {
+        if (seq === routeRequest.current.seq) setRoute(next);
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId, target?.lat, target?.lon, mapLocation, online, pack?.roadsUri]);
+
+  // Live "x km to go": the map's figure while the crew is on the route, else
+  // the length of the whole route as last computed.
+  const roadLeft = route ? (Number.isFinite(routeLeft) ? routeLeft : route.meters) : null;
+  const arrived = Boolean(selectedJob) && ((route && Number.isFinite(routeLeft) && routeLeft < 30) || (guide && guide.meters < 40));
+
+  // Frame the route the first time it arrives for a job.
+  const framedRouteFor = useRef(null);
+  useEffect(() => {
+    if (route && framedRouteFor.current !== selectedId) {
+      framedRouteFor.current = selectedId;
+      mapRef.current?.fit('guide');
+    }
+  }, [route, selectedId]);
+
+  const startDownload = () => {
+    downloadPack().catch(() => {}); // errors surface through packStatus
   };
 
   const startMultiJobRoute = async () => {
@@ -1164,23 +1465,63 @@ function MapScreen({ jobs, selectedJobId, onSelect, crew }) {
     }
   };
 
+  let packLine;
+  if (downloading) {
+    packLine = packStatus.total
+      ? `Downloading offline map · ${Math.floor((packStatus.done / packStatus.total) * 100)}% (${packStatus.done}/${packStatus.total} tiles)`
+      : 'Checking for offline map…';
+  } else if (packStatus.phase === 'error') {
+    packLine = packStatus.error;
+  } else if (pack?.complete) {
+    packLine = `Offline map ready · ${(pack.regions || []).filter((r) => r.id !== 'corridor').map((r) => r.name).join(', ') || 'service area'} · works without internet`;
+  } else if (pack) {
+    packLine = 'Offline map partially downloaded — resume to finish.';
+  } else {
+    packLine = canUseMapServer()
+      ? 'Offline map not downloaded yet. Download it on Wi-Fi before heading out.'
+      : 'Sign in to download the offline map.';
+  }
+
   return (
     <View>
-      <Text style={styles.title}>Outage map</Text>
-      <Text style={styles.subtitle}>Cached map area for the crew&apos;s last known location.</Text>
+      <Text style={styles.title}>{navJob ? 'Navigating to site' : 'Outage map'}</Text>
+      <Text style={styles.subtitle}>
+        {hasLocation
+          ? `Your position ${mapLocation.lat.toFixed(4)}, ${mapLocation.lon.toFixed(4)}`
+          : lastSyncedAt
+            ? `Job locations cached ${timeAgo(lastSyncedAt)}`
+            : 'Waiting for GPS fix…'}
+      </Text>
 
       <View style={styles.offlineBadgeRow}>
-        <View style={[styles.offlineDot, lastSyncedAt ? styles.offlineDotOn : styles.offlineDotOff]} />
-        <Text style={styles.offlineBadgeText}>
-          {hasLocation
-            ? `Offline map ready · crew position ${mapLocation.lat.toFixed(4)}, ${mapLocation.lon.toFixed(4)}`
-            : lastSyncedAt
-              ? `Offline map ready · locations cached ${timeAgo(lastSyncedAt)}`
-              : 'No cached location yet — connect and enable GPS once'}
-        </Text>
+        <View style={[styles.offlineDot, pack?.complete ? styles.offlineDotOn : styles.offlineDotOff]} />
+        <Text style={styles.offlineBadgeText}>{packLine}</Text>
       </View>
+      {downloading && packStatus.total > 0 && (
+        <View style={styles.packProgressTrack}>
+          <View style={[styles.packProgressFill, { width: `${(packStatus.done / packStatus.total) * 100}%` }]} />
+        </View>
+      )}
+      {!pack?.complete && canDownload && (
+        <Pressable style={styles.routeAllBtn} onPress={startDownload}>
+          <Text style={styles.routeAllBtnText}>
+            {pack ? 'Resume offline map download' : 'Download offline map (Dehradun · Rishikesh · Haridwar)'}
+          </Text>
+        </Pressable>
+      )}
+      {downloading && (
+        <Pressable style={[styles.mapControlButton, styles.packPauseBtn]} onPress={cancelPackDownload}>
+          <Text style={styles.mapControlText}>Pause download</Text>
+        </Pressable>
+      )}
 
-      {jobs.length > 1 && (
+      {pack?.complete && !pack.roadsUri && canDownload && (
+        <Pressable style={styles.routeAllBtn} onPress={startDownload}>
+          <Text style={styles.routeAllBtnText}>Download offline road directions</Text>
+        </Pressable>
+      )}
+
+      {!navJob && jobs.length > 1 && (
         <Pressable style={styles.routeAllBtn} disabled={routing} onPress={startMultiJobRoute}>
           <Text style={styles.routeAllBtnText}>
             {routing ? 'Opening route…' : `Route all ${jobs.length} jobs (turn-by-turn)`}
@@ -1189,56 +1530,98 @@ function MapScreen({ jobs, selectedJobId, onSelect, crew }) {
       )}
 
       <View style={styles.mapPanel}>
-        <View style={styles.mapGrid}>
-          <View style={styles.mapRoadOne} />
-          <View style={styles.mapRoadTwo} />
-          <View style={styles.mapRiver} />
-          <View style={styles.mapCrewMarker}>
-            <Text style={styles.mapCrewMarkerText}>●</Text>
-          </View>
-          {jobs.map((job, index) => (
-            <Pressable
-              key={job.id}
-              style={[
-                styles.mapJobMarker,
-                { top: `${markerPositions[index].top}%`, left: `${markerPositions[index].left}%` },
-                selectedJobId === job.id && styles.mapJobMarkerSelected,
-              ]}
-              onPress={() => onSelect(job.id)}
-              accessibilityLabel={`Focus ${job.title}`}
-            >
-              <Text style={styles.mapMarkerText}>!</Text>
-            </Pressable>
-          ))}
-          <View style={styles.mapZoomControls}>
-            <Pressable style={styles.mapZoomButton} onPress={() => setZoom((value) => Math.min(2, value + 0.25))}>
-              <Text style={styles.mapZoomText}>+</Text>
-            </Pressable>
-            <Pressable style={styles.mapZoomButton} onPress={() => setZoom((value) => Math.max(0.5, value - 0.25))}>
-              <Text style={styles.mapZoomText}>−</Text>
-            </Pressable>
-          </View>
-        </View>
-        <Text style={styles.mapLegend}>● Crew  • Incidents  • Selected task · Works without internet</Text>
+        <OfflineMap
+          ref={mapRef}
+          pack={pack}
+          crew={mapLocation}
+          jobs={mapJobs}
+          route={route}
+          onSelectJob={onSelect}
+          onUserGesture={() => setFollowing(false)}
+          onRouteProgress={setRouteLeft}
+        />
+        <Text style={styles.mapLegend}>
+          ● You  ● {navJob ? (route ? 'Site  ━ Road route' : 'Site  - - Straight line to site') : 'Incidents (by severity)'}{pack?.complete && pack.totalBytes ? ` · ${formatMb(pack.totalBytes)} on device` : ''}
+        </Text>
       </View>
       <View style={styles.mapControls}>
-        <Pressable style={styles.mapControlButton} onPress={setCrewCenter} disabled={!hasLocation}>
-          <Text style={[styles.mapControlText, !hasLocation && styles.mapControlDisabled]}>Center on crew</Text>
+        <Pressable
+          style={styles.mapControlButton}
+          onPress={() => {
+            setFollowing(false);
+            mapRef.current?.fit('crew');
+          }}
+          disabled={!hasLocation}
+        >
+          <Text style={[styles.mapControlText, !hasLocation && styles.mapControlDisabled]}>Center on me</Text>
         </Pressable>
-        <Pressable style={styles.mapControlButton} onPress={fitJobs} disabled={!jobsWithCoordinates.length}>
-          <Text style={[styles.mapControlText, !jobsWithCoordinates.length && styles.mapControlDisabled]}>Fit jobs</Text>
-        </Pressable>
+        {navJob ? (
+          <Pressable style={styles.mapControlButton} onPress={showRoute}>
+            <Text style={styles.mapControlText}>{following ? 'Following route' : 'Show route'}</Text>
+          </Pressable>
+        ) : (
+          <Pressable style={styles.mapControlButton} onPress={() => mapRef.current?.fit('jobs')} disabled={!mapJobs.length}>
+            <Text style={[styles.mapControlText, !mapJobs.length && styles.mapControlDisabled]}>Fit jobs</Text>
+          </Pressable>
+        )}
       </View>
       {selectedJob ? (
         <View style={styles.mapSelectedCard}>
           <Text style={styles.mapSelectedTitle}>{selectedJob.title}</Text>
           <Text style={styles.mapSelectedMeta}>{selectedJob.id} · {selectedJob.address}</Text>
-          <Pressable style={styles.primaryBtn} onPress={() => navigateTo(selectedJob.address)}>
-            <Text style={styles.primaryBtnText}>Start turn-by-turn navigation</Text>
-          </Pressable>
+          {arrived ? (
+            <Text style={[styles.mapGuideText, styles.mapArrivedText]}>You have reached the site</Text>
+          ) : route ? (
+            <Text style={styles.mapGuideText}>
+              {formatDistance(roadLeft)} to go · about {formatDuration(route.meters > 0 ? (route.seconds * roadLeft) / route.meters : route.seconds)}
+              {route.source === 'device' ? ' · offline directions' : ''}
+            </Text>
+          ) : guide ? (
+            <Text style={styles.mapGuideText}>
+              {guide.label} {guide.direction} of you (straight line{hasLocation && !pack?.roadsUri && !online ? ' — download road directions for a road route' : ''})
+            </Text>
+          ) : null}
+          {navJob ? (
+            <>
+              {!online && (
+                <View style={styles.mapOfflineNote}>
+                  <Text style={styles.mapOfflineNoteTitle}>No internet — the offline map still works</Text>
+                  <Text style={styles.mapOfflineNoteText}>Your position keeps updating without signal.</Text>
+                </View>
+              )}
+              <Pressable style={styles.secondaryBtn} onPress={() => navigateTo(selectedJob.address, selectedJob.coordinates)}>
+                <Text style={styles.secondaryBtnText}>
+                  {online ? 'Turn-by-turn in Google Maps' : 'Try Google Maps (works if this area is downloaded offline)'}
+                </Text>
+              </Pressable>
+              <Pressable style={styles.secondaryBtn} onPress={onExitNav}>
+                <Text style={styles.secondaryBtnText}>Show all incidents</Text>
+              </Pressable>
+            </>
+          ) : online ? (
+            <Pressable style={styles.primaryBtn} onPress={() => navigateTo(selectedJob.address, selectedJob.coordinates)}>
+              <Text style={styles.primaryBtnText}>Start turn-by-turn navigation</Text>
+            </Pressable>
+          ) : (
+            <>
+              <View style={styles.mapOfflineNote}>
+                <Text style={styles.mapOfflineNoteTitle}>No internet — follow the offline map</Text>
+                <Text style={styles.mapOfflineNoteText}>
+                  {hasLocation
+                    ? route
+                      ? 'Follow the blue road route to the site; your position keeps updating without signal.'
+                      : 'The dashed line points from you to the site. Use the streets on the map to get there; your position keeps updating without signal.'
+                    : 'Waiting for a GPS fix to show the way from you to the site.'}
+                </Text>
+              </View>
+              <Pressable style={styles.secondaryBtn} onPress={() => navigateTo(selectedJob.address, selectedJob.coordinates)}>
+                <Text style={styles.secondaryBtnText}>Try Google Maps (works if this area is downloaded offline)</Text>
+              </Pressable>
+            </>
+          )}
         </View>
       ) : (
-        <Text style={styles.mapEmpty}>Select a task marker to view its site.</Text>
+        <Text style={styles.mapEmpty}>Tap an incident marker to view its site.</Text>
       )}
     </View>
   );
@@ -1277,9 +1660,9 @@ function ProfileScreen({ crew, jobs, onLogout }) {
 
 const styles = StyleSheet.create({
   loginSafe: { flex: 1, backgroundColor: '#10201d' },
-  login: { flex: 1, paddingHorizontal: 24, paddingTop: 64 },
+  login: { flexGrow: 1, paddingHorizontal: 24, paddingTop: 48 },
   loginKicker: { color: '#27c7b2', fontSize: 13, fontWeight: '800', letterSpacing: 2 },
-  loginTitle: { color: '#fff', fontSize: 32, fontWeight: '800', marginTop: 70 },
+  loginTitle: { color: '#fff', fontSize: 32, fontWeight: '800', marginTop: 40 },
   loginSubtitle: { color: '#a8c0ba', fontSize: 14, marginTop: 8, marginBottom: 36 },
   label: { color: '#d8e7e2', fontSize: 11, fontWeight: '800', letterSpacing: 1, marginTop: 16, marginBottom: 8 },
   error: { color: '#ffb5a8', fontSize: 12, marginTop: 10 },
@@ -1298,25 +1681,40 @@ const styles = StyleSheet.create({
   demoLabel: { color: '#7f9b94', fontSize: 10, fontWeight: '800', letterSpacing: 1 },
   demoText: { color: '#d8e7e2', fontSize: 13, fontWeight: '700', marginTop: 8 },
   demoPassword: { color: '#8eaaa2', fontSize: 12, marginTop: 4 },
+  serverRow: { flexDirection: 'row', gap: 8, marginTop: 8 },
+  serverInput: { flex: 1, color: '#fff', fontSize: 14, borderWidth: 1, borderColor: '#2f4a44', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 8 },
+  serverBtn: { backgroundColor: '#2f4a44', borderRadius: 8, paddingHorizontal: 14, justifyContent: 'center' },
+  serverBtnText: { color: '#d8e7e2', fontSize: 13, fontWeight: '800' },
   loginFooter: { color: '#77938c', fontSize: 11, textAlign: 'center', marginTop: 'auto', paddingBottom: 24 },
   safe: { flex: 1, backgroundColor: '#f2f5f9' },
   center: { alignItems: 'center', justifyContent: 'center' },
-  header: { backgroundColor: '#173355', paddingHorizontal: 22, paddingVertical: 20, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  historyControls: { flexDirection: 'row', gap: 6, marginLeft: 10 },
+  header: { backgroundColor: '#173355', paddingHorizontal: 18, paddingTop: 16, paddingBottom: 14, borderBottomLeftRadius: 18, borderBottomRightRadius: 18 },
+  headerTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
+  headerIdentity: { flex: 1, marginRight: 12 },
+  actionBar: { flexDirection: 'row', gap: 8, marginTop: 14 },
+  action: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', height: 36, paddingHorizontal: 6, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.08)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)' },
+  actionOn: { backgroundColor: 'rgba(39,199,178,0.16)', borderColor: 'rgba(39,199,178,0.45)' },
+  actionDanger: { backgroundColor: 'rgba(240,110,98,0.12)', borderColor: 'rgba(240,110,98,0.4)' },
+  actionPressed: { opacity: 0.7 },
+  actionDisabled: { opacity: 0.5 },
+  actionDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: '#6f8aa8', marginRight: 6 },
+  actionDotOn: { backgroundColor: '#27c7b2' },
+  actionText: { color: '#e3eef9', fontSize: 12, fontWeight: '700', flexShrink: 1 },
+  actionTextDanger: { color: '#ffb3ab' },
+  actionCount: { minWidth: 17, height: 17, borderRadius: 9, paddingHorizontal: 4, marginLeft: 5, backgroundColor: '#e08a1e', alignItems: 'center', justifyContent: 'center' },
+  actionCountText: { color: '#fff', fontSize: 10, fontWeight: '800' },
+  historyControls: { flexDirection: 'row', gap: 6 },
   historyButton: { width: 30, height: 30, borderRadius: 8, backgroundColor: '#245675', alignItems: 'center', justifyContent: 'center' },
   historyButtonOff: { opacity: 0.35 },
   historyButtonText: { color: '#b9fff3', fontSize: 25, lineHeight: 25, fontWeight: '500' },
-  headerRight: { alignItems: 'flex-end', gap: 8 },
+  headerRight: { alignItems: 'flex-end', gap: 6 },
   demoBadge: { backgroundColor: '#5a3fa6', borderRadius: 12, paddingHorizontal: 9, paddingVertical: 4 },
   demoBadgeText: { color: '#fff', fontSize: 10, fontWeight: '800', letterSpacing: 0.5 },
   kicker: { color: '#27c7b2', fontSize: 12, fontWeight: '800', letterSpacing: 2 },
   crewName: { color: '#fff', fontSize: 21, fontWeight: '700', marginTop: 4 },
   role: { color: '#a7bdd6', fontSize: 12, marginTop: 3 },
-  online: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#245675', borderRadius: 18, paddingHorizontal: 11, paddingVertical: 7 },
   pendingBadge: { backgroundColor: '#e08a1e', borderRadius: 12, paddingHorizontal: 9, paddingVertical: 4 },
   pendingText: { color: '#fff', fontSize: 10, fontWeight: '800' },
-  dot: { width: 7, height: 7, borderRadius: 4, backgroundColor: '#27c7b2', marginRight: 6 },
-  onlineText: { color: '#b9fff3', fontSize: 12, fontWeight: '700' },
   content: { padding: 20, paddingBottom: 100 },
   title: { color: '#0f1b2d', fontSize: 26, fontWeight: '800' },
   subtitle: { color: '#7c8da3', fontSize: 14, marginTop: 5, marginBottom: 20 },
@@ -1358,6 +1756,8 @@ const styles = StyleSheet.create({
   detailId: { color: '#fff', fontWeight: '800' },
   detailContent: { padding: 20, gap: 14, paddingBottom: 80 },
   detailStats: { flexDirection: 'row', justifyContent: 'space-between', backgroundColor: '#fff', borderRadius: 12, padding: 14, borderWidth: 1, borderColor: '#e6ecf3' },
+  checklistLock: { backgroundColor: '#fff7ea', borderRadius: 10, borderWidth: 1, borderColor: '#f2d9a8', padding: 12 },
+  checklistLockText: { color: '#8a6a33', fontSize: 12, fontWeight: '600', textAlign: 'center' },
   secondaryBtn: { backgroundColor: '#fff', borderWidth: 1, borderColor: '#1F3864', borderRadius: 10, padding: 12, alignItems: 'center' },
   secondaryBtnText: { color: '#1F3864', fontWeight: '700' },
   messagesPanel: { backgroundColor: '#eef5fb', borderRadius: 12, padding: 13, gap: 9 },
@@ -1387,30 +1787,22 @@ const styles = StyleSheet.create({
   routeAllBtn: { backgroundColor: '#1F3864', borderRadius: 10, padding: 13, alignItems: 'center', marginBottom: 16 },
   routeAllBtnText: { color: '#fff', fontWeight: '800', fontSize: 13 },
   mapPanel: { backgroundColor: '#fff', borderRadius: 12, padding: 12, borderWidth: 1, borderColor: '#e6ecf3' },
-  mapGrid: { height: 300, overflow: 'hidden', borderRadius: 9, backgroundColor: '#dcebe3', position: 'relative' },
-  mapRoadOne: { position: 'absolute', width: '130%', height: 12, top: '28%', left: '-10%', backgroundColor: 'rgba(255,255,255,.82)', transform: [{ rotate: '-25deg' }] },
-  mapRoadTwo: { position: 'absolute', width: '130%', height: 10, top: '64%', left: '-10%', backgroundColor: 'rgba(255,255,255,.82)', transform: [{ rotate: '19deg' }] },
-  mapRiver: { position: 'absolute', height: '130%', width: 28, top: '-10%', right: '25%', backgroundColor: '#acd6d5', transform: [{ rotate: '17deg' }], opacity: 0.8 },
-  mapCrewMarker: { position: 'absolute', top: '50%', left: '50%', width: 30, height: 30, borderRadius: 15, backgroundColor: '#0e9f8e', alignItems: 'center', justifyContent: 'center', transform: [{ translateX: -15 }, { translateY: -15 }] },
-  mapCrewMarkerText: { color: '#fff', fontSize: 18, lineHeight: 20 },
-  mapJobMarker: { position: 'absolute', width: 30, height: 30, borderRadius: 15, backgroundColor: '#d13d2f', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#fff' },
-  mapMarkerText: { color: '#fff', fontSize: 16, fontWeight: '800' },
-  mapMarker0: { top: '20%', left: '20%' },
-  mapMarker1: { top: '40%', right: '18%', backgroundColor: '#e08a1e' },
-  mapMarker2: { bottom: '18%', left: '38%', backgroundColor: '#2f6fd6' },
-  mapMarker3: { bottom: '10%', right: '28%', backgroundColor: '#2a9d5c' },
-  mapJobMarkerSelected: { transform: [{ scale: 1.25 }], borderColor: '#173355' },
-  mapZoomControls: { position: 'absolute', top: 10, right: 10, gap: 6 },
-  mapZoomButton: { width: 34, height: 34, borderRadius: 8, backgroundColor: 'rgba(255,255,255,.94)', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#d5e0eb' },
-  mapZoomText: { color: '#173355', fontSize: 22, fontWeight: '700', lineHeight: 24 },
+  packProgressTrack: { height: 6, borderRadius: 3, backgroundColor: '#e6ecf3', overflow: 'hidden', marginTop: -6, marginBottom: 12 },
+  packProgressFill: { height: 6, borderRadius: 3, backgroundColor: '#0e9f8e' },
   mapLegend: { color: '#7c8da3', fontSize: 11, marginTop: 10 },
   mapControls: { flexDirection: 'row', gap: 9, marginTop: 10 },
   mapControlButton: { flex: 1, backgroundColor: '#fff', borderRadius: 9, borderWidth: 1, borderColor: '#d5e0eb', paddingVertical: 10, alignItems: 'center' },
   mapControlText: { color: '#1F3864', fontSize: 12, fontWeight: '800' },
   mapControlDisabled: { color: '#aab6c4' },
+  packPauseBtn: { flex: 0, marginBottom: 16 },
   mapSelectedCard: { backgroundColor: '#fff', borderRadius: 12, padding: 14, marginTop: 12, borderWidth: 1, borderColor: '#b9dcd3', gap: 8 },
   mapSelectedTitle: { color: '#173355', fontSize: 15, fontWeight: '800' },
   mapSelectedMeta: { color: '#7c8da3', fontSize: 12 },
+  mapGuideText: { color: '#173355', fontSize: 14, fontWeight: '700' },
+  mapArrivedText: { color: '#0e9f8e' },
+  mapOfflineNote: { backgroundColor: '#fff7e6', borderRadius: 9, borderWidth: 1, borderColor: '#f0c36d', padding: 10, gap: 3 },
+  mapOfflineNoteTitle: { color: '#8a5a00', fontSize: 13, fontWeight: '800' },
+  mapOfflineNoteText: { color: '#6b5a3a', fontSize: 12 },
   mapEmpty: { color: '#7c8da3', fontSize: 13, marginTop: 16, textAlign: 'center' },
   profilePanel: { flexDirection: 'row', alignItems: 'center', gap: 13, backgroundColor: '#fff', borderRadius: 13, padding: 16, borderWidth: 1, borderColor: '#e6ecf3' },
   profileAvatar: { width: 58, height: 58, borderRadius: 18, backgroundColor: '#173355', alignItems: 'center', justifyContent: 'center' },

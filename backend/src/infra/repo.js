@@ -130,6 +130,36 @@ export const repo = {
     await db.none(`UPDATE crews SET ${setClause(patch)} WHERE id=$/id/`, { ...patch, id });
     return repo.crew(id);
   },
+  // Bulk-insert GPS points uploaded by the crew app. Duplicate ids (a retried
+  // upload whose earlier response was lost) are silently skipped.
+  addCrewLocations: async (crewId, points) => {
+    if (!points.length) return 0;
+    const { helpers } = db.$config.pgp;
+    const cs = new helpers.ColumnSet(
+      ['id', 'crew_id', 'lat', 'lon', 'accuracy', 'speed', 'heading', 'recorded_at'],
+      { table: 'crew_locations' }
+    );
+    const rows = points.map((p) => ({ ...p, crew_id: crewId }));
+    const result = await db.result(`${helpers.insert(rows, cs)} ON CONFLICT (id) DO NOTHING`);
+    return result.rowCount;
+  },
+  // Move the crew's live position only if this fix is newer than the one we
+  // already have — an offline backlog flushed late must not rewind it.
+  updateCrewLivePosition: async (crewId, { lat, lon, recorded_at }) => {
+    const moved = await db.result(
+      `UPDATE crews SET lat=$/lat/, lon=$/lon/, location_updated_at=$/recorded_at/
+       WHERE id=$/crewId/ AND (location_updated_at IS NULL OR location_updated_at < $/recorded_at/)`,
+      { crewId, lat, lon, recorded_at }
+    );
+    return moved.rowCount > 0;
+  },
+  crewTrack: (crewId, from, to, limit = 2000) =>
+    db.any(
+      `SELECT lat, lon, accuracy, speed, heading, recorded_at FROM crew_locations
+       WHERE crew_id=$/crewId/ AND recorded_at BETWEEN $/from/ AND $/to/
+       ORDER BY recorded_at ASC LIMIT $/limit/`,
+      { crewId, from, to, limit }
+    ),
   // Available crews nearest an incident, using real PostGIS distance -- replaces
   // picking "any available crew" with a distance-ranked list.
   nearestAvailableCrews: (incidentId, limit = 6) =>
@@ -218,22 +248,27 @@ export const repo = {
   },
   auditLog: () => db.any('SELECT * FROM audit_log ORDER BY ts DESC LIMIT 50'),
 
-  addJobPhoto: async (jobId, dataUrl, lat, lon, note, technicianId, metadata) => {
+  // `image` is the already-compressed photo ({ buffer, contentType, width, height });
+  // the returned row is metadata only, without the image bytes.
+  addJobPhoto: async (jobId, { image, originalContentType, originalBytes }, lat, lon, note, technicianId, metadata) => {
     const ph = {
       id: 'PH' + nanoid(8),
       job_id: jobId,
-      data_url: dataUrl,
+      content_type: image.contentType,
+      original_content_type: originalContentType ?? null,
+      width: image.width,
+      height: image.height,
       lat: lat ?? null,
       lon: lon ?? null,
       note: note ?? null,
       ts: new Date().toISOString(),
       technician_id: technicianId ?? null,
-      metadata: JSON.stringify(metadata ?? {}),
+      metadata: { ...(metadata ?? {}), originalBytes, storedBytes: image.buffer.length },
     };
     await db.none(
-      `INSERT INTO job_photos (id,job_id,data_url,lat,lon,note,ts,technician_id,metadata)
-       VALUES ($/id/,$/job_id/,$/data_url/,$/lat/,$/lon/,$/note/,$/ts/,$/technician_id/,$/metadata/::jsonb)`,
-      ph
+      `INSERT INTO job_photos (id,job_id,image_data,content_type,original_content_type,width,height,lat,lon,note,ts,technician_id,metadata)
+       VALUES ($/id/,$/job_id/,$/image_data/,$/content_type/,$/original_content_type/,$/width/,$/height/,$/lat/,$/lon/,$/note/,$/ts/,$/technician_id/,$/metadata:json/::jsonb)`,
+      { ...ph, image_data: image.buffer }
     );
     return ph;
   },

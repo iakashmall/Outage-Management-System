@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { repo } from '../infra/repo.js';
@@ -8,10 +8,12 @@ import { bus, TOPICS } from '../domain/bus.js';
 import { canTransition, nextStates, LABELS } from '../domain/lifecycle.js';
 import { computeIndices, computeMTTR, computeSLACompliance, computeCrewProductivity, computeOutageFrequency } from '../domain/indices.js';
 import { buildCsv, buildPdf } from '../domain/reports.js';
+import { MAX_LOCATION_BATCH, parseLocationBatch, newestLivePoint, parseTileParams } from '../domain/locations.js';
+import { createRouter } from '../domain/roadRouter.js';
 import { sendReportNow } from '../realtime/scheduledReports.js';
 import { resolve as resolveAsset, substations as netSubstations } from '../infra/geo.js';
 import { cacheGet, cacheSet, cacheDel } from '../infra/redis.js';
-import sharp from 'sharp';
+import { decodePhotoDataUrl, compressPhoto } from '../domain/photos.js';
 
 export const api = Router();
 
@@ -530,6 +532,168 @@ api.get('/mobile/crews/:id', async (req, res) => {
   res.json(crew);
 });
 
+// Continuous background location ping from the crew's phone. Persists the
+// crew's live lat/lon (the crews.geog column auto-updates via DB trigger,
+// which is what nearestAvailableCrews() and the dispatch map already read).
+api.post('/mobile/crews/:id/location', async (req, res) => {
+  // Coerce: the older mobile-native-fixed app may send numeric strings.
+  const lat = Number(req.body?.lat);
+  const lon = Number(req.body?.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return res.status(400).json({ error: 'lat/lon required' });
+  }
+  const crew = await repo.crew(req.params.id);
+  if (!crew) return res.status(404).json({ error: 'not found' });
+  const updated = await repo.updateCrew(req.params.id, { lat, lon, location_updated_at: new Date().toISOString() });
+  bus.publish(TOPICS.CREW_UPDATED, updated);
+  res.json({ ok: true, crew: updated });
+});
+
+// Batched, offline-tolerant location upload. The phone records every GPS
+// fix into a local queue (even with no network) and flushes it here in
+// chunks once connectivity returns. Each point carries a client-generated
+// id, so a retried batch is idempotent. The response acks every id the
+// server is done with (stored, duplicate, or rejected as invalid) so the
+// client can delete exactly those and never retries garbage forever.
+// Validation rules live in domain/locations.js (shared with the map test server).
+
+// A crew token may only report its own position. Tokens without a crew_id
+// claim (demo accounts mapped by username) fall back to the route id.
+const ownsCrew = (req, crewId) => !req.user?.crewId || req.user.crewId === crewId;
+
+api.post('/mobile/crews/:id/locations', async (req, res) => {
+  const crewId = req.params.id;
+  if (!ownsCrew(req, crewId)) return res.status(403).json({ error: 'cannot report location for another crew' });
+  const input = req.body?.points;
+  if (!Array.isArray(input) || !input.length) return res.status(400).json({ error: 'points[] required' });
+  if (input.length > MAX_LOCATION_BATCH) return res.status(413).json({ error: `max ${MAX_LOCATION_BATCH} points per batch` });
+
+  const crew = await repo.crew(crewId);
+  if (!crew) return res.status(404).json({ error: 'not found' });
+
+  const { valid, ack } = parseLocationBatch(input);
+  const inserted = await repo.addCrewLocations(crewId, valid);
+
+  const newest = newestLivePoint(valid);
+  if (newest && (await repo.updateCrewLivePosition(crewId, newest))) {
+    bus.publish(TOPICS.CREW_UPDATED, await repo.crew(crewId));
+  }
+
+  res.json({ ack, inserted, rejected: input.length - valid.length });
+});
+
+// The crew app reports whether continuous tracking is running, so dispatch
+// knows when a crew on duty is not being tracked (and why) instead of just
+// seeing their position go stale. Signing out is off duty, not an alert.
+const TRACKING_OFF_REASONS = {
+  permission_denied: 'location permission was denied',
+  background_permission_denied: 'background location ("Allow all the time") was denied',
+  turned_off: 'the crew turned tracking off',
+  signed_out: 'the crew signed out',
+};
+
+api.post('/mobile/crews/:id/tracking', async (req, res) => {
+  const crewId = req.params.id;
+  if (!ownsCrew(req, crewId)) return res.status(403).json({ error: 'cannot report tracking for another crew' });
+  const { state, reason } = req.body || {};
+  if (state !== 'on' && state !== 'off') return res.status(400).json({ error: 'state must be "on" or "off"' });
+  if (state === 'off' && !TRACKING_OFF_REASONS[reason]) {
+    return res.status(400).json({ error: `reason must be one of: ${Object.keys(TRACKING_OFF_REASONS).join(', ')}` });
+  }
+  const crew = await repo.crew(crewId);
+  if (!crew) return res.status(404).json({ error: 'not found' });
+
+  const trackingReason = state === 'off' ? reason : null;
+  // The app re-reports on every start; only a real change notifies dispatch.
+  if (crew.tracking_state === state && crew.tracking_reason === trackingReason) return res.json({ changed: false });
+
+  const ts = new Date().toISOString();
+  const updated = await repo.updateCrew(crewId, { tracking_state: state, tracking_reason: trackingReason, tracking_changed_at: ts });
+  bus.publish(TOPICS.CREW_TRACKING_CHANGED, {
+    crewId,
+    crewName: crew.name,
+    state,
+    reason: trackingReason,
+    reasonText: trackingReason ? TRACKING_OFF_REASONS[trackingReason] : null,
+    alert: state === 'off' && trackingReason !== 'signed_out',
+    ts,
+  });
+  bus.publish(TOPICS.CREW_UPDATED, updated);
+  res.json({ changed: true });
+});
+
+// Breadcrumb trail for dispatch, e.g. /mobile/crews/C003/track?from=...&to=...
+api.get('/mobile/crews/:id/track', async (req, res) => {
+  const to = req.query.to ? new Date(req.query.to) : new Date();
+  const from = req.query.from ? new Date(req.query.from) : new Date(to.getTime() - 12 * 3600 * 1000);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return res.status(400).json({ error: 'invalid from/to' });
+  res.json(await repo.crewTrack(req.params.id, from.toISOString(), to.toISOString()));
+});
+
+// ---------- offline map tile pack ----------
+// Raster tiles for the crew app's offline map, pre-seeded once on the server
+// by backend/scripts/fetch-tiles.mjs. Served behind the normal auth so this
+// never becomes an open public tile server; phones download the pack from
+// here (not from a third-party tile CDN) and then render fully offline.
+const TILES_DIR = process.env.TILES_DIR || join(_dir, '..', '..', 'tiles');
+
+api.get('/tiles/manifest', (req, res) => {
+  res.set('Cache-Control', 'no-cache');
+  res.sendFile('manifest.json', { root: TILES_DIR }, (err) => {
+    if (err && !res.headersSent) res.status(404).json({ error: 'offline map pack has not been generated on the server' });
+  });
+});
+
+// Road graph for offline routing on the phone (scripts/build-road-graph.mjs).
+api.get('/tiles/roads.json', (req, res) => {
+  res.sendFile('roads.json', { root: TILES_DIR, maxAge: '1d' }, (err) => {
+    if (err && !res.headersSent) res.status(404).json({ error: 'road graph has not been generated on the server' });
+  });
+});
+
+// Road route between two points, e.g. /route?from=30.3243,78.0418&to=30.3476,78.0808
+// Same graph and code the phone uses offline, so both give the same route.
+// Reloads the graph when roads.json is regenerated.
+let roadRouter = null;
+let roadRouterMtime = 0;
+function getRoadRouter() {
+  const file = join(TILES_DIR, 'roads.json');
+  let mtime;
+  try {
+    mtime = statSync(file).mtimeMs;
+  } catch {
+    return null;
+  }
+  if (!roadRouter || mtime !== roadRouterMtime) {
+    roadRouter = createRouter(JSON.parse(readFileSync(file, 'utf8')));
+    roadRouterMtime = mtime;
+  }
+  return roadRouter;
+}
+const parsePoint = (value) => {
+  const [lat, lon] = String(value ?? '').split(',').map(Number);
+  return Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 ? { lat, lon } : null;
+};
+
+api.get('/route', (req, res) => {
+  const from = parsePoint(req.query.from);
+  const to = parsePoint(req.query.to);
+  if (!from || !to) return res.status(400).json({ error: 'from and to must be "lat,lon"' });
+  const router = getRoadRouter();
+  if (!router) return res.status(503).json({ error: 'road graph has not been generated on the server' });
+  const route = router.route(from, to);
+  if (!route) return res.status(404).json({ error: 'no road route between these points (outside the mapped area?)' });
+  res.json({ ...route, source: 'server' });
+});
+
+api.get('/tiles/:z/:x/:y.:ext(png|webp)', (req, res) => {
+  const tile = parseTileParams(req.params);
+  if (!tile) return res.status(400).json({ error: 'invalid tile' });
+  res.sendFile(`${tile.z}/${tile.x}/${tile.y}.${req.params.ext}`, { root: TILES_DIR, maxAge: '1d', dotfiles: 'deny' }, (err) => {
+    if (err && !res.headersSent) res.status(404).end();
+  });
+});
+
 api.get('/mobile/crews/:id/messages', async (req, res) => {
   const crew = await repo.crew(req.params.id);
   if (!crew) return res.status(404).json({ error: 'not found' });
@@ -540,17 +704,6 @@ api.get('/mobile/jobs/:id/messages', async (req, res) => {
   const job = await repo.job(req.params.id);
   if (!job) return res.status(404).json({ error: 'not found' });
   res.json(job.incident_id ? await repo.messages(job.incident_id) : []);
-});
-
-// Background location ping (src/lib/backgroundLocation.js in mobile-native-fixed,
-// sent every ~30s/50m while a crew member has tracking enabled).
-api.post('/mobile/crews/:id/location', async (req, res) => {
-  const { lat, lon } = req.body || {};
-  if (!Number.isFinite(Number(lat)) || !Number.isFinite(Number(lon))) {
-    return res.status(400).json({ error: 'latitude and longitude are required' });
-  }
-  const location = await repo.addCrewLocation(req.params.id, Number(lat), Number(lon));
-  res.status(201).json(location);
 });
 
 api.get('/mobile/jobs/:id/history', async (req, res) => res.json(await repo.jobUpdates(req.params.id)));
@@ -585,12 +738,6 @@ api.get('/mobile/jobs/:id/assets/scans', async (req, res) => {
   res.json(await repo.assetScansForJob(job.id));
 });
 
-function decodePhotoDataUrl(dataUrl) {
-  const match = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl || '');
-  if (!match) throw new Error('Expected a JPEG, PNG, or WebP data URL');
-  return { contentType: match[1], buffer: Buffer.from(match[2], 'base64') };
-}
-
 // Compress every incoming photo before PostgreSQL storage.
 api.post('/mobile/jobs/:id/photos', async (req, res) => {
   const job = await repo.job(req.params.id);
@@ -599,9 +746,17 @@ api.post('/mobile/jobs/:id/photos', async (req, res) => {
   if (!dataUrl || typeof dataUrl !== 'string') {
     return res.status(400).json({ error: 'dataUrl required' });
   }
-  const photo = await repo.addJobPhoto(req.params.id, dataUrl, lat, lon, note, technicianId, metadata);
-  const { data_url, ...meta } = photo;
-  res.status(201).json(meta);
+  let original, image;
+  try {
+    original = decodePhotoDataUrl(dataUrl);
+    image = await compressPhoto(original.buffer);
+  } catch (e) {
+    return res.status(400).json({ error: `invalid image: ${e.message}` });
+  }
+  const photo = await repo.addJobPhoto(req.params.id, {
+    image, originalContentType: original.contentType, originalBytes: original.buffer.length,
+  }, lat, lon, note, technicianId, metadata);
+  res.status(201).json(photo);
 });
 
 // List photo metadata for a job
@@ -613,7 +768,10 @@ api.get('/mobile/jobs/:id/photos', async (req, res) => {
 api.get('/mobile/photos/:photoId', async (req, res) => {
   const row = await repo.jobPhotoById(req.params.photoId);
   if (!row) return res.status(404).json({ error: 'not found' });
-  res.json(row);
+  const { image_data, ...photo } = row;
+  // Compressed rows keep only the bytes; rebuild the data URL the dashboard expects.
+  if (image_data) photo.data_url = `data:${row.content_type};base64,${image_data.toString('base64')}`;
+  res.json(photo);
 });
 
 api.patch('/mobile/jobs/:id/status', async (req, res) => {
