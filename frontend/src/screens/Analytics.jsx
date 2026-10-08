@@ -105,6 +105,12 @@ export default function Analytics() {
           );
         })}
       </div>
+      {ind?.planned && (
+        <div className="muted" style={{ fontSize: 12.5, margin: '-6px 0 16px' }}>
+          The indices above are unplanned interruptions only. Planned outages, reported separately:{' '}
+          <b>SAIDI {ind.planned.saidi} min</b> · SAIFI {ind.planned.saifi} · {ind.planned.customersInterrupted.toLocaleString()} customers in {ind.planned.count} planned outage{ind.planned.count === 1 ? '' : 's'}.
+        </div>
+      )}
 
       <div className="grid" style={{ gridTemplateColumns: '1.4fr 1fr' }}>
         <div className="card">

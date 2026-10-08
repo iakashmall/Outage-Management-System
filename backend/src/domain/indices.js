@@ -85,6 +85,36 @@ export function computeIndices(incidents, filters = {}) {
   };
 }
 
+// Planned interruptions (OMS-01), reported next to the unplanned indices
+// above and never mixed into them ("SAIDI segregates planned vs
+// unplanned"). rows: one per planned outage, from repo.plannedOutagesForIndices:
+//   { customers, zone, source, off_at, resolved_at }
+// off_at = when the first isolation step was confirmed (supply actually
+// switched off); an outage that never started switching (scheduled,
+// notified, cancelled) interrupted nobody and is not counted. Duration runs
+// to resolved_at, or to now while still off. The same date/zone/source
+// filters apply, on off_at.
+export function computePlannedIndices(rows, filters = {}) {
+  const served = customersServed();
+  const now = Date.now();
+  const started = (rows || []).filter((r) => r.off_at)
+    .map((r) => ({ ...r, opened_at: r.off_at }));
+  const scoped = filterIncidents(started, filters);
+  const customersInterrupted = scoped.reduce((s, r) => s + (r.customers || 0), 0);
+  const customerMinutes = scoped.reduce((s, r) => {
+    const end = r.resolved_at ? new Date(r.resolved_at).getTime() : now;
+    return s + Math.max(0, (end - new Date(r.off_at).getTime()) / 60000) * (r.customers || 0);
+  }, 0);
+  return {
+    saidi: +(customerMinutes / served).toFixed(2),
+    saifi: +(customersInterrupted / served).toFixed(3),
+    caidi: +(customersInterrupted ? customerMinutes / customersInterrupted : 0).toFixed(1),
+    customersInterrupted,
+    customerMinutes: Math.round(customerMinutes),
+    count: scoped.length,
+  };
+}
+
 // ============================================================
 // P7.1 — MTTR by zone (supervisor dashboard).
 // MTTR = Mean Time To Restore — average minutes from an incident opening
@@ -106,6 +136,10 @@ export function computeMTTR(incidents, events) {
   }
   const byZone = {};
   for (const i of incidents) {
+    // Planned outages (OMS-01) are not repairs: opened_at is when they were
+    // scheduled, often days before the work. They are reported separately
+    // (computePlannedIndices), never in MTTR.
+    if (i.type === 'Scheduled') continue;
     const resolvedTime = resolvedAt[i.id];
     if (!resolvedTime) continue; // only count incidents that actually reached Resolved
     const openedTime = new Date(i.opened_at).getTime();

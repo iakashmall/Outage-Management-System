@@ -245,6 +245,13 @@ export const repo = {
   activePlannedOutagesAtSubstation: (substation) => db.any(
     `SELECT po.id, po.incident_id, i.status FROM planned_outages po JOIN incidents i ON i.id = po.incident_id
      WHERE i.substation IS NOT DISTINCT FROM $1 AND i.status IN ('isolating','in_progress','restoring')`, [substation]),
+  // One row per planned outage for the separate planned indices: off_at is
+  // the first confirmed isolation step (domain/indices.js computePlannedIndices).
+  plannedOutagesForIndices: () => db.any(
+    `SELECT i.id, i.zone, i.source, i.customers, i.resolved_at, i.status,
+            (SELECT min(s.performed_at) FROM switching_steps s JOIN switching_plans sp ON sp.id = s.plan_id
+              WHERE sp.planned_outage_id = po.id AND s.phase = 'isolate' AND s.state = 'confirmed') AS off_at
+     FROM planned_outages po JOIN incidents i ON i.id = po.incident_id`),
   // Planned outages a complaint at this substation might belong to; the
   // window and feeder decision is domain/plannedComplaints.js.
   plannedOutagesForComplaint: (substation) => db.any(

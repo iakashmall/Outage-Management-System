@@ -20,6 +20,8 @@ import { publishRestoration } from './realtime/restoration.js';
 import { sendDueNotices } from './realtime/plannedNotices.js';
 import { startNotifier, transport, maskEmail } from './realtime/notifier.js';
 import { plannedComplaintDecision } from './domain/plannedComplaints.js';
+import { computeIndices, computePlannedIndices, computeMTTR } from './domain/indices.js';
+import { buildPdf } from './domain/reports.js';
 import { distTx, resolve as resolveAsset } from './infra/geo.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -528,6 +530,36 @@ const server = app.listen(PORT, async () => {
       before = await nInc();
       r = await complain('No Supply', dtA);
       check('once the planned outage is resolved, a complaint opens a fault incident again', !r.body.plannedOutage && r.body.incidentId !== pc.incident.id);
+    }
+
+    console.log('-- planned outages in the reliability indices (F9)');
+    {
+      const T = Date.parse('2026-10-01T04:00:00Z');
+      const p = computePlannedIndices([
+        { customers: 100, zone: 'A', source: 'PLANNED', off_at: new Date(T).toISOString(), resolved_at: new Date(T + 60 * 60000).toISOString() },
+        { customers: 999, zone: 'A', source: 'PLANNED', off_at: null, resolved_at: null }, // never switched off
+        { customers: 50, zone: 'B', source: 'PLANNED', off_at: new Date(T).toISOString(), resolved_at: new Date(T + 30 * 60000).toISOString() },
+      ]);
+      check('planned indices: only outages that switched off count, minutes from the first isolation step',
+        p.count === 2 && p.customersInterrupted === 150 && p.customerMinutes === 6000 + 1500, JSON.stringify(p));
+      check('planned indices honour the zone filter', computePlannedIndices([{ customers: 10, zone: 'A', off_at: new Date(T).toISOString(), resolved_at: new Date(T + 6e5).toISOString() }], { zone: 'B' }).count === 0);
+      const incs = await repo.incidents();
+      const mttrPlannedOnly = computeMTTR(incs.filter((i) => i.id === incId), await repo.allIncidentEvents());
+      check('MTTR leaves planned outages out (it was counting from the day they were scheduled)', mttrPlannedOnly.length === 0);
+      const withAll = computeIndices(incs), faultsOnly = computeIndices(incs.filter((i) => i.type !== 'Scheduled'));
+      check('unplanned SAIDI/SAIFI unchanged by planned outages', Math.abs(withAll.saidi - faultsOnly.saidi) < 0.011 && withAll.saifi === faultsOnly.saifi && withAll.incidentCount === faultsOnly.incidentCount);
+      const ind = (await call('op', 'GET', '/indicators')).body;
+      check('/indicators: existing keys plus an additive planned block', typeof ind.saidi === 'number' && typeof ind.maifi === 'number'
+        && ind.planned?.count >= 1 && ind.planned.customersInterrupted >= 120, JSON.stringify(ind.planned));
+      const csvRes = await fetch(`http://127.0.0.1:${PORT}/api/reports/reliability?format=csv`, { headers: { 'x-test-as': 'op' } });
+      const csvLines = (await csvRes.text()).split('\r\n');
+      check('CSV report: existing rows where they were, planned rows appended',
+        csvLines[0] === 'Metric,Value,Target,Standard' && csvLines[1].startsWith('SAIDI (min),') && csvLines.some((l) => l.startsWith('Planned SAIDI (min),'))
+        && csvLines.findIndex((l) => l.startsWith('Generated at')) < csvLines.findIndex((l) => l.startsWith('Planned SAIDI')));
+      const pdfRes = await fetch(`http://127.0.0.1:${PORT}/api/reports/reliability?format=pdf`, { headers: { 'x-test-as': 'op' } });
+      check('PDF report still builds', pdfRes.status === 200 && pdfRes.headers.get('content-type') === 'application/pdf');
+      const schedPdf = await buildPdf(computeIndices(incs), { generatedAt: new Date().toISOString(), filters: {} });
+      check('scheduled report path (no planned block) still builds its PDF', Buffer.isBuffer(schedPdf) && schedPdf.length > 500);
     }
 
     console.log('-- customer notices (F6)');

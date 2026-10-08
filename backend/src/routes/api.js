@@ -6,7 +6,7 @@ import { repo } from '../infra/repo.js';
 import { requireRole } from './auth.js';
 import { bus, TOPICS } from '../domain/bus.js';     
 import { canTransition, nextStates, LABELS } from '../domain/lifecycle.js';
-import { computeIndices, computeMTTR, computeSLACompliance, computeCrewProductivity, computeOutageFrequency } from '../domain/indices.js';
+import { computeIndices, computePlannedIndices, computeMTTR, computeSLACompliance, computeCrewProductivity, computeOutageFrequency } from '../domain/indices.js';
 import { buildCsv, buildPdf } from '../domain/reports.js';
 import { MAX_LOCATION_BATCH, parseLocationBatch, newestLivePoint, parseTileParams } from '../domain/locations.js';
 import { createRouter } from '../domain/roadRouter.js';
@@ -541,7 +541,8 @@ api.post('/complaints/simulate', async (req, res) => {
 api.get('/indicators', async (req, res) => {
   const cached = await cacheGet('indicators');
   if (cached) return res.json(cached);
-  const fresh = computeIndices(await repo.incidents());
+  // `planned` (OMS-01) is additive: planned outages, reported separately.
+  const fresh = { ...computeIndices(await repo.incidents()), planned: computePlannedIndices(await repo.plannedOutagesForIndices()) };
   await cacheSet('indicators', fresh, 15);
   res.json(fresh);
 });
@@ -610,7 +611,7 @@ api.get('/analytics/outage-frequency', async (req, res) => {
     const { from, to, zone, assetType, format = 'json' } = req.query;
     const filters = { from, to, zone, assetType };
     const incidents = await repo.incidents();
-    const indices = computeIndices(incidents, filters);
+    const indices = { ...computeIndices(incidents, filters), planned: computePlannedIndices(await repo.plannedOutagesForIndices(), filters) };
     const meta = { generatedAt: new Date().toISOString(), filters: indices.filters };
 
     if (format === 'csv') {
