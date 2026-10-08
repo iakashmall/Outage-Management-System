@@ -563,6 +563,28 @@ const server = app.listen(PORT, async () => {
       check('scheduled report path (no planned block) still builds its PDF', Buffer.isBuffer(schedPdf) && schedPdf.length > 500);
     }
 
+    console.log('-- overlapping planned outages warn, never block (F12)');
+    {
+      const KI = '33/11 kV KANKHAL- 3 S/s';
+      const mk = (feeder, from, to, substation = KI) => call('op', 'POST', '/planned-outages',
+        { zone: 'Kankhal-3', substation, feeder, workDescription: 'overlap test', windowStart: hours(from), windowEnd: hours(to) });
+      const a = await mk('UPCL-KI-A', 50, 54);
+      check('first outage: no overlaps', a.status === 201 && Array.isArray(a.body.overlaps) && a.body.overlaps.length === 0);
+      const b = await mk('UPCL-KI-B', 52, 56);
+      check('same substation, overlapping window -> created (201) with a warning naming the other',
+        b.status === 201 && b.body.overlaps?.length === 1 && b.body.overlaps[0] === a.body.outage.id);
+      const c = await mk('UPCL-KI-B', 60, 62);
+      check('same substation, separate window -> no warning', c.status === 201 && c.body.overlaps.length === 0);
+      const d = await mk(null, 50, 54, LALJIWALA);
+      check('another substation at the same time -> no warning', d.status === 201 && !d.body.overlaps.includes(a.body.outage.id));
+      const moved = await call('op', 'PATCH', `/planned-outages/${c.body.outage.id}`, { windowStart: hours(53), windowEnd: hours(55) });
+      check('rescheduling into an overlap warns about both', moved.status === 200 && moved.body.overlaps.length === 2);
+      const view = (await call('op', 'GET', `/planned-outages/${b.body.outage.id}`)).body;
+      check('the outage view lists its overlaps', view.overlaps.includes(a.body.outage.id) && view.overlaps.includes(c.body.outage.id));
+      await call('op', 'POST', `/planned-outages/${a.body.outage.id}/cancel`, { reason: 'overlap test' });
+      check('a cancelled outage no longer counts as an overlap', !(await call('op', 'GET', `/planned-outages/${b.body.outage.id}`)).body.overlaps.includes(a.body.outage.id));
+    }
+
     console.log('-- public outage status (F10)');
     {
       const fault = { id: 'INC-F', zone: 'Mayapur', status: 'open', customers: 10, ert: null, opened_at: '2026-10-07T10:00:00Z' };

@@ -129,8 +129,12 @@ r.get('/planned-outages/areas', controlRoom, (req, res) =>
 r.get('/planned-outages/:id', controlRoom, async (req, res) => {
   const po = await repo.plannedOutage(req.params.id);
   if (!po) return res.status(404).json({ code: 'NOT_FOUND', message: 'planned outage not found' });
-  res.json(po);
+  res.json({ ...po, overlaps: await overlapsOf(po.id) });
 });
+
+// F12 priority management: other live planned outages overlapping in time
+// at the same substation or feeder. A warning only; nothing is blocked.
+const overlapsOf = async (plannedOutageId) => (await repo.overlappingPlannedOutages(plannedOutageId)).map((o) => o.id);
 
 r.get('/planned-outages/:id/safety-log', controlRoom, async (req, res) => res.json(await repo.safetyLog(req.params.id)));
 
@@ -150,7 +154,10 @@ r.post('/planned-outages', operator, needActor, async (req, res) => {
     workMrid: b.workMrid, noticeLeadMinutes: b.noticeLeadMinutes,
     deenergisation: b.deenergisation, affectedSection: b.affectedSection,
   }, actor(req));
-  if (!out.error) bus.publish(TOPICS.INCIDENT_CREATED, out.outage.incident); // notifier skips 'Scheduled'
+  if (!out.error) {
+    bus.publish(TOPICS.INCIDENT_CREATED, out.outage.incident); // notifier skips 'Scheduled'
+    out.overlaps = await overlapsOf(out.outage.id);
+  }
   reply(res, out, 201);
 });
 
@@ -167,6 +174,7 @@ r.patch('/planned-outages/:id', operator, needActor, async (req, res) => {
       out.transitions = [...(out.transitions || []), ...again.transitions];
     }
   }
+  if (!out.error) out.overlaps = await overlapsOf(out.outage.id);
   reply(res, out);
 });
 

@@ -21,6 +21,11 @@ const fail = (e) => toast(e.code ? `${e.message} (${e.code})` : e.message, 'err'
 const PRIORITIES = ['low', 'medium', 'high', 'critical'];
 // Crew job priority used by the crew app when an outage of this priority is assigned.
 const JOB_PRIORITY = { critical: 'Urgent', high: 'Urgent', medium: 'Normal', low: 'Normal' };
+// F12: another planned outage overlaps in time at the same substation or
+// feeder. Only a warning: the operator decides which takes priority.
+const warnOverlaps = (ids) => {
+  if (ids?.length) toast(`Warning: overlaps ${ids.length} other planned outage${ids.length > 1 ? 's' : ''} at the same substation/feeder - see the outage for links`, 'err', 12000);
+};
 const scopeText = (o) => (o.deenergisation === 'partial' ? `Partial - ${o.affected_section || 'section not named'}`
   : o.deenergisation === 'complete' ? 'Complete' : 'not recorded');
 
@@ -61,7 +66,7 @@ export default function PlannedOutages() {
         </div>
       </div>
       {creating && <NewPlannedOutage onCancel={() => setCreating(false)} onCreated={(o) => { setCreating(false); load(); setSel(o.id); }} />}
-      {sel && !creating && <OutageDetail key={sel} id={sel} crews={crews} onChanged={load} />}
+      {sel && !creating && <OutageDetail key={sel} id={sel} crews={crews} onChanged={load} list={list} onSelect={setSel} />}
       {!sel && !creating && <div className="card"><div className="card-b empty"><span className="disp">Select an outage</span>Its plan, permits and safety log appear here.</div></div>}
     </div>
   );
@@ -91,6 +96,7 @@ function NewPlannedOutage({ onCancel, onCreated }) {
         affectedSection: f.deenergisation === 'partial' ? f.affectedSection : null,
       });
       toast(`Planned outage ${out.outage.incident.id} scheduled`);
+      warnOverlaps(out.overlaps);
       onCreated(out.outage);
     } catch (e) { fail(e); setBusy(false); }
   };
@@ -136,7 +142,7 @@ function NewPlannedOutage({ onCancel, onCreated }) {
   );
 }
 
-function OutageDetail({ id, crews, onChanged }) {
+function OutageDetail({ id, crews, onChanged, list = [], onSelect }) {
   const [o, setO] = useState(null);
   const [log, setLog] = useState([]);
   const [tab, setTab] = useState('plan');
@@ -162,6 +168,20 @@ function OutageDetail({ id, crews, onChanged }) {
         <StatusBadge status={inc.status} />
       </div>
       <div className="card-b">
+        {o.overlaps?.length > 0 && (
+          <div style={{ background: 'var(--high-bg)', borderRadius: 8, padding: '8px 10px', marginBottom: 8, fontSize: 13 }}>
+            <b>Overlaps another planned outage</b> at the same substation or feeder:{' '}
+            {o.overlaps.map((oid) => {
+              const other = list.find((x) => x.id === oid);
+              return (
+                <button key={oid} className="btn sm" style={{ marginRight: 4 }} onClick={() => onSelect?.(oid)}>
+                  {other ? `${other.incident_id} · ${when(other.window_start)}` : oid}
+                </button>
+              );
+            })}
+            <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 3 }}>Not blocked: decide which takes priority, or reschedule one of them.</div>
+          </div>
+        )}
         <div className="kv-row"><span className="k">Work</span><span className="v">{o.work_description}</span></div>
         <div className="kv-row"><span className="k">Supply off</span><span className="v mono">{when(o.window_start)} - {when(o.window_end)}</span></div>
         <div className="kv-row"><span className="k">Customers</span><span className="v mono">{(inc.customers || 0).toLocaleString()}</span></div>
@@ -296,8 +316,8 @@ function Reschedule({ o, onDone }) {
       <input type="datetime-local" style={{ ...inp, width: 'auto' }} value={e} onChange={(x) => setE(x.target.value)} />
       <button className="btn sm primary" onClick={async () => {
         try {
-          await plannedApi.reschedule(o.id, { windowStart: new Date(s).toISOString(), windowEnd: new Date(e).toISOString() });
-          toast('Rescheduled; customers will be notified again'); setOpen(false); onDone();
+          const out = await plannedApi.reschedule(o.id, { windowStart: new Date(s).toISOString(), windowEnd: new Date(e).toISOString() });
+          toast('Rescheduled; customers will be notified again'); warnOverlaps(out.overlaps); setOpen(false); onDone();
         } catch (err) { fail(err); }
       }}>Save</button>
       <button className="btn sm" onClick={() => setOpen(false)}>Cancel</button>

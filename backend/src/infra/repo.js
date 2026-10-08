@@ -245,6 +245,19 @@ export const repo = {
   activePlannedOutagesAtSubstation: (substation) => db.any(
     `SELECT po.id, po.incident_id, i.status FROM planned_outages po JOIN incidents i ON i.id = po.incident_id
      WHERE i.substation IS NOT DISTINCT FROM $1 AND i.status IN ('isolating','in_progress','restoring')`, [substation]),
+  // Other live planned outages whose window overlaps this one at the same
+  // substation or on the same feeder (F12: a warning, never a block).
+  overlappingPlannedOutages: (plannedOutageId) => db.any(
+    `SELECT o.id, o.incident_id, o.window_start, o.window_end, oi.zone, oi.substation, oi.feeder, oi.status
+     FROM planned_outages me
+     JOIN incidents mi ON mi.id = me.incident_id
+     JOIN planned_outages o ON o.id <> me.id
+     JOIN incidents oi ON oi.id = o.incident_id
+     WHERE me.id = $1
+       AND oi.status NOT IN ('resolved', 'closed', 'cancelled')
+       AND o.window_start < me.window_end AND o.window_end > me.window_start
+       AND ((mi.substation IS NOT NULL AND oi.substation = mi.substation) OR (mi.feeder IS NOT NULL AND oi.feeder = mi.feeder))
+     ORDER BY o.window_start`, [plannedOutageId]),
   // One row per planned outage for the separate planned indices: off_at is
   // the first confirmed isolation step (domain/indices.js computePlannedIndices).
   plannedOutagesForIndices: () => db.any(
