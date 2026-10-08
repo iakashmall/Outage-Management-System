@@ -601,7 +601,12 @@ export const repo = {
       await logSafety(t, ctx.po.id, actor, { entity: 'outage', entityId: ctx.po.id, action: 'outage.reschedule',
         details: { from: { windowStart: ctx.po.window_start, windowEnd: ctx.po.window_end }, to: { windowStart, windowEnd } } });
       const transitions = ctx.incident.status === 'notified' ? [await moveIncident(t, ctx, 'scheduled', actor, 'rescheduled')] : [];
-      return { result: {}, transitions };
+      // Customers who already had the notice must hear about the new time.
+      const result = {
+        noticeWasSent: !!ctx.po.notice_sent_at,
+        previousWindowStart: new Date(ctx.po.window_start).toISOString(), previousWindowEnd: new Date(ctx.po.window_end).toISOString(),
+      };
+      return { result, transitions };
     }),
 
   cancelPlannedOutage: (plannedOutageId, actor, { reason }) =>

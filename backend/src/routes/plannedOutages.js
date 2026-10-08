@@ -136,9 +136,20 @@ r.post('/planned-outages', operator, needActor, async (req, res) => {
   reply(res, out, 201);
 });
 
+// New window. If customers already had the advance notice they get a
+// "rescheduled" notice now, and the outage is notified again at once.
 r.patch('/planned-outages/:id', operator, needActor, async (req, res) => {
   const { windowStart, windowEnd, workDescription } = req.body || {};
-  reply(res, await repo.reschedulePlannedOutage(req.params.id, actor(req), { windowStart, windowEnd, workDescription }));
+  const out = await repo.reschedulePlannedOutage(req.params.id, actor(req), { windowStart, windowEnd, workDescription });
+  if (!out.error && out.noticeWasSent) {
+    const again = await repo.markNotified(out.outage.id, rules.SYSTEM_ACTOR);
+    if (!again.error) {
+      publishNotice(again.outage, { kind: 'rescheduled', previousWindowStart: out.previousWindowStart, previousWindowEnd: out.previousWindowEnd });
+      out.outage = again.outage;
+      out.transitions = [...(out.transitions || []), ...again.transitions];
+    }
+  }
+  reply(res, out);
 });
 
 // Draft from the network trace around the work equipment. The network model
@@ -179,8 +190,12 @@ r.post('/planned-outages/:id/notify', operator, needActor, async (req, res) => {
   reply(res, out);
 });
 
-r.post('/planned-outages/:id/cancel', operator, needActor, async (req, res) =>
-  reply(res, await repo.cancelPlannedOutage(req.params.id, actor(req), { reason: req.body?.reason })));
+// Customers who had the advance notice are told it is cancelled.
+r.post('/planned-outages/:id/cancel', operator, needActor, async (req, res) => {
+  const out = await repo.cancelPlannedOutage(req.params.id, actor(req), { reason: req.body?.reason });
+  if (!out.error && out.outage.notice_sent_at) publishNotice(out.outage, { kind: 'cancelled', reason: req.body?.reason });
+  reply(res, out);
+});
 
 // Extend the window: { newWindowEnd, reason, reportId? }. With reportId it
 // applies that crew delay report. Customers get the "extended" notice.

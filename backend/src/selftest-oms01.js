@@ -18,6 +18,7 @@ import { clientTime } from './domain/clientTime.js';
 import { handleScadaEvent, _resetDedupState } from './realtime/scada.js';
 import { publishRestoration } from './realtime/restoration.js';
 import { sendDueNotices } from './realtime/plannedNotices.js';
+import { startNotifier, transport, maskEmail } from './realtime/notifier.js';
 // The crew app's planned-outage rules are plain JS (no React Native imports).
 import * as crewApp from '../../src/lib/plannedOutage.js';
 
@@ -51,6 +52,12 @@ app.use('/api', api);
 
 const notices = [];
 bus.subscribe(TOPICS.PLANNED_NOTICE, (n) => notices.push(n));
+// The real notifier, writing real notifications rows, but never sending
+// mail: SMTP is stubbed and the recipient is a fixed test address.
+const TEST_ADDRESS = 'fat.tester@example.com';
+process.env.NOTIFY_TEST_TO = TEST_ADDRESS;
+transport.sendMail = async () => ({ messageId: 'selftest-no-mail' });
+startNotifier();
 
 const PORT = 4120;
 const server = app.listen(PORT, async () => {
@@ -393,6 +400,45 @@ const server = app.listen(PORT, async () => {
     await crewApp.flushConfirmations(lost, sendAsC3);
     const eLog = (await repo.safetyLog(e.id)).filter((l) => l.action === 'step.confirm' && l.entity_id === eo.steps[1].id);
     check('resend of the same id: accepted as replay, recorded once', lost.items.length === 0 && eLog.length === 1);
+
+    console.log('-- customer notices (F6)');
+    const settle = () => new Promise((res) => setTimeout(res, 600));
+    const rowsFor = async (incidentId) => db.any('SELECT channel, recipient, subject, body, error FROM notifications WHERE incident_id=$1 ORDER BY ts', [incidentId]);
+    await settle();
+    let rows = await rowsFor(incId);
+    check('planned completion notice sent once (email + SMS), with planned wording',
+      rows.filter((n) => /planned work in .* is complete/i.test(n.body)).length === 2, `${rows.length} rows`);
+    check('no generic "Power restored" notice for a planned outage, and nothing more on close',
+      !rows.some((n) => /power has been restored|power restored/i.test(`${n.subject} ${n.body}`)));
+    check('advance and extended notices recorded for the outage',
+      rows.some((n) => /^Planned power shutdown in .* extended$/.test(n.subject || '')) && rows.some((n) => n.subject?.startsWith('Planned power shutdown in') && /Complete shutdown/.test(n.body)));
+    const mkOutage = async (zone) => {
+      const x = (await call('op', 'POST', '/planned-outages', { zone, workDescription: 'notice test', windowStart: hours(30), windowEnd: hours(33) })).body.outage;
+      await call('op', 'PUT', `/planned-outages/${x.id}/switching-plan/steps`, { steps: [
+        { phase: 'isolate', seq: 1, action: 'open', device_label: 'CB-9', location: 'S/s', assignee: 'control_room' },
+        { phase: 'restore', seq: 1, action: 'close', device_label: 'CB-9', location: 'S/s', assignee: 'control_room' },
+      ] });
+      await call('op', 'POST', `/planned-outages/${x.id}/switching-plan/approve`);
+      return x;
+    };
+    const rs = await mkOutage('Mayapur');
+    await call('op', 'POST', `/planned-outages/${rs.id}/notify`);
+    r = await call('op', 'PATCH', `/planned-outages/${rs.id}`, { windowStart: hours(40), windowEnd: hours(43) });
+    await settle();
+    check('reschedule after the notice: customers told the new time, outage notified again',
+      r.status === 200 && r.body.outage.incident.status === 'notified' && (await rowsFor(rs.incident.id)).some((n) => /rescheduled$/.test(n.subject || '') && /was /.test(n.body)));
+    r = await call('op', 'POST', `/planned-outages/${rs.id}/cancel`, { reason: 'Material not available' });
+    await settle();
+    check('cancel after the notice: cancellation notice sent', r.status === 200 && (await rowsFor(rs.incident.id)).some((n) => /cancelled$/.test(n.subject || '') && /will not be interrupted/.test(n.body)));
+    const quiet = await mkOutage('Gurukul');
+    await call('op', 'POST', `/planned-outages/${quiet.id}/cancel`, { reason: 'never announced' });
+    await settle();
+    check('cancel before any notice: customers are not messaged', (await rowsFor(quiet.incident.id)).length === 0);
+    check('maskEmail keeps the first letter and the domain', maskEmail(TEST_ADDRESS) === 'f*********@example.com');
+    const all = await db.any('SELECT recipient, subject, body, error FROM notifications');
+    const fullEmail = /[^\s@*<>"'(),;:]{2,}@[^\s@]+\.[a-z]{2,}/i;
+    check('notifications are recorded with the masked recipient', all.some((n) => n.recipient === 'f*********@example.com'), `${all.length} rows`);
+    check('no notification row contains a full email address', !all.some((n) => [n.recipient, n.subject, n.body, n.error].some((v) => v && fullEmail.test(v))));
 
     console.log('-- work-order completion and closure (F4)');
     const jr = (status, permit, incidentStatus) => rules.checkJobStatus({ status, permit, incidentStatus })?.code || null;
