@@ -51,7 +51,9 @@ const server = app.listen(4100, async () => {
   const check = (name, cond, extra = '') => { results.push([cond ? 'PASS' : 'FAIL', name, extra]); };
 
   const inc = await j('GET', '/incidents');
-  check('GET /incidents returns seeded rows', inc.body.length === 9, `(${inc.body.length})`);
+  // 8 fault incidents + 2 planned outages (OMS-01, seeded through the planned-outage model)
+  const seededPlanned = inc.body.filter((i) => i.type === 'Scheduled').length;
+  check('GET /incidents returns seeded rows', inc.body.length - seededPlanned === 8 && seededPlanned === 2, `(${inc.body.length - seededPlanned} fault + ${seededPlanned} planned)`);
 
   // ---- OMS-02 trouble calls: derived state per call (checked first, before the
   // lifecycle tests below move seeded incidents around) ----

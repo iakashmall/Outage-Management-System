@@ -114,6 +114,18 @@ const server = app.listen(PORT, async () => {
     check('clientTime trusts an offline time up to 72 h (FR-APP-010)', clientTime('2026-10-04T12:00:00Z', null, { now }) === '2026-10-04T12:00:00.000Z');
     check('clientTime older than 72 h -> server time', clientTime('2026-10-04T08:00:00Z', null, { now }) === '2026-10-07T10:00:00.000Z');
 
+    console.log('-- seeded demo outages (F2)');
+    {
+      const seeded = (await call('op', 'GET', '/planned-outages')).body.filter((x) => x.created_by === 'seed');
+      const gu = seeded.find((x) => x.zone === 'Gurukul'), kk = seeded.find((x) => x.zone === 'Kankhal-2');
+      check('seed: Gurukul planned outage scheduled with an approved plan', gu?.status === 'scheduled' && gu.plan_state === 'approved' && gu.step_count === 6);
+      check('seed: Kankhal-2 planned outage notified (notice recorded as skipped, nothing sent)',
+        kk?.status === 'notified' && kk.plan_state === 'approved' && /no customer message was sent/.test(kk.notice_skipped_reason || '') && kk.deenergisation === 'partial');
+      const orphans = await db.one("SELECT count(*)::int n FROM incidents i WHERE i.type = 'Scheduled' AND NOT EXISTS (SELECT 1 FROM planned_outages po WHERE po.incident_id = i.id)");
+      check('seed: no old-style Scheduled incident outside the planned-outage model', orphans.n === 0, `${orphans.n}`);
+      check('seed: planned outages have a safety log from the start', (await repo.safetyLog(gu.id)).some((l) => l.action === 'plan.approve' && l.actor === 'seed'));
+    }
+
     console.log('-- complaint during a planned outage: decision (F1, pure)');
     {
       const T0 = Date.parse('2026-10-07T10:00:00Z');
