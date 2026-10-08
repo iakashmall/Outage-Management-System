@@ -33,6 +33,11 @@ for (const method of ['get', 'post', 'patch', 'put', 'delete']) {
 
 const operator = requireRole('oms_operator', 'system_admin');
 const crew = requireRole('field_crew');
+// Reading planned outages, plans, permits and the safety log is for the
+// control room. A crew sees its own job's outage through /mobile/jobs/:id/planned-outage.
+const CONTROL_ROOM_ROLES = ['system_admin', 'oms_operator', 'dms_operator', 'scada_operator', 'call_centre_attendant',
+  'field_crew_coordinator', 'operations_engineer', 'configuration_engineer'];
+const controlRoom = requireRole(...CONTROL_ROOM_ROLES);
 
 function actor(req) {
   return { username: req.user?.username || null, roles: req.user?.roles || [], crewId: req.user?.crewId || null };
@@ -82,7 +87,14 @@ r.patch('/mobile/jobs/:id/status', async (req, res, next) => {
   const job = await repo.job(req.params.id);
   if (!job || !(await repo.isPlannedIncident(job.incident_id))) return next();
   const who = actor(req);
-  if (rules.isCrew(who) && who.crewId !== job.crew_id) return res.status(403).json({ code: 'NOT_YOUR_JOB', message: 'this job belongs to another crew' });
+  // Only the job's own crew (verified crew_id claim) or the control room may
+  // move a planned job. A crew token without a crew_id is refused here,
+  // unlike the fault path's username fallback.
+  if (!rules.isOperator(who)) {
+    if (!who.roles.includes('field_crew')) return res.status(403).json({ code: 'FORBIDDEN', message: 'only the assigned crew or the control room can update a planned job' });
+    if (!who.crewId) return res.status(403).json({ code: 'NO_CREW_ID', message: 'this login has no crew id; sign in with a crew account' });
+    if (who.crewId !== job.crew_id) return res.status(403).json({ code: 'NOT_YOUR_JOB', message: 'this job belongs to another crew' });
+  }
   const status = req.body?.status === 'Work Finished' ? 'Work Complete' : req.body?.status;
   if (status === 'Work Started' || status === 'Work Complete') {
     const permit = await repo.latestPermitForJob(job.id);
@@ -105,15 +117,15 @@ r.patch('/mobile/jobs/:id/status', async (req, res, next) => {
 
 // ---------- control room ----------
 
-r.get('/planned-outages', async (req, res) => res.json(await repo.plannedOutages()));
+r.get('/planned-outages', controlRoom, async (req, res) => res.json(await repo.plannedOutages()));
 
-r.get('/planned-outages/:id', async (req, res) => {
+r.get('/planned-outages/:id', controlRoom, async (req, res) => {
   const po = await repo.plannedOutage(req.params.id);
   if (!po) return res.status(404).json({ code: 'NOT_FOUND', message: 'planned outage not found' });
   res.json(po);
 });
 
-r.get('/planned-outages/:id/safety-log', async (req, res) => res.json(await repo.safetyLog(req.params.id)));
+r.get('/planned-outages/:id/safety-log', controlRoom, async (req, res) => res.json(await repo.safetyLog(req.params.id)));
 
 r.post('/planned-outages', operator, needActor, async (req, res) => {
   const b = req.body || {};

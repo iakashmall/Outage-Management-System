@@ -39,6 +39,10 @@ const USERS = {
   op: { username: 'op.sharma', roles: ['oms_operator'], crewId: null },
   c3: { username: 'crew03', roles: ['field_crew'], crewId: 'C003' },
   c5: { username: 'crew05', roles: ['field_crew'], crewId: 'C005' },
+  // A field_crew token without a crew_id claim, and one that is both crew
+  // and control room.
+  nocrew: { username: 'demo-crew', roles: ['field_crew'], crewId: null },
+  crewop: { username: 'lead.op', roles: ['field_crew', 'oms_operator'], crewId: 'C006' },
 };
 const app = express();
 app.use(express.json());
@@ -124,7 +128,7 @@ const server = app.listen(PORT, async () => {
     r = await confirm('c3', 'isolate2', 'c3-i2');
     check('crew step before control-room step 1 -> 409 PREDECESSOR_UNCONFIRMED', r.status === 409 && r.body.code === 'PREDECESSOR_UNCONFIRMED');
     r = await confirm('c3', 'isolate1', 'c3-i1');
-    check('crew confirming a control-room step -> WRONG_ASSIGNEE', r.status === 409 && r.body.code === 'WRONG_ASSIGNEE');
+    check('crew confirming a control-room step -> WRONG_ASSIGNEE', r.status === 403 && r.body.code === 'WRONG_ASSIGNEE'); // 403 since F8
     r = await confirm('op', 'isolate1', 'op-i1');
     check('operator confirms isolate 1 -> isolating', r.body.outage?.incident.status === 'isolating');
     r = await call('c3', 'GET', `/mobile/jobs/${jobId}/planned-outage`);
@@ -159,6 +163,34 @@ const server = app.listen(PORT, async () => {
     check('Work Complete before return -> 409 PERMIT_NOT_RETURNED', r.body.code === 'PERMIT_NOT_RETURNED');
     r = await confirm('c3', 'restore1', 'c3-r1');
     check('restore while permit issued -> PERMIT_OUTSTANDING', r.body.code === 'PERMIT_OUTSTANDING');
+
+    console.log('-- authorisation (F8)');
+    r = await call('c5', 'POST', `/mobile/switching-steps/${ids.restore1}/confirm`, { clientConfirmationId: 'c5-r1' });
+    check('another crew confirming a crew step -> 403 WRONG_ASSIGNEE', r.status === 403 && r.body.code === 'WRONG_ASSIGNEE', `${r.status}`);
+    r = await call('c3', 'POST', `/mobile/switching-steps/${ids.restore3}/confirm`, { clientConfirmationId: 'c3-r3' });
+    check('crew confirming a control-room step -> 403 WRONG_ASSIGNEE', r.status === 403 && r.body.code === 'WRONG_ASSIGNEE', `${r.status}`);
+    r = await call('op', 'POST', `/switching-steps/${ids.restore1}/confirm`, { clientConfirmationId: 'op-r1-nonote' });
+    check('operator on a crew step without a note stays 409 WRONG_ASSIGNEE', r.status === 409 && r.body.code === 'WRONG_ASSIGNEE', `${r.status}`);
+    r = await call('nocrew', 'PATCH', `/mobile/jobs/${jobId}/status`, { status: 'Work Started' });
+    check('crew token without crew_id cannot move a planned job -> 403 NO_CREW_ID', r.status === 403 && r.body.code === 'NO_CREW_ID', `${r.status}`);
+    r = await call('nocrew', 'POST', `/mobile/switching-steps/${ids.restore1}/confirm`, { clientConfirmationId: 'nc-r1' });
+    check('crew token without crew_id cannot confirm a step -> 403', r.status === 403, `${r.status}`);
+    const reads = await Promise.all([`/planned-outages`, `/planned-outages/${po.id}`, `/planned-outages/${po.id}/safety-log`].map((p) => call('c3', 'GET', p)));
+    check('crew-only token cannot read control-room planned-outage routes (403)', reads.every((x) => x.status === 403), reads.map((x) => x.status).join(','));
+    const writes = await Promise.all([
+      call('c3', 'POST', `/planned-outages/${po.id}/switching-plan/approve`),
+      call('c3', 'POST', `/planned-outages/${po.id}/notify`),
+      call('c3', 'POST', `/planned-outages/${po.id}/cancel`, { reason: 'crew tries' }),
+      call('c3', 'POST', `/planned-outages/${po.id}/close`),
+      call('c3', 'POST', `/permits/${permitId}/issue`, { isolationPoints: 'x', earthingPoints: 'y' }),
+      call('c3', 'POST', `/permits/${permitId}/return-on-behalf`, { onBehalfNote: 'x', declaration: {} }),
+      call('c3', 'POST', `/switching-steps/${ids.restore3}/confirm`, { clientConfirmationId: 'c3-cr' }),
+    ]);
+    check('crew-only token gets 403 on control-room writes', writes.every((x) => x.status === 403), writes.map((x) => x.status).join(','));
+    r = await call('crewop', 'GET', '/planned-outages');
+    check('token with field_crew AND oms_operator keeps control-room access', r.status === 200 && Array.isArray(r.body));
+    r = await call('op', 'GET', `/planned-outages/${po.id}`);
+    check('operator reads the outage', r.status === 200 && r.body.id === po.id);
 
     console.log('-- SCADA during planned work');
     _resetDedupState();

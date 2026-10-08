@@ -92,16 +92,19 @@ export function checkConfirmStep({ incident, plan, steps, permits, step, actor, 
     return reject('OUTAGE_NOT_ACTIVE', `a ${step.phase} step cannot be confirmed while the outage is ${incident.status}`);
   }
 
+  // A crew acting on a step that isn't theirs is refused as forbidden (403);
+  // an operator recording a crew step without saying who reported it is a
+  // missing detail (409), as before.
   if (step.assignee === 'crew') {
     const ownCrew = isCrew(actor) && actor.crewId === step.assignee_crew_id;
     const onBehalf = isOperator(actor) && !blank(onBehalfNote);
     if (!ownCrew && !onBehalf) {
-      return reject('WRONG_ASSIGNEE', isOperator(actor)
-        ? 'this is a crew step: record it only with a note saying who reported it'
-        : `this step belongs to crew ${step.assignee_crew_id}`);
+      return isOperator(actor)
+        ? reject('WRONG_ASSIGNEE', 'this is a crew step: record it only with a note saying who reported it')
+        : reject('WRONG_ASSIGNEE', `this step belongs to crew ${step.assignee_crew_id}`, 403);
     }
   } else if (!isOperator(actor)) {
-    return reject('WRONG_ASSIGNEE', 'this step belongs to the control room');
+    return reject('WRONG_ASSIGNEE', 'this step belongs to the control room', 403);
   }
 
   const phaseSteps = byPhase(steps, step.phase);
