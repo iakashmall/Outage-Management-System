@@ -300,6 +300,16 @@ const server = app.listen(PORT, async () => {
     const fg = await call('op', 'GET', `/incidents/${fault.id}`);
     check('fault GET /incidents/:id still lists next states', Array.isArray(fg.body.nextStates) && fg.body.nextStates.includes('closed') && !fg.body.plannedOutageId);
     check('fault mobile job routes untouched (no planned-outage view)', (await call('c5', 'GET', `/mobile/jobs/${fj}/planned-outage`)).body.code === 'NOT_A_PLANNED_JOB');
+
+    // Last: it resets the data. `npm run seed -- --force` and selftest.js
+    // must still work on a database that has planned outages in it.
+    console.log('-- seed --force with planned outages present');
+    const logRows = async () => Number((await db.one('SELECT count(*) n FROM safety_log')).n);
+    const logBefore = await logRows();
+    let reseed = null;
+    try { reseed = await seed({ force: true }); } catch (err) { reseed = { error: err.message }; }
+    check('seed --force succeeds with planned outages present', reseed?.seeded === true, reseed?.error || '');
+    check('safety log survives the reset (append-only)', (await logRows()) >= logBefore);
   } catch (e) {
     fails++;
     console.log('  [FAIL] unexpected error', e.stack);

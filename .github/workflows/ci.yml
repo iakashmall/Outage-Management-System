@@ -97,6 +97,16 @@ jobs:
           KAFKA_BROKERS: localhost:9092
         run: node src/selftest-oms01.js
 
+      # The main self-test again on the same database, now holding planned
+      # outages and safety-log rows: seed --force must still reset it.
+      - name: Re-run self-test after OMS-01 data exists
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://oms:oms@localhost:5432/oms
+          REDIS_URL: redis://localhost:6379
+          KAFKA_BROKERS: localhost:9092
+        run: node src/selftest.js
+
   # ────────────────────────────────────────────────────────────────
   # Builds both Docker images to prove they still build cleanly on every
   # push -- the same two builds we proved work by hand, now automatic.
