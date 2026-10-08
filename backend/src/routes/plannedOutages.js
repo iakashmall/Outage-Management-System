@@ -42,6 +42,8 @@ const controlRoom = requireRole(...CONTROL_ROOM_ROLES);
 function actor(req) {
   return { username: req.user?.username || null, roles: req.user?.roles || [], crewId: req.user?.crewId || null };
 }
+// A device-reported time, stored verbatim in the safety log (bounded).
+const rawTime = (v) => (typeof v === 'string' ? v.slice(0, 64) : null);
 // Refuse a token without a username: the safety log must name a person.
 function needActor(req, res, next) {
   if (!req.user?.username) return res.status(401).json({ code: 'NO_IDENTITY', message: 'token has no username' });
@@ -130,9 +132,10 @@ r.get('/planned-outages/:id/safety-log', controlRoom, async (req, res) => res.js
 r.post('/planned-outages', operator, needActor, async (req, res) => {
   const b = req.body || {};
   const out = await repo.createPlannedOutage({
-    zone: b.zone, feeder: b.feeder, substation: b.substation, customers: Number(b.customers) || 0, lat: b.lat, lon: b.lon,
+    zone: b.zone, feeder: b.feeder, substation: b.substation, customers: b.customers, lat: b.lat, lon: b.lon,
     severity: b.severity, windowStart: b.windowStart, windowEnd: b.windowEnd, workDescription: b.workDescription,
     workMrid: b.workMrid, noticeLeadMinutes: b.noticeLeadMinutes,
+    deenergisation: b.deenergisation, affectedSection: b.affectedSection,
   }, actor(req));
   if (!out.error) bus.publish(TOPICS.INCIDENT_CREATED, out.outage.incident); // notifier skips 'Scheduled'
   reply(res, out, 201);
@@ -193,6 +196,7 @@ r.post('/switching-steps/:id/confirm', operator, needActor, async (req, res) => 
   const b = req.body || {};
   const out = await repo.confirmSwitchingStep(req.params.id, actor(req), {
     clientConfirmationId: b.clientConfirmationId, performedAt: clientTime(b.performedAt, b.sentAt), onBehalfNote: b.onBehalfNote || null,
+    clientPerformedAt: rawTime(b.performedAt), clientSentAt: rawTime(b.sentAt),
   });
   stepEvents(out, req.params.id);
   reply(res, out);
@@ -268,6 +272,7 @@ r.post('/mobile/switching-steps/:id/confirm', crew, needActor, async (req, res) 
   const out = await repo.confirmSwitchingStep(req.params.id, actor(req), {
     clientConfirmationId: b.clientConfirmationId, performedAt: clientTime(b.performedAt, b.sentAt),
     lat: Number.isFinite(b.lat) ? b.lat : null, lon: Number.isFinite(b.lon) ? b.lon : null,
+    clientPerformedAt: rawTime(b.performedAt), clientSentAt: rawTime(b.sentAt),
   });
   stepEvents(out, req.params.id);
   reply(res, out);

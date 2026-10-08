@@ -381,6 +381,11 @@ export async function migrate() {
     );
     CREATE INDEX IF NOT EXISTS safety_log_outage_idx ON safety_log(planned_outage_id, ts);
 
+    -- Partial or complete de-energisation (FAT OMS-01). Outages created
+    -- before this column existed keep NULL = "not recorded".
+    ALTER TABLE planned_outages ADD COLUMN IF NOT EXISTS deenergisation TEXT CHECK (deenergisation IN ('complete', 'partial'));
+    ALTER TABLE planned_outages ADD COLUMN IF NOT EXISTS affected_section TEXT;
+
     -- Append-only, enforced in the database for every environment (unlike
     -- audit_log's trigger, which lives in a manual migration). TRUNCATE is
     -- blocked too, so a reset script can't wipe it by accident.

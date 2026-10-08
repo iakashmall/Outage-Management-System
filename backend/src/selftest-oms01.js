@@ -75,6 +75,33 @@ const server = app.listen(PORT, async () => {
     check('clientTime corrects a phone clock 3 min slow',
       clientTime('2026-10-07T09:47:00Z', '2026-10-07T09:57:00Z', { now }) === '2026-10-07T09:50:00.000Z');
     check('clientTime never in the future', clientTime('2026-10-07T11:00:00Z', null, { now }) === '2026-10-07T10:00:00.000Z');
+    check('clientTime trusts an offline time up to 72 h (FR-APP-010)', clientTime('2026-10-04T12:00:00Z', null, { now }) === '2026-10-04T12:00:00.000Z');
+    check('clientTime older than 72 h -> server time', clientTime('2026-10-04T08:00:00Z', null, { now }) === '2026-10-07T10:00:00.000Z');
+
+    console.log('-- input validation (F7)');
+    const okInput = { zone: 'Kankhal-2', workDescription: 'x', windowStart: hours(30), windowEnd: hours(34) };
+    const bad = async (label, patch) => {
+      const res = await call('op', 'POST', '/planned-outages', { ...okInput, ...patch });
+      check(`create rejects ${label} -> 400 BAD_INPUT`, res.status === 400 && res.body.code === 'BAD_INPUT', `${res.status} ${res.body.message || ''}`);
+    };
+    await bad('a window in the past', { windowStart: hours(-30), windowEnd: hours(-26) });
+    await bad('a window longer than 72 h', { windowEnd: hours(30 + 73) });
+    await bad('negative customers', { customers: -500 });
+    await bad('fractional customers', { customers: 1.5 });
+    await bad('an unknown priority', { severity: 'banana' });
+    await bad('a notice lead over 7 days', { noticeLeadMinutes: 1e7 });
+    await bad('a 501-character work description', { workDescription: 'x'.repeat(501) });
+    await bad('an unknown de-energisation', { deenergisation: 'half' });
+    await bad('partial de-energisation without the section', { deenergisation: 'partial' });
+    let vr = await call('op', 'POST', '/planned-outages', { ...okInput, severity: 'high', deenergisation: 'partial', affectedSection: 'LT of DT-14 only', customers: '40' });
+    check('valid priority + partial de-energisation stored', vr.status === 201 && vr.body.outage.incident.severity === 'high'
+      && vr.body.outage.deenergisation === 'partial' && vr.body.outage.affected_section === 'LT of DT-14 only' && vr.body.outage.incident.customers === 40);
+    const v = vr.body.outage;
+    vr = await call('op', 'PATCH', `/planned-outages/${v.id}`, { windowStart: hours(-5), windowEnd: hours(-1) });
+    check('reschedule into the past -> 400', vr.status === 400 && vr.body.code === 'BAD_INPUT');
+    vr = await call('op', 'POST', `/planned-outages/${v.id}/cancel`, { reason: 'y'.repeat(501) });
+    check('a 501-character cancel reason -> 400', vr.status === 400 && vr.body.code === 'BAD_INPUT');
+    check('rejected inputs are logged on the outage', (await repo.safetyLog(v.id)).some((l) => l.action === 'outage.cancel.rejected'));
     const draft = draftFromTrace({
       origin: { cim_mrid: 'DT14', name: 'DT-14' },
       boundarySwitches: [{ cim_mrid: 'AB1', cim_class: 'LoadBreakSwitch', name: 'AB P-214', hops: 2 }, { cim_mrid: 'CB1', cim_class: 'Breaker', name: 'CB-11', hops: 5 }],
@@ -90,6 +117,7 @@ const server = app.listen(PORT, async () => {
     let r = await call('op', 'POST', '/planned-outages', { zone: 'Kankhal-2', substation: 'TESTPO', workDescription: 'Replace DT-14 bushings', windowStart: hours(30), windowEnd: hours(34), customers: 120 });
     const po = r.body.outage;
     check('create -> 201, incident Scheduled/scheduled, draft plan', r.status === 201 && po?.incident.status === 'scheduled' && po.incident.type === 'Scheduled' && po.plan.state === 'draft', po?.incident.id);
+    check('de-energisation defaults to complete when not given', po.deenergisation === 'complete');
     const incId = po.incident.id;
     r = await call('op', 'GET', `/incidents/${incId}`);
     check('GET /incidents/:id: no manual next states, outage id', r.body.nextStates?.length === 0 && r.body.plannedOutageId === po.id);
@@ -228,6 +256,10 @@ const server = app.listen(PORT, async () => {
     check('rejected attempts logged with their code', log.some((l) => l.action === 'step.confirm.rejected' && l.details.code === 'PREDECESSOR_UNCONFIRMED'));
     check('actor is the verified user, never the x-user header', log.find((l) => l.action === 'permit.issue')?.actor === 'op.sharma' && !log.some((l) => l.actor === 'mallory'));
     check('on-behalf confirmation records the note', log.some((l) => l.action === 'step.confirm' && l.details.onBehalfNote === 'crew03 reported by radio'));
+    const offlineRow = log.find((l) => l.action === 'step.confirm' && l.details.clientConfirmationId === 'c3-i2');
+    check('offline confirmation logs the phone times verbatim next to the server receive time',
+      !!offlineRow?.details.clientPerformedAt && !!offlineRow.details.clientSentAt && !!offlineRow.details.receivedAt
+      && Date.parse(offlineRow.details.receivedAt) - Date.parse(offlineRow.details.performedAt) > 8.5 * 60000);
     let blocked = 0;
     for (const sql of ['UPDATE safety_log SET actor = $1', 'DELETE FROM safety_log', 'TRUNCATE safety_log']) {
       try { await db.none(sql, ['x']); } catch { blocked++; }

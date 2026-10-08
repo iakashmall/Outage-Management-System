@@ -18,6 +18,11 @@ const when = (iso) => (iso ? new Date(iso).toLocaleString('en-IN', { dateStyle: 
 const inp = { width: '100%', padding: '8px 10px', border: '1px solid var(--line-2)', borderRadius: 7, fontFamily: 'var(--ui)', fontSize: 13 };
 const toLocalInput = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 const fail = (e) => toast(e.code ? `${e.message} (${e.code})` : e.message, 'err', 9000);
+const PRIORITIES = ['low', 'medium', 'high', 'critical'];
+// Crew job priority used by the crew app when an outage of this priority is assigned.
+const JOB_PRIORITY = { critical: 'Urgent', high: 'Urgent', medium: 'Normal', low: 'Normal' };
+const scopeText = (o) => (o.deenergisation === 'partial' ? `Partial - ${o.affected_section || 'section not named'}`
+  : o.deenergisation === 'complete' ? 'Complete' : 'not recorded');
 
 export default function PlannedOutages() {
   const [list, setList] = useState([]);
@@ -42,7 +47,7 @@ export default function PlannedOutages() {
             <button key={p.id} onClick={() => { setSel(p.id); setCreating(false); }}
               style={{ textAlign: 'left', border: `1px solid ${sel === p.id ? 'var(--navy)' : 'var(--line)'}`, borderRadius: 9, padding: 10, background: 'var(--surface)', cursor: 'pointer' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                <b>{p.zone}</b><StatusBadge status={p.status} />
+                <b>{p.zone}</b><span style={{ display: 'inline-flex', gap: 4 }}>{p.severity && p.severity !== 'low' && <span className={`badge-sev sev-${p.severity}`}>{p.severity}</span>}<StatusBadge status={p.status} /></span>
               </div>
               <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 3 }}>{when(p.window_start)} - {hhmm(p.window_end)}</div>
               <div style={{ fontSize: 12, marginTop: 3 }}>
@@ -65,6 +70,7 @@ function NewPlannedOutage({ onCancel, onCreated }) {
   const [f, setF] = useState({
     zone: '', substation: '', feeder: '', customers: 100, workDescription: '', workMrid: '',
     windowStart: toLocalInput(start), windowEnd: toLocalInput(new Date(start.getTime() + 4 * 3600e3)), noticeHours: 24,
+    severity: 'low', deenergisation: 'complete', affectedSection: '',
   });
   const [busy, setBusy] = useState(false);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
@@ -76,6 +82,8 @@ function NewPlannedOutage({ onCancel, onCreated }) {
         workDescription: f.workDescription, workMrid: f.workMrid || null,
         windowStart: new Date(f.windowStart).toISOString(), windowEnd: new Date(f.windowEnd).toISOString(),
         noticeLeadMinutes: Math.round(Number(f.noticeHours) * 60),
+        severity: f.severity, deenergisation: f.deenergisation,
+        affectedSection: f.deenergisation === 'partial' ? f.affectedSection : null,
       });
       toast(`Planned outage ${out.outage.incident.id} scheduled`);
       onCreated(out.outage);
@@ -95,6 +103,15 @@ function NewPlannedOutage({ onCancel, onCreated }) {
         <div style={{ gridColumn: '1 / -1' }}>{field('Work to be done *', <input style={inp} value={f.workDescription} onChange={set('workDescription')} placeholder="e.g. Replace DT-14 HT bushings" />)}</div>
         {field('Work equipment CIM mRID (for drafting the plan)', <input style={inp} value={f.workMrid} onChange={set('workMrid')} />)}
         {field('Notify customers this many hours before', <input style={inp} type="number" min="0" value={f.noticeHours} onChange={set('noticeHours')} />)}
+        {field('Priority *', <select style={inp} value={f.severity} onChange={set('severity')}>{PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}</select>)}
+        {field('De-energisation *', (
+          <select style={inp} value={f.deenergisation} onChange={set('deenergisation')}>
+            <option value="complete">Complete - everything beyond the isolation points</option>
+            <option value="partial">Partial - only a named section</option>
+          </select>
+        ))}
+        {f.deenergisation === 'partial' && <div style={{ gridColumn: '1 / -1' }}>{field('Affected section *', <input style={inp} value={f.affectedSection} onChange={set('affectedSection')} placeholder="e.g. LT network of DT-14 only (Ward 7)" />)}</div>}
+        <div style={{ gridColumn: '1 / -1', fontSize: 12, color: 'var(--muted)' }}>Window: must start now or later and last at most 72 hours.</div>
         <div style={{ gridColumn: '1 / -1', display: 'flex', gap: 8 }}>
           <button className="btn primary" disabled={busy} onClick={submit}>{busy ? 'Scheduling…' : 'Schedule outage'}</button>
           <button className="btn" onClick={onCancel}>Cancel</button>
@@ -133,10 +150,12 @@ function OutageDetail({ id, crews, onChanged }) {
         <div className="kv-row"><span className="k">Work</span><span className="v">{o.work_description}</span></div>
         <div className="kv-row"><span className="k">Supply off</span><span className="v mono">{when(o.window_start)} - {when(o.window_end)}</span></div>
         <div className="kv-row"><span className="k">Customers</span><span className="v mono">{(inc.customers || 0).toLocaleString()}</span></div>
+        <div className="kv-row"><span className="k">Priority</span><span className="v">{inc.severity}</span></div>
+        <div className="kv-row"><span className="k">De-energisation</span><span className="v">{scopeText(o)}</span></div>
         <div className="kv-row"><span className="k">Customer notice</span><span className="v">
           {o.notice_sent_at ? `sent ${when(o.notice_sent_at)}` : o.notice_skipped_reason ? `skipped: ${o.notice_skipped_reason}` : `due ${when(o.notice_due_at)}`}
         </span></div>
-        <div className="kv-row"><span className="k">Crew</span><span className="v">{inc.crew_id || <CrewAssign incidentId={inc.id} crews={crews} onDone={() => { load(); onChanged(); }} />}</span></div>
+        <div className="kv-row"><span className="k">Crew</span><span className="v">{inc.crew_id || <CrewAssign incidentId={inc.id} priority={JOB_PRIORITY[inc.severity] || 'Normal'} crews={crews} onDone={() => { load(); onChanged(); }} />}</span></div>
 
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', margin: '12px 0' }}>
           {o.plan.state === 'draft' && <button className="btn sm primary" onClick={() => window.confirm('Approve this switching plan? You take responsibility for the order and content of every step.') && act(() => plannedApi.approve(id), 'Plan approved')}>Approve plan</button>}
@@ -163,7 +182,7 @@ function OutageDetail({ id, crews, onChanged }) {
   );
 }
 
-function CrewAssign({ incidentId, crews, onDone }) {
+function CrewAssign({ incidentId, priority, crews, onDone }) {
   const [crewId, setCrewId] = useState('');
   return (
     <span style={{ display: 'inline-flex', gap: 6 }}>
@@ -172,7 +191,7 @@ function CrewAssign({ incidentId, crews, onDone }) {
         {crews.map((c) => <option key={c.id} value={c.id}>{c.id} {c.name}</option>)}
       </select>
       <button className="btn sm" disabled={!crewId} onClick={async () => {
-        try { await api.assign(incidentId, crewId, 'Normal'); toast(`Crew ${crewId} assigned`); onDone(); } catch (e) { fail(e); }
+        try { await api.assign(incidentId, crewId, priority); toast(`Crew ${crewId} assigned (${priority})`); onDone(); } catch (e) { fail(e); }
       }}>Assign</button>
     </span>
   );

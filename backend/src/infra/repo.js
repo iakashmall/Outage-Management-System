@@ -471,23 +471,28 @@ export const repo = {
     const id = await repo.nextIncidentId();
     const poId = 'PO' + nanoid(8);
     const now = new Date().toISOString();
-    const lead = Number.isInteger(input.noticeLeadMinutes) && input.noticeLeadMinutes >= 0 ? input.noticeLeadMinutes : 1440;
+    const lead = input.noticeLeadMinutes != null ? Number(input.noticeLeadMinutes) : 1440;
+    const customers = input.customers != null && input.customers !== '' ? Number(input.customers) : 0;
+    const deenergisation = input.deenergisation || 'complete';
     await db.tx(async (t) => {
       await t.none(`INSERT INTO incidents
         (id,type,severity,status,zone,feeder,customers,cause,lat,lon,crew_id,opened_at,ert,sla_due_at,source,substation)
         VALUES ($/id/,'Scheduled',$/severity/,'scheduled',$/zone/,$/feeder/,$/customers/,$/cause/,$/lat/,$/lon/,NULL,$/now/,$/ert/,NULL,'PLANNED',$/substation/)`,
-        { id, severity: input.severity || 'low', zone: input.zone, feeder: input.feeder || null, customers: input.customers || 0,
+        { id, severity: input.severity || 'low', zone: input.zone, feeder: input.feeder || null, customers,
           cause: input.workDescription, lat: input.lat ?? null, lon: input.lon ?? null, now, ert: input.windowEnd, substation: input.substation || null });
       await t.none(`INSERT INTO planned_outages
-        (id,incident_id,window_start,window_end,work_description,work_mrid,notice_lead_minutes,notice_due_at,created_by,created_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        (id,incident_id,window_start,window_end,work_description,work_mrid,notice_lead_minutes,notice_due_at,created_by,created_at,
+         deenergisation,affected_section)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
         [poId, id, input.windowStart, input.windowEnd, input.workDescription, input.workMrid || null, lead,
-          new Date(Date.parse(input.windowStart) - lead * 60000).toISOString(), actor.username, now]);
+          new Date(Date.parse(input.windowStart) - lead * 60000).toISOString(), actor.username, now,
+          deenergisation, input.affectedSection || null]);
       await t.none('INSERT INTO switching_plans (id, planned_outage_id) VALUES ($1,$2)', ['SP' + nanoid(8), poId]);
       await t.none(`INSERT INTO incident_events (id,incident_id,ts,actor,kind,note) VALUES ($1,$2,$3,$4,'created',$5)`,
         ['EV' + nanoid(8), id, now, actor.username, `Planned outage scheduled - ${input.workDescription}`]);
       await logSafety(t, poId, actor, { entity: 'outage', entityId: poId, action: 'outage.create', to: 'scheduled',
-        details: { incidentId: id, windowStart: input.windowStart, windowEnd: input.windowEnd } });
+        details: { incidentId: id, windowStart: input.windowStart, windowEnd: input.windowEnd, priority: input.severity || 'low',
+          deenergisation, affectedSection: input.affectedSection || null } });
     });
     return { outage: await repo.plannedOutage(poId), transitions: [] };
   },
@@ -505,7 +510,7 @@ export const repo = {
     return row ? repo.plannedOutage(row.id) : null;
   },
   plannedOutages: () => db.any(
-    `SELECT po.*, i.status, i.zone, i.feeder, i.substation, i.customers, i.crew_id,
+    `SELECT po.*, i.status, i.zone, i.feeder, i.substation, i.customers, i.crew_id, i.severity,
             sp.state AS plan_state,
             (SELECT count(*) FROM switching_steps s WHERE s.plan_id = sp.id)::int AS step_count,
             (SELECT count(*) FROM switching_steps s WHERE s.plan_id = sp.id AND s.state = 'confirmed')::int AS steps_confirmed,
@@ -578,7 +583,7 @@ export const repo = {
   // New window; a notified outage goes back to scheduled so it is notified again.
   reschedulePlannedOutage: (plannedOutageId, actor, { windowStart, windowEnd, workDescription }) =>
     withOutage(plannedOutageId, actor, async (t, ctx) => {
-      const reject = rules.checkReschedule({ incident: ctx.incident, steps: ctx.steps, actor, windowStart, windowEnd });
+      const reject = rules.checkReschedule({ incident: ctx.incident, steps: ctx.steps, actor, windowStart, windowEnd, workDescription });
       if (reject) return { reject, entity: 'outage', entityId: ctx.po.id, action: 'outage.reschedule' };
       const dueAt = new Date(Date.parse(windowStart) - ctx.po.notice_lead_minutes * 60000).toISOString();
       await t.none(`UPDATE planned_outages SET window_start=$2, window_end=$3, work_description=COALESCE($4, work_description),
@@ -607,7 +612,10 @@ export const repo = {
 
   // One switching step done. performedAt: when it physically happened (the
   // route clock-corrects it); received_at is always the server's now.
-  confirmSwitchingStep: async (stepId, actor, { clientConfirmationId, performedAt = null, onBehalfNote = null, lat = null, lon = null }) => {
+  // clientPerformedAt / clientSentAt: what the device reported, kept verbatim
+  // in the safety log next to the corrected time and the server receive time.
+  confirmSwitchingStep: async (stepId, actor, { clientConfirmationId, performedAt = null, onBehalfNote = null, lat = null, lon = null,
+    clientPerformedAt = null, clientSentAt = null }) => {
     const row = await db.oneOrNone('SELECT sp.planned_outage_id FROM switching_steps s JOIN switching_plans sp ON sp.id = s.plan_id WHERE s.id=$1', [stepId]);
     if (!row) return notFound('switching step');
     return withOutage(row.planned_outage_id, actor, async (t, ctx) => {
@@ -619,13 +627,15 @@ export const repo = {
         reject = { code: 'CLIENT_ID_REUSED', message: 'clientConfirmationId already belongs to another step', status: 409 };
       }
       if (reject) return { ...base, reject };
-      const when = performedAt || new Date().toISOString();
-      await t.none(`UPDATE switching_steps SET state='confirmed', confirmed_by=$2, performed_at=$3, received_at=now(),
+      const receivedAt = new Date().toISOString();
+      const when = performedAt || receivedAt;
+      await t.none(`UPDATE switching_steps SET state='confirmed', confirmed_by=$2, performed_at=$3, received_at=$8,
           client_confirmation_id=$4, on_behalf_note=$5, lat=$6, lon=$7 WHERE id=$1`,
-        [stepId, actor.username, when, clientConfirmationId, onBehalfNote, lat, lon]);
+        [stepId, actor.username, when, clientConfirmationId, onBehalfNote, lat, lon, receivedAt]);
       await logSafety(t, ctx.po.id, actor, { entity: 'step', entityId: stepId, action: 'step.confirm', from: 'pending', to: 'confirmed', occurredAt: when,
         details: { phase: step.phase, seq: step.seq, action: step.action, device: step.device_label, location: step.location,
-          assignee: step.assignee, assigneeCrewId: step.assignee_crew_id, clientConfirmationId, onBehalfNote, lat, lon } });
+          assignee: step.assignee, assigneeCrewId: step.assignee_crew_id, clientConfirmationId, onBehalfNote, lat, lon,
+          performedAt: when, receivedAt, clientPerformedAt: clientPerformedAt ?? null, clientSentAt: clientSentAt ?? null } });
       return { result: { step: await t.one('SELECT * FROM switching_steps WHERE id=$1', [stepId]) } };
     });
   },

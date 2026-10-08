@@ -15,6 +15,7 @@ export function publishNotice(outage) {
   bus.publish(TOPICS.PLANNED_NOTICE, {
     plannedOutageId: outage.id, incident: outage.incident,
     windowStart: outage.window_start, windowEnd: outage.window_end, workDescription: outage.work_description,
+    deenergisation: outage.deenergisation || null, affectedSection: outage.affected_section || null,
   });
 }
 

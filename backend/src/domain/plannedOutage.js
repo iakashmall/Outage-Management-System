@@ -13,8 +13,25 @@ export const STEP_ACTIONS = ['open', 'close', 'rack_out', 'rack_in', 'test_dead'
 export const PHASES = ['isolate', 'restore'];
 export const ASSIGNEES = ['control_room', 'crew'];
 const OPEN_PERMIT = ['requested', 'issued'];
+// Priority of the outage (stored as the incident's severity; planned
+// outages are excluded from the reliability indices whatever it is).
+export const PRIORITIES = ['low', 'medium', 'high', 'critical'];
+// Complete = everything downstream of the isolation points is off;
+// partial = only the named section is.
+export const DEENERGISATION = ['complete', 'partial'];
+export const LIMITS = Object.freeze({
+  maxWindowHours: 72, // longest supply-off window in one outage
+  pastToleranceMin: 5, // a window may not start in the past (clock skew allowance)
+  maxNoticeLeadMinutes: 7 * 24 * 60,
+  maxCustomers: 1000000,
+  maxText: 500, // descriptions, reasons, notes, permit points
+  maxLabel: 200, // step device/location, zone, feeder, substation, mRID
+});
 
 const reject = (code, message, status = 409) => ({ code, message, status });
+const tooLong = (v, max = LIMITS.maxText) => v != null && (typeof v !== 'string' || v.length > max);
+const badInput = (message) => reject('BAD_INPUT', message, 400);
+const intIn = (v, min, max) => { const n = Number(v); return Number.isInteger(n) && n >= min && n <= max; };
 
 // actor = { username, roles[], crewId } from the verified token (never the
 // x-user header).
@@ -46,6 +63,9 @@ export function checkDraftSteps(steps) {
     if (!ASSIGNEES.includes(s.assignee)) return reject('BAD_STEPS', `${where}: assignee must be control_room or crew`, 400);
     if (s.assignee === 'crew' && blank(s.assignee_crew_id)) return reject('BAD_STEPS', `${where}: a crew step needs assignee_crew_id`, 400);
     if (blank(s.device_label) || blank(s.location)) return reject('BAD_STEPS', `${where}: device_label and location are required`, 400);
+    if (tooLong(s.device_label, LIMITS.maxLabel) || tooLong(s.location, LIMITS.maxLabel) || tooLong(s.device_mrid, LIMITS.maxLabel)) {
+      return reject('BAD_STEPS', `${where}: device, location and mRID are limited to ${LIMITS.maxLabel} characters`, 400);
+    }
   }
   for (const phase of PHASES) {
     const seqs = byPhase(steps, phase).map((s) => s.seq);
@@ -80,6 +100,7 @@ export function checkUnapprovePlan({ plan, steps, actor }) {
 // idempotent replay must succeed even after later steps were confirmed.
 export function checkConfirmStep({ incident, plan, steps, permits, step, actor, clientConfirmationId, onBehalfNote }) {
   if (blank(clientConfirmationId)) return reject('CLIENT_ID_REQUIRED', 'clientConfirmationId is required', 400);
+  if (tooLong(clientConfirmationId, LIMITS.maxLabel) || tooLong(onBehalfNote)) return badInput(`clientConfirmationId or note too long (note max ${LIMITS.maxText} characters)`);
   if (step.state === 'confirmed') {
     return step.client_confirmation_id === clientConfirmationId
       ? { replay: true }
@@ -132,6 +153,7 @@ export function actionableStepIds(ctx, actor) {
 
 export function checkRequestPermit({ incident, steps, permits, job, actor, clientRequestId }) {
   if (blank(clientRequestId)) return reject('CLIENT_ID_REQUIRED', 'clientRequestId is required', 400);
+  if (tooLong(clientRequestId, LIMITS.maxLabel)) return badInput('clientRequestId too long');
   if (!isCrew(actor) || actor.crewId !== job.crew_id) return reject('NOT_YOUR_JOB', 'only the crew assigned to this job can request its permit', 403);
   const mine = permits.filter((p) => p.job_id === job.id);
   const replay = mine.find((p) => p.request_client_id === clientRequestId);
@@ -150,6 +172,7 @@ export function checkIssuePermit({ steps, permit, actor, isolationPoints, earthi
   if (!allConfirmed(byPhase(steps, 'isolate'))) return reject('ISOLATION_INCOMPLETE', 'every isolation step must be confirmed before a permit is issued');
   if (byPhase(steps, 'restore').some((s) => s.state === 'confirmed')) return reject('OUTAGE_RESTORING', 'restoration has started');
   if (blank(isolationPoints) || blank(earthingPoints)) return reject('DETAILS_REQUIRED', 'isolation points and earthing points are required on the permit', 400);
+  if (tooLong(isolationPoints) || tooLong(earthingPoints)) return badInput(`isolation and earthing points are limited to ${LIMITS.maxText} characters each`);
   return null;
 }
 
@@ -157,6 +180,7 @@ export function checkRefusePermit({ permit, actor, reason }) {
   if (!isOperator(actor)) return reject('FORBIDDEN', 'only the control room refuses permits', 403);
   if (permit.state !== 'requested') return reject('PERMIT_NOT_REQUESTED', `permit is ${permit.state}`);
   if (blank(reason)) return reject('REASON_REQUIRED', 'a reason is required', 400);
+  if (tooLong(reason)) return badInput(`reason is limited to ${LIMITS.maxText} characters`);
   return null;
 }
 
@@ -171,6 +195,9 @@ export function checkWithdrawPermit({ permit, actor }) {
 // re-energise from their side. All three must be explicitly true.
 export function checkReturnPermit({ permit, actor, declaration, clientRequestId, onBehalfNote }) {
   if (blank(clientRequestId)) return reject('CLIENT_ID_REQUIRED', 'clientRequestId is required', 400);
+  if (tooLong(clientRequestId, LIMITS.maxLabel) || tooLong(onBehalfNote) || tooLong(declaration?.remarks)) {
+    return badInput(`clientRequestId, note or remarks too long (max ${LIMITS.maxText} characters)`);
+  }
   if (permit.state === 'returned') {
     return permit.return_client_id === clientRequestId ? { replay: true } : reject('PERMIT_NOT_ISSUED', 'permit was already returned');
   }
@@ -197,17 +224,31 @@ const isSystem = (actor) => !!actor?.roles?.includes('system');
 
 const validDate = (v) => typeof v === 'string' && Number.isFinite(Date.parse(v));
 
-export function checkCreateOutage(input, actor) {
+export function checkCreateOutage(input, actor, now = Date.now()) {
   if (!isOperator(actor)) return reject('FORBIDDEN', 'only the control room schedules outages', 403);
   const i = input || {};
-  if (blank(i.zone)) return reject('BAD_INPUT', 'zone is required', 400);
-  if (blank(i.workDescription)) return reject('BAD_INPUT', 'workDescription is required', 400);
-  return checkWindow(i);
+  if (blank(i.zone)) return badInput('zone is required');
+  if (blank(i.workDescription)) return badInput('workDescription is required');
+  if (tooLong(i.zone, LIMITS.maxLabel) || tooLong(i.feeder, LIMITS.maxLabel) || tooLong(i.substation, LIMITS.maxLabel) || tooLong(i.workMrid, LIMITS.maxLabel)) {
+    return badInput(`zone, feeder, substation and mRID are limited to ${LIMITS.maxLabel} characters`);
+  }
+  if (tooLong(i.workDescription)) return badInput(`workDescription is limited to ${LIMITS.maxText} characters`);
+  if (i.severity != null && !PRIORITIES.includes(i.severity)) return badInput(`priority must be one of ${PRIORITIES.join(', ')}`);
+  if (i.deenergisation != null && !DEENERGISATION.includes(i.deenergisation)) return badInput('deenergisation must be complete or partial');
+  if (i.deenergisation === 'partial' && blank(i.affectedSection)) return badInput('a partial de-energisation needs the affected section');
+  if (tooLong(i.affectedSection)) return badInput(`affectedSection is limited to ${LIMITS.maxText} characters`);
+  if (i.customers != null && i.customers !== '' && !intIn(i.customers, 0, LIMITS.maxCustomers)) return badInput(`customers must be a whole number from 0 to ${LIMITS.maxCustomers}`);
+  if (i.noticeLeadMinutes != null && !intIn(i.noticeLeadMinutes, 0, LIMITS.maxNoticeLeadMinutes)) return badInput(`noticeLeadMinutes must be a whole number from 0 to ${LIMITS.maxNoticeLeadMinutes}`);
+  return checkWindow(i, now);
 }
 
-export function checkWindow({ windowStart, windowEnd }) {
-  if (!validDate(windowStart) || !validDate(windowEnd)) return reject('BAD_INPUT', 'windowStart and windowEnd must be ISO date-times', 400);
-  if (Date.parse(windowEnd) <= Date.parse(windowStart)) return reject('BAD_INPUT', 'windowEnd must be after windowStart', 400);
+// A planned window starts now or later and lasts at most maxWindowHours.
+export function checkWindow({ windowStart, windowEnd }, now = Date.now()) {
+  if (!validDate(windowStart) || !validDate(windowEnd)) return badInput('windowStart and windowEnd must be ISO date-times');
+  const start = Date.parse(windowStart), end = Date.parse(windowEnd);
+  if (end <= start) return badInput('windowEnd must be after windowStart');
+  if (start < now - LIMITS.pastToleranceMin * 60000) return badInput('windowStart is in the past');
+  if (end - start > LIMITS.maxWindowHours * 3600000) return badInput(`a planned window may last at most ${LIMITS.maxWindowHours} hours`);
   return null;
 }
 
@@ -216,13 +257,15 @@ export function checkNotify({ incident, plan, actor, skip, reason }) {
   if (incident.status !== 'scheduled') return reject('NOT_SCHEDULED', `outage is ${incident.status}`);
   if (plan.state !== 'approved') return reject('PLAN_NOT_APPROVED', 'approve the switching plan before notifying customers');
   if (skip && blank(reason)) return reject('REASON_REQUIRED', 'skipping the notice needs a reason', 400);
+  if (tooLong(reason)) return badInput(`reason is limited to ${LIMITS.maxText} characters`);
   return null;
 }
 
-export function checkReschedule({ incident, steps, actor, windowStart, windowEnd }) {
+export function checkReschedule({ incident, steps, actor, windowStart, windowEnd, workDescription }, now = Date.now()) {
   if (!isOperator(actor)) return reject('FORBIDDEN', 'only the control room reschedules', 403);
-  const badWindow = checkWindow({ windowStart, windowEnd });
+  const badWindow = checkWindow({ windowStart, windowEnd }, now);
   if (badWindow) return badWindow;
+  if (tooLong(workDescription)) return badInput(`workDescription is limited to ${LIMITS.maxText} characters`);
   if (!['scheduled', 'notified'].includes(incident.status)) return reject('SWITCHING_STARTED', `outage is ${incident.status}`);
   if (steps.some((s) => s.state === 'confirmed')) return reject('SWITCHING_STARTED', 'switching has started');
   return null;
@@ -236,6 +279,7 @@ export function checkCancel({ incident, steps, actor, reason }) {
     return reject('SWITCHING_STARTED', 'switching has started; restore supply instead of cancelling');
   }
   if (blank(reason)) return reject('REASON_REQUIRED', 'a reason is required', 400);
+  if (tooLong(reason)) return badInput(`reason is limited to ${LIMITS.maxText} characters`);
   return null;
 }
 
