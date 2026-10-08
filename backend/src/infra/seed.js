@@ -11,7 +11,7 @@ export async function seed({ force = false } = {}) {
     // OMS-01 planned-outage rows reference incidents, so they go first.
     // safety_log is left alone: it is append-only by design (a DB trigger
     // refuses DELETE) and has no foreign keys, so it outlives the reset.
-    for (const table of ['switching_steps', 'work_permits', 'switching_plans', 'planned_outages']) {
+    for (const table of ['planned_crew_reports', 'switching_steps', 'work_permits', 'switching_plans', 'planned_outages']) {
       await t.none(`DELETE FROM ${table}`);
     }
     for (const table of ['job_updates','jobs','incident_events','notifications','trouble_calls','alarms','audit_log','complaints','incidents','crews']) {

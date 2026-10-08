@@ -25,6 +25,7 @@ export const TOPICS = {
   PERMIT_CHANGED: 'oms.permit.changed',
   STEP_CONFIRMED: 'oms.switching.confirmed',
   STEP_REJECTED: 'oms.switching.rejected',
+  CREW_REPORT: 'oms.planned.crew_report',
   CREW_UPDATED: 'crew.updated',
   JOB_UPDATED: 'crew.job.updated',
   INDICES_UPDATED: 'oms.indices.updated',

@@ -54,6 +54,7 @@ const TAPE_LABEL = {
   'oms.permit.changed': ['PERMIT', ''],
   'oms.switching.confirmed': ['SWITCHING', 'ok'],
   'oms.switching.rejected': ['SWITCHING REJECTED', 'crit'],
+  'oms.planned.crew_report': ['CREW REPORT', ''],
   'scada.alarm.raised': ['SCADA ALARM', 'crit'],
   'scada.alarm.acked': ['ALARM ACK', 'ok'],
   'tcs.call.received': ['TROUBLE CALL', ''],
@@ -73,6 +74,7 @@ function LiveTape() {
       else if (topic === 'oms.permit.changed') detail = `${p.permit_no} . ${p.crew_id} . ${p.state}`;
       else if (topic === 'oms.switching.confirmed') detail = `${p.phase} ${p.seq} . ${p.device_label} . ${p.confirmed_by}`;
       else if (topic === 'oms.switching.rejected') detail = `${p.code}`;
+      else if (topic === 'oms.planned.crew_report') detail = `${p.incidentId} . ${p.report?.crew_id} . ${p.report?.kind === 'delay' ? 'DELAY' : 'site report'}`;
       else if (topic.startsWith('scada')) detail = `${p.tag} . ${p.condition}`;
       else if (topic === 'tcs.call.received') detail = `${p.customer} . ${p.category}`;
       else if (topic === 'crew.updated') detail = `${p.name} . ${p.status}`;
@@ -132,9 +134,14 @@ export default function App() {
   useEffect(() => {
     const onRejected = (p) => toast(`Switching step REJECTED (${p.code}): ${p.message}`, 'err', 20000);
     const onPermit = (p) => { if (p.state === 'requested') toast(`Permit ${p.permit_no} requested by crew ${p.crew_id}: waiting for issue`, 'err', 20000); };
+    // A crew delay report waits for the control room to apply or dismiss it.
+    const onCrewReport = (p) => (p.report?.kind === 'delay'
+      ? toast(`Crew ${p.report.crew_id} reports a DELAY on ${p.incidentId} (${p.zone}): open Planned outages to apply & notify`, 'err', 20000)
+      : toast(`Crew ${p.report?.crew_id} site report on ${p.incidentId}: ${p.report?.note || ''}`));
     socket.on('oms.switching.rejected', onRejected);
     socket.on('oms.permit.changed', onPermit);
-    return () => { socket.off('oms.switching.rejected', onRejected); socket.off('oms.permit.changed', onPermit); };
+    socket.on('oms.planned.crew_report', onCrewReport);
+    return () => { socket.off('oms.switching.rejected', onRejected); socket.off('oms.permit.changed', onPermit); socket.off('oms.planned.crew_report', onCrewReport); };
   }, []);
 
   const active = NAV.find((n) => n[0] === tab);

@@ -220,6 +220,50 @@ const server = app.listen(PORT, async () => {
     r = await call('op', 'GET', `/planned-outages/${po.id}`);
     check('operator reads the outage', r.status === 200 && r.body.id === po.id);
 
+    console.log('-- crew reports and delays (F5)');
+    const endNow = async () => new Date((await repo.plannedOutage(po.id)).window_end).getTime();
+    const end0 = await endNow();
+    const report = (as, body) => call(as, 'POST', `/mobile/jobs/${jobId}/planned-outage/report`, body);
+    r = await report('c5', { kind: 'site_report', note: 'not mine', clientReportId: 'rep-c5' });
+    check('another crew cannot report on this job (403)', r.status === 403 && r.body.code === 'NOT_YOUR_JOB');
+    r = await report('c3', { kind: 'site_report', note: 'On site, 4 men, area barricaded, earths on', clientReportId: 'rep-1' });
+    check('crew site report (preliminary info) recorded', r.status === 201 && r.body.report?.state === 'received');
+    check('site report on the incident timeline', (await repo.incidentEvents(incId)).some((e) => e.note.includes('site report: On site, 4 men')));
+    r = await report('c3', { kind: 'delay', note: 'x', expectedEnd: new Date(end0 - 60000).toISOString(), clientReportId: 'rep-bad1' });
+    check('delay report earlier than the window end -> 400', r.status === 400 && r.body.code === 'BAD_INPUT');
+    r = await report('c3', { kind: 'delay', note: 'x', expectedEnd: new Date(end0 + 25 * 3600e3).toISOString(), clientReportId: 'rep-bad2' });
+    check('delay report beyond +24 h -> 400', r.status === 400 && r.body.code === 'BAD_INPUT');
+    const noticesBefore = notices.filter((n) => n.plannedOutageId === po.id).length;
+    const want = new Date(end0 + 90 * 60000).toISOString();
+    r = await report('c3', { kind: 'delay', note: 'Pole base rotten, replacing it', expectedEnd: want, clientReportId: 'rep-2' });
+    const delayReport = r.body.report;
+    check('crew delay report -> pending; window and notices unchanged',
+      r.status === 201 && delayReport?.state === 'pending' && (await endNow()) === end0 && notices.filter((n) => n.plannedOutageId === po.id).length === noticesBefore);
+    r = await report('c3', { kind: 'delay', note: 'Pole base rotten, replacing it', expectedEnd: want, clientReportId: 'rep-2' });
+    check('same report re-sent -> replay, stored once', r.status === 200 && r.body.replay === true
+      && (await db.one("SELECT count(*)::int n FROM planned_crew_reports WHERE client_report_id='rep-2'")).n === 1);
+    const listed = (await call('op', 'GET', '/planned-outages')).body.find((x) => x.id === po.id);
+    check('control room list flags the pending delay report', listed?.pending_delay_reports === 1);
+    const crewView = (await call('c3', 'GET', `/mobile/jobs/${jobId}/planned-outage`)).body;
+    check('crew view lists its own reports', crewView.reports?.some((x) => x.id === delayReport.id && x.state === 'pending'));
+    r = await call('c3', 'POST', `/planned-outages/${po.id}/delay`, { newWindowEnd: want, reason: 'crew tries' });
+    check('crew-only token cannot extend the window (403)', r.status === 403);
+    r = await call('op', 'POST', `/planned-outages/${po.id}/delay`, { newWindowEnd: want, reason: 'Pole replacement needed', reportId: delayReport.id });
+    const applied = await repo.plannedOutage(po.id);
+    check('Apply & notify: window_end and ert moved, report applied',
+      r.status === 200 && (await endNow()) === Date.parse(want) && new Date(applied.incident.ert).getTime() === Date.parse(want)
+      && applied.reports.find((x) => x.id === delayReport.id)?.state === 'applied');
+    check('"extended" notice published with the previous end', notices.some((n) => n.plannedOutageId === po.id && n.kind === 'extended' && Date.parse(n.previousWindowEnd) === end0));
+    check('delay in the safety log', (await repo.safetyLog(po.id)).some((l) => l.action === 'outage.delay' && l.details.reportId === delayReport.id && l.actor === 'op.sharma'));
+    r = await call('op', 'POST', `/planned-outages/${po.id}/delay`, { newWindowEnd: new Date(Date.parse(want) + 60000).toISOString(), reason: 'again', reportId: delayReport.id });
+    check('a report cannot be applied twice -> 409 REPORT_NOT_PENDING', r.status === 409 && r.body.code === 'REPORT_NOT_PENDING');
+    r = await report('c3', { kind: 'delay', note: 'maybe later', expectedEnd: new Date(Date.parse(want) + 30 * 60000).toISOString(), clientReportId: 'rep-3' });
+    const r3 = r.body.report;
+    r = await call('op', 'POST', `/planned-outages/${po.id}/delay-reports/${r3.id}/dismiss`, { reason: 'Second crew arriving, no extension needed' });
+    check('control room dismisses a delay report', r.status === 200 && r.body.outage.reports.find((x) => x.id === r3.id)?.state === 'dismissed' && (await endNow()) === Date.parse(want));
+    r = await call('op', 'POST', `/planned-outages/${po.id}/delay`, { newWindowEnd: new Date(Date.parse(want) + 30 * 60000).toISOString(), reason: 'Rain, slower work' });
+    check('control room may extend directly (no crew report)', r.status === 200);
+
     console.log('-- SCADA during planned work');
     _resetDedupState();
     const trip = await handleScadaEvent({ tag: 'TESTPO.F1.CB11', condition: 'CRITICAL', substation: 'TESTPO' });

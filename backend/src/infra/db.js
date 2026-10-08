@@ -386,6 +386,30 @@ export async function migrate() {
     ALTER TABLE planned_outages ADD COLUMN IF NOT EXISTS deenergisation TEXT CHECK (deenergisation IN ('complete', 'partial'));
     ALTER TABLE planned_outages ADD COLUMN IF NOT EXISTS affected_section TEXT;
 
+    -- What a crew reports from site (FAT OMS-01 "crew preliminary info",
+    -- "crew delay updates"). A site report is information; a delay report is
+    -- a request: it changes nothing until the control room applies it
+    -- (window_end, ert, "extended" notice) or dismisses it.
+    CREATE TABLE IF NOT EXISTS planned_crew_reports (
+      id                TEXT PRIMARY KEY,
+      planned_outage_id TEXT NOT NULL REFERENCES planned_outages(id),
+      job_id            TEXT NOT NULL,
+      crew_id           TEXT NOT NULL,
+      kind              TEXT NOT NULL CHECK (kind IN ('site_report', 'delay')),
+      note              TEXT NOT NULL,
+      expected_end      TIMESTAMPTZ,
+      state             TEXT NOT NULL CHECK (state IN ('received', 'pending', 'applied', 'dismissed')),
+      client_report_id  TEXT UNIQUE NOT NULL,
+      reported_by       TEXT NOT NULL,
+      reported_at       TIMESTAMPTZ NOT NULL,
+      resolved_by       TEXT,
+      resolved_at       TIMESTAMPTZ,
+      resolution_note   TEXT,
+      applied_end       TIMESTAMPTZ,
+      CHECK (kind = 'site_report' OR expected_end IS NOT NULL)
+    );
+    CREATE INDEX IF NOT EXISTS planned_crew_reports_outage_idx ON planned_crew_reports(planned_outage_id, reported_at);
+
     -- Append-only, enforced in the database for every environment (unlike
     -- audit_log's trigger, which lives in a manual migration). TRUNCATE is
     -- blocked too, so a reset script can't wipe it by accident.

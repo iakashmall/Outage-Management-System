@@ -29,10 +29,16 @@ async function loadOutage(t, plannedOutageId, { lock = false } = {}) {
   const steps = await t.any(`SELECT * FROM switching_steps WHERE plan_id=$1 ${STEP_ORDER}`, [plan.id]);
   const permits = await t.any('SELECT * FROM work_permits WHERE planned_outage_id=$1 ORDER BY requested_at', [po.id]);
   const jobs = await t.any('SELECT id, crew_id, status, priority, updated_at FROM jobs WHERE incident_id=$1 ORDER BY id', [po.incident_id]);
-  return { po, plan, incident, steps, permits, jobs };
+  const reports = await t.any('SELECT * FROM planned_crew_reports WHERE planned_outage_id=$1 ORDER BY reported_at', [po.id]);
+  return { po, plan, incident, steps, permits, jobs, reports };
 }
 
-const outageView = ({ po, plan, incident, steps, permits, jobs }) => ({ ...po, incident, plan, steps, permits, jobs });
+const outageView = ({ po, plan, incident, steps, permits, jobs, reports }) => ({ ...po, incident, plan, steps, permits, jobs, reports });
+const hhmmIST = (d) => new Date(d).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' });
+async function addEvent(t, incidentId, actor, kind, note) {
+  await t.none(`INSERT INTO incident_events (id,incident_id,ts,actor,kind,note) VALUES ($1,$2,$3,$4,$5,$6)`,
+    ['EV' + nanoid(8), incidentId, new Date().toISOString(), actor, kind, note]);
+}
 
 function requireActor(actor) {
   if (!actor?.username || !Array.isArray(actor.roles)) throw new Error('planned-outage changes need a verified actor { username, roles, crewId }');
@@ -515,7 +521,8 @@ export const repo = {
             sp.state AS plan_state,
             (SELECT count(*) FROM switching_steps s WHERE s.plan_id = sp.id)::int AS step_count,
             (SELECT count(*) FROM switching_steps s WHERE s.plan_id = sp.id AND s.state = 'confirmed')::int AS steps_confirmed,
-            (SELECT count(*) FROM work_permits p WHERE p.planned_outage_id = po.id AND p.state IN ('requested','issued'))::int AS open_permits
+            (SELECT count(*) FROM work_permits p WHERE p.planned_outage_id = po.id AND p.state IN ('requested','issued'))::int AS open_permits,
+            (SELECT count(*) FROM planned_crew_reports r WHERE r.planned_outage_id = po.id AND r.state = 'pending')::int AS pending_delay_reports
      FROM planned_outages po
      JOIN incidents i ON i.id = po.incident_id
      JOIN switching_plans sp ON sp.planned_outage_id = po.id
@@ -645,6 +652,70 @@ export const repo = {
       return { result: { step: await t.one('SELECT * FROM switching_steps WHERE id=$1', [stepId]) } };
     });
   },
+
+  // ---- crew reports and delays (FAT: preliminary info, delay updates) ----
+
+  // A crew's site report or delay report on its own job. A delay report only
+  // records the request (state 'pending'); nothing about the window changes.
+  addCrewReport: async (jobId, actor, { kind, note, expectedEnd = null, clientReportId }) => {
+    const job = await db.oneOrNone('SELECT * FROM jobs WHERE id=$1', [jobId]);
+    if (!job) return notFound('job');
+    const row = await db.oneOrNone('SELECT id FROM planned_outages WHERE incident_id=$1', [job.incident_id]);
+    if (!row) return { error: { code: 'NOT_A_PLANNED_JOB', message: 'this job is not part of a planned outage', status: 409 } };
+    return withOutage(row.id, actor, async (t, ctx) => {
+      const reject = rules.checkCrewReport({ ...ctx, job, actor, kind, note, expectedEnd, clientReportId });
+      if (reject?.replay) return { result: { report: reject.report, replay: true } };
+      if (reject) return { reject, entity: 'report', entityId: jobId, action: `crew.${kind === 'delay' ? 'delay_report' : 'site_report'}`, details: { clientReportId } };
+      const report = {
+        id: 'CR' + nanoid(8), planned_outage_id: ctx.po.id, job_id: jobId, crew_id: job.crew_id, kind, note: note.trim(),
+        expected_end: kind === 'delay' ? expectedEnd : null, state: kind === 'delay' ? 'pending' : 'received',
+        client_report_id: clientReportId, reported_by: actor.username,
+      };
+      await t.none(`INSERT INTO planned_crew_reports (id,planned_outage_id,job_id,crew_id,kind,note,expected_end,state,client_report_id,reported_by,reported_at)
+        VALUES ($/id/,$/planned_outage_id/,$/job_id/,$/crew_id/,$/kind/,$/note/,$/expected_end/,$/state/,$/client_report_id/,$/reported_by/,now())`, report);
+      await logSafety(t, ctx.po.id, actor, { entity: 'report', entityId: report.id, action: kind === 'delay' ? 'crew.delay_report' : 'crew.site_report',
+        to: report.state, details: { jobId, note: report.note, expectedEnd: report.expected_end, clientReportId } });
+      await addEvent(t, ctx.incident.id, actor.username, 'field', kind === 'delay'
+        ? `Crew ${job.crew_id} reports a delay: expects to finish by ${hhmmIST(expectedEnd)} - ${report.note} (awaiting control room)`
+        : `Crew ${job.crew_id} site report: ${report.note}`);
+      return { result: { report: await t.one('SELECT * FROM planned_crew_reports WHERE id=$1', [report.id]) } };
+    });
+  },
+
+  // The control room extends the window, directly or by applying a crew's
+  // pending delay report. The route then sends the "extended" notice.
+  delayPlannedOutage: (plannedOutageId, actor, { newWindowEnd, reason, reportId = null }) =>
+    withOutage(plannedOutageId, actor, async (t, ctx) => {
+      const report = reportId ? ctx.reports.find((x) => x.id === reportId) : null;
+      if (reportId && !report) return { reject: { code: 'NOT_FOUND', message: 'delay report not found', status: 404 }, entity: 'outage', entityId: ctx.po.id, action: 'outage.delay' };
+      const reject = rules.checkDelay({ incident: ctx.incident, po: ctx.po, actor, newWindowEnd, reason, report });
+      if (reject) return { reject, entity: 'outage', entityId: ctx.po.id, action: 'outage.delay', details: { reportId } };
+      const previousWindowEnd = new Date(ctx.po.window_end).toISOString();
+      await t.none('UPDATE planned_outages SET window_end=$2 WHERE id=$1', [ctx.po.id, newWindowEnd]);
+      await t.none('UPDATE incidents SET ert=$2 WHERE id=$1', [ctx.incident.id, newWindowEnd]);
+      if (report) {
+        await t.none(`UPDATE planned_crew_reports SET state='applied', resolved_by=$2, resolved_at=now(), resolution_note=$3, applied_end=$4 WHERE id=$1`,
+          [report.id, actor.username, reason.trim(), newWindowEnd]);
+      }
+      await logSafety(t, ctx.po.id, actor, { entity: 'outage', entityId: ctx.po.id, action: 'outage.delay',
+        details: { from: previousWindowEnd, to: newWindowEnd, reason: reason.trim(), reportId } });
+      await addEvent(t, ctx.incident.id, actor.username, 'ert',
+        `Planned window extended to ${hhmmIST(newWindowEnd)} (was ${hhmmIST(previousWindowEnd)})${report ? ` on crew ${report.crew_id}'s report` : ''} - ${reason.trim()}`);
+      return { result: { previousWindowEnd, reason: reason.trim() } };
+    }),
+
+  dismissDelayReport: (plannedOutageId, reportId, actor, { reason }) =>
+    withOutage(plannedOutageId, actor, async (t, ctx) => {
+      const report = ctx.reports.find((x) => x.id === reportId);
+      if (!report) return { reject: { code: 'NOT_FOUND', message: 'delay report not found', status: 404 }, entity: 'report', entityId: reportId, action: 'crew.delay_dismiss' };
+      const reject = rules.checkDismissReport({ actor, report, reason });
+      if (reject) return { reject, entity: 'report', entityId: reportId, action: 'crew.delay_dismiss' };
+      await t.none(`UPDATE planned_crew_reports SET state='dismissed', resolved_by=$2, resolved_at=now(), resolution_note=$3 WHERE id=$1`,
+        [reportId, actor.username, reason.trim()]);
+      await logSafety(t, ctx.po.id, actor, { entity: 'report', entityId: reportId, action: 'crew.delay_dismiss', from: 'pending', to: 'dismissed', details: { reason: reason.trim() } });
+      await addEvent(t, ctx.incident.id, actor.username, 'field', `Delay report from crew ${report.crew_id} dismissed - ${reason.trim()}`);
+      return { result: {} };
+    }),
 
   // ---- work permits: online-only handshake (§3.4) ----
   requestPermit: async (jobId, actor, { clientRequestId }) => {

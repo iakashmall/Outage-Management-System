@@ -135,9 +135,17 @@ export function startNotifier() {
 
   // OMS-01 advance notice of a planned outage. The restoration notice is the
   // ordinary "power restored" message below, sent when it is resolved.
-  bus.subscribe(TOPICS.PLANNED_NOTICE, async ({ incident: inc, windowStart, windowEnd, workDescription, deenergisation, affectedSection }) => {
+  bus.subscribe(TOPICS.PLANNED_NOTICE, async ({ kind = 'advance', incident: inc, windowStart, windowEnd, workDescription, deenergisation, affectedSection, previousWindowEnd, reason }) => {
     const { where } = describe(inc);
     const fmt = (iso) => new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' });
+    if (kind === 'extended') {
+      const subject = `Planned power shutdown in ${where} extended`;
+      const body = `The planned shutdown in ${where} is taking longer than planned. Supply is now expected by ${fmt(windowEnd)}` +
+        (previousWindowEnd ? ` (previously ${fmt(previousWindowEnd)})` : '') + `. Reason: ${reason}. Ref: ${inc.id}.`;
+      await sendEmail(inc.id, subject, body);
+      await sendSms(inc.id, body);
+      return;
+    }
     const scope = deenergisation === 'partial' ? `Partial shutdown (${affectedSection || 'part of the area'})` : deenergisation === 'complete' ? 'Complete shutdown' : 'Planned shutdown';
     const subject = `Planned power shutdown in ${where}`;
     const body = `${scope} in ${where} from ${fmt(windowStart)} to ${fmt(windowEnd)} for ${workDescription}` +

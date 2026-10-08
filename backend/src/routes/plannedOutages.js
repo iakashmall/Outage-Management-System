@@ -182,6 +182,21 @@ r.post('/planned-outages/:id/notify', operator, needActor, async (req, res) => {
 r.post('/planned-outages/:id/cancel', operator, needActor, async (req, res) =>
   reply(res, await repo.cancelPlannedOutage(req.params.id, actor(req), { reason: req.body?.reason })));
 
+// Extend the window: { newWindowEnd, reason, reportId? }. With reportId it
+// applies that crew delay report. Customers get the "extended" notice.
+r.post('/planned-outages/:id/delay', operator, needActor, async (req, res) => {
+  const b = req.body || {};
+  const out = await repo.delayPlannedOutage(req.params.id, actor(req), { newWindowEnd: b.newWindowEnd, reason: b.reason, reportId: b.reportId || null });
+  if (!out.error) {
+    publishNotice(out.outage, { kind: 'extended', previousWindowEnd: out.previousWindowEnd, reason: out.reason });
+    bus.publish(TOPICS.INCIDENT_UPDATED, out.outage.incident); // new ert on dashboards
+  }
+  reply(res, out);
+});
+
+r.post('/planned-outages/:id/delay-reports/:reportId/dismiss', operator, needActor, async (req, res) =>
+  reply(res, await repo.dismissDelayReport(req.params.id, req.params.reportId, actor(req), { reason: req.body?.reason })));
+
 // { force: true, reason } closes even with crew jobs still open (logged).
 r.post('/planned-outages/:id/close', operator, needActor, async (req, res) =>
   reply(res, await repo.closePlannedOutage(req.params.id, actor(req), { force: req.body?.force === true, reason: req.body?.reason ?? null })));
@@ -241,8 +256,25 @@ r.get('/mobile/jobs/:id/planned-outage', crew, async (req, res) => {
       state: s.state, confirmedBy: s.confirmed_by, performedAt: s.performed_at, actionable: actionable.has(s.id),
     })),
     permit: po.permits.filter((p) => p.job_id === job.id).at(-1) || null,
+    reports: po.reports.filter((x) => x.job_id === job.id).map((x) => ({
+      id: x.id, kind: x.kind, note: x.note, expectedEnd: x.expected_end, state: x.state, reportedAt: x.reported_at,
+      resolvedBy: x.resolved_by, resolutionNote: x.resolution_note, appliedEnd: x.applied_end,
+    })),
     serverTime: new Date().toISOString(),
   });
+});
+
+// A site report (preliminary information) or a delay report from the crew
+// on its own job: { kind: 'site_report'|'delay', note, expectedEnd?, clientReportId }.
+// Online only. A delay report is a request to the control room; it does
+// not move the window or notify customers by itself.
+r.post('/mobile/jobs/:id/planned-outage/report', crew, needActor, async (req, res) => {
+  const b = req.body || {};
+  const out = await repo.addCrewReport(req.params.id, actor(req), { kind: b.kind, note: b.note, expectedEnd: b.expectedEnd ?? null, clientReportId: b.clientReportId });
+  if (!out.error && !out.replay) {
+    bus.publish(TOPICS.CREW_REPORT, { plannedOutageId: out.outage.id, incidentId: out.outage.incident_id, zone: out.outage.incident.zone, report: out.report });
+  }
+  reply(res, out, out.error || out.replay ? 200 : 201);
 });
 
 r.post('/mobile/jobs/:id/permit/request', crew, needActor, async (req, res) => {

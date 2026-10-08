@@ -8,7 +8,7 @@ import { api } from '../lib/api.js';
 import { plannedApi } from '../lib/plannedApi.js';
 import { StatusBadge, hhmm, timeAgo, useLiveRefresh, toast } from '../lib/ui.jsx';
 
-const TOPICS = ['oms.planned.updated', 'oms.permit.changed', 'oms.switching.confirmed', 'oms.switching.rejected', 'oms.incident.updated', 'crew.job.updated'];
+const TOPICS = ['oms.planned.updated', 'oms.planned.crew_report', 'oms.permit.changed', 'oms.switching.confirmed', 'oms.switching.rejected', 'oms.incident.updated', 'crew.job.updated'];
 const ACTION_TEXT = {
   open: 'OPEN', close: 'CLOSE', rack_out: 'Rack out', rack_in: 'Rack in', test_dead: 'Test dead',
   earth_apply: 'Apply earth', earth_remove: 'Remove earth', tag_apply: 'Apply danger tag', tag_remove: 'Remove danger tag',
@@ -53,6 +53,7 @@ export default function PlannedOutages() {
               <div style={{ fontSize: 12, marginTop: 3 }}>
                 Plan {p.plan_state} · {p.steps_confirmed}/{p.step_count} steps
                 {p.open_permits > 0 && <span style={{ color: 'var(--crit)', fontWeight: 600 }}> · {p.open_permits} permit open</span>}
+                {p.pending_delay_reports > 0 && <span style={{ color: 'var(--crit)', fontWeight: 700 }}> · DELAY REPORTED</span>}
               </div>
             </button>
           ))}
@@ -174,6 +175,8 @@ function OutageDetail({ id, crews, onChanged }) {
           }}>Close work order</button>}
         </div>
 
+        <CrewReports o={o} act={act} ask={ask} />
+
         <div style={{ display: 'flex', gap: 6, borderBottom: '1px solid var(--line)', marginBottom: 12 }}>
           {[['plan', 'Switching plan'], ['permits', `Permits (${o.permits.length})`], ['log', `Safety log (${log.length})`]].map(([k, label]) => (
             <button key={k} className="btn sm" style={{ borderBottom: tab === k ? '2px solid var(--navy)' : undefined, borderRadius: '6px 6px 0 0' }} onClick={() => setTab(k)}>{label}</button>
@@ -185,6 +188,62 @@ function OutageDetail({ id, crews, onChanged }) {
         {tab === 'permits' && <Permits o={o} act={act} ask={ask} />}
         {tab === 'log' && <SafetyLog log={log} />}
       </div>
+    </div>
+  );
+}
+
+const DELAY_STATES = ['notified', 'isolating', 'in_progress', 'restoring'];
+
+// Crew site reports and delay reports. A pending delay report changes
+// nothing until the control room applies it here ("Apply & notify") or
+// dismisses it. The control room may also extend the window directly.
+function CrewReports({ o, act, ask }) {
+  const [form, setForm] = useState(null); // { reportId?, end, reason }
+  const reports = o.reports || [];
+  const pending = reports.filter((x) => x.state === 'pending');
+  const others = reports.filter((x) => x.state !== 'pending');
+  const active = DELAY_STATES.includes(o.incident.status);
+  const open = (reportId, end, reason) => setForm({ reportId, end: toLocalInput(new Date(end)), reason: reason || '' });
+  // The form closes only if the server accepted it.
+  const submit = () => act(async () => {
+    await plannedApi.delay(o.id, { newWindowEnd: new Date(form.end).toISOString(), reason: form.reason, reportId: form.reportId || undefined });
+    setForm(null);
+  }, 'Window extended; customers notified');
+  if (!reports.length && !active) return null;
+  return (
+    <div style={{ margin: '4px 0 12px' }}>
+      {pending.map((x) => (
+        <div key={x.id} style={{ background: 'var(--crit-bg, #fdecea)', border: '1px solid var(--crit)', borderRadius: 8, padding: '8px 10px', marginBottom: 6, fontSize: 13 }}>
+          <b style={{ color: 'var(--crit)' }}>DELAY REPORTED</b> by crew {x.crew_id} {timeAgo(x.reported_at)}: expects to finish by <b>{when(x.expected_end)}</b> (window ends {when(o.window_end)})
+          <div style={{ margin: '3px 0 6px' }}>{x.note}</div>
+          <span style={{ display: 'inline-flex', gap: 6 }}>
+            <button className="btn sm primary" onClick={() => open(x.id, x.expected_end, x.note)}>Apply &amp; notify…</button>
+            <button className="btn sm" onClick={() => { const r = ask('Dismiss this delay report? Reason:'); if (r) act(() => plannedApi.dismissReport(o.id, x.id, r), 'Delay report dismissed'); }}>Dismiss…</button>
+          </span>
+        </div>
+      ))}
+      {active && !form && <button className="btn sm" onClick={() => open(null, new Date(new Date(o.window_end).getTime() + 3600e3), '')}>Extend window…</button>}
+      {form && (
+        <div style={{ border: '1px solid var(--line-2)', borderRadius: 8, padding: 10, display: 'grid', gap: 6, marginTop: 6 }}>
+          <div className="eyebrow">{form.reportId ? 'Apply the crew\'s delay' : 'Extend the window'} - customers get an "extended" notice</div>
+          <label style={{ fontSize: 12.5 }}>New end <input type="datetime-local" style={{ ...inp, width: 'auto', marginLeft: 6 }} value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })} /></label>
+          <label style={{ fontSize: 12.5 }}>Reason (sent to customers)<input style={inp} value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} /></label>
+          <span style={{ display: 'inline-flex', gap: 6 }}>
+            <button className="btn sm primary" disabled={!form.reason.trim() || !form.end} onClick={submit}>Apply &amp; notify</button>
+            <button className="btn sm" onClick={() => setForm(null)}>Cancel</button>
+          </span>
+        </div>
+      )}
+      {others.length > 0 && (
+        <div style={{ marginTop: 8, fontSize: 12.5 }}>
+          <div className="eyebrow" style={{ marginBottom: 4 }}>Crew reports</div>
+          {others.map((x) => (
+            <div key={x.id} style={{ marginBottom: 3 }}>
+              <span className="mono">{when(x.reported_at)}</span> · crew {x.crew_id} · {x.kind === 'delay' ? `delay to ${when(x.expected_end)} (${x.state}${x.resolved_by ? ` by ${x.resolved_by}` : ''})` : 'site report'}: {x.note}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

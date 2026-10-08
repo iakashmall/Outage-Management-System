@@ -283,6 +283,56 @@ export function checkCancel({ incident, steps, actor, reason }) {
   return null;
 }
 
+// ---- crew reports and delays (FAT: crew preliminary info, delay updates) ----
+
+export const CREW_REPORT_KINDS = ['site_report', 'delay'];
+// Outage states in which supply is (about to be) off and the end time matters.
+export const DELAY_STATES = ['notified', 'isolating', 'in_progress', 'restoring'];
+export const MAX_DELAY_HOURS = 24; // one extension may push the end at most this far
+
+// A new end time must be later than the current one, and not absurdly so.
+function checkNewEnd(currentEnd, newEnd) {
+  if (!validDate(newEnd)) return badInput('the new end time must be an ISO date-time');
+  const cur = new Date(currentEnd).getTime(), next = Date.parse(newEnd);
+  if (next <= cur) return badInput('the new end time must be later than the current window end');
+  if (next - cur > MAX_DELAY_HOURS * 3600000) return badInput(`one extension may add at most ${MAX_DELAY_HOURS} hours`);
+  return null;
+}
+
+// A crew's report from site. A delay report is only a request: the window
+// and customers are untouched until the control room applies it.
+export function checkCrewReport({ incident, po, job, reports = [], actor, kind, note, expectedEnd, clientReportId }) {
+  if (blank(clientReportId)) return reject('CLIENT_ID_REQUIRED', 'clientReportId is required', 400);
+  if (tooLong(clientReportId, LIMITS.maxLabel)) return badInput('clientReportId too long');
+  if (!isCrew(actor) || actor.crewId !== job.crew_id) return reject('NOT_YOUR_JOB', 'only the crew assigned to this job can report on it', 403);
+  const replay = reports.find((x) => x.client_report_id === clientReportId);
+  if (replay) return { replay: true, report: replay };
+  if (!CREW_REPORT_KINDS.includes(kind)) return badInput(`kind must be one of ${CREW_REPORT_KINDS.join(', ')}`);
+  if (blank(note)) return badInput('a note is required');
+  if (tooLong(note)) return badInput(`note is limited to ${LIMITS.maxText} characters`);
+  if (!DELAY_STATES.includes(incident.status)) return reject('OUTAGE_NOT_ACTIVE', `the outage is ${incident.status}`);
+  return kind === 'delay' ? checkNewEnd(po.window_end, expectedEnd) : null;
+}
+
+// The control room extends the window (directly, or by applying a crew's
+// delay report). Customers get an "extended" notice.
+export function checkDelay({ incident, po, actor, newWindowEnd, reason, report }) {
+  if (!isOperator(actor)) return reject('FORBIDDEN', 'only the control room extends a planned outage', 403);
+  if (!DELAY_STATES.includes(incident.status)) return reject('OUTAGE_NOT_ACTIVE', `the outage is ${incident.status}`);
+  if (report && !(report.kind === 'delay' && report.state === 'pending')) return reject('REPORT_NOT_PENDING', `that report is ${report.state}`);
+  if (blank(reason)) return reject('REASON_REQUIRED', 'a reason is required (it is sent to customers)', 400);
+  if (tooLong(reason)) return badInput(`reason is limited to ${LIMITS.maxText} characters`);
+  return checkNewEnd(po.window_end, newWindowEnd);
+}
+
+export function checkDismissReport({ actor, report, reason }) {
+  if (!isOperator(actor)) return reject('FORBIDDEN', 'only the control room dismisses a delay report', 403);
+  if (!(report.kind === 'delay' && report.state === 'pending')) return reject('REPORT_NOT_PENDING', `that report is ${report.state}`);
+  if (blank(reason)) return reject('REASON_REQUIRED', 'a reason is required', 400);
+  if (tooLong(reason)) return badInput(`reason is limited to ${LIMITS.maxText} characters`);
+  return null;
+}
+
 // Closing the work order. Every crew job on the outage must be Work Complete;
 // the control room may force it with a reason (>= 10 chars), which is
 // recorded as such.

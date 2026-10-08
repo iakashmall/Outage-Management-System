@@ -27,6 +27,9 @@ export const plannedApi = {
   notify: (id) => call('POST', `/planned-outages/${id}/notify`),
   skipNotice: (id, reason) => call('POST', `/planned-outages/${id}/notify`, { skip: true, reason }),
   cancel: (id, reason) => call('POST', `/planned-outages/${id}/cancel`, { reason }),
+  // { newWindowEnd, reason, reportId? }: extend the window and notify customers
+  delay: (id, body) => call('POST', `/planned-outages/${id}/delay`, body),
+  dismissReport: (id, reportId, reason) => call('POST', `/planned-outages/${id}/delay-reports/${reportId}/dismiss`, { reason }),
   close: (id, body) => call('POST', `/planned-outages/${id}/close`, body), // body { force: true, reason } closes with open jobs
   confirmStep: (stepId, body) => call('POST', `/switching-steps/${stepId}/confirm`, { clientConfirmationId: newClientId(), ...body }),
   issuePermit: (permitId, body) => call('POST', `/permits/${permitId}/issue`, body),

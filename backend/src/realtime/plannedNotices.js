@@ -11,8 +11,11 @@ import { SYSTEM_ACTOR } from '../domain/plannedOutage.js';
 
 const CHECK_EVERY_MS = 60 * 1000;
 
-export function publishNotice(outage) {
+// kind: 'advance' (default) or 'extended' (window end moved later; extra
+// carries previousWindowEnd and reason).
+export function publishNotice(outage, { kind = 'advance', ...extra } = {}) {
   bus.publish(TOPICS.PLANNED_NOTICE, {
+    kind, ...extra,
     plannedOutageId: outage.id, incident: outage.incident,
     windowStart: outage.window_start, windowEnd: outage.window_end, workDescription: outage.work_description,
     deenergisation: outage.deenergisation || null, affectedSection: outage.affected_section || null,
