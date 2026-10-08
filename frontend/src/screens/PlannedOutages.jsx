@@ -54,6 +54,7 @@ export default function PlannedOutages() {
                 Plan {p.plan_state} · {p.steps_confirmed}/{p.step_count} steps
                 {p.open_permits > 0 && <span style={{ color: 'var(--crit)', fontWeight: 600 }}> · {p.open_permits} permit open</span>}
                 {p.pending_delay_reports > 0 && <span style={{ color: 'var(--crit)', fontWeight: 700 }}> · DELAY REPORTED</span>}
+                {p.complaint_count > 0 && <span style={{ color: p.complaints_after_window > 0 ? 'var(--crit)' : undefined }}> · {p.complaint_count} complaint{p.complaint_count > 1 ? 's' : ''}</span>}
               </div>
             </button>
           ))}
@@ -74,7 +75,10 @@ function NewPlannedOutage({ onCancel, onCreated }) {
     severity: 'low', deenergisation: 'complete', affectedSection: '',
   });
   const [busy, setBusy] = useState(false);
+  const [areas, setAreas] = useState([]);
+  useEffect(() => { plannedApi.areas().then(setAreas).catch(fail); }, []);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const feeders = areas.find((a) => a.value === f.substation)?.feeders || [];
   const submit = async () => {
     setBusy(true);
     try {
@@ -96,8 +100,18 @@ function NewPlannedOutage({ onCancel, onCreated }) {
       <div className="card-h"><h3>New planned outage</h3></div>
       <div className="card-b" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
         {field('Zone *', <input style={inp} value={f.zone} onChange={set('zone')} placeholder="e.g. Kankhal-2" />)}
-        {field('Substation', <input style={inp} value={f.substation} onChange={set('substation')} placeholder="33/11 kV ... S/s" />)}
-        {field('Feeder', <input style={inp} value={f.feeder} onChange={set('feeder')} />)}
+        {field('Substation', (
+          <select style={inp} value={f.substation} onChange={(e) => setF({ ...f, substation: e.target.value, feeder: '' })}>
+            <option value="">(not set)</option>
+            {areas.map((a) => <option key={a.value} value={a.value}>{a.label}</option>)}
+          </select>
+        ))}
+        {field('Feeder (optional; complaints on other feeders still open fault incidents)', (
+          <select style={inp} value={f.feeder} onChange={set('feeder')} disabled={!f.substation}>
+            <option value="">(whole substation)</option>
+            {feeders.map((x) => <option key={x} value={x}>{x}</option>)}
+          </select>
+        ))}
         {field('Customers affected (estimate)', <input style={inp} type="number" value={f.customers} onChange={set('customers')} />)}
         {field('Supply off from *', <input style={inp} type="datetime-local" value={f.windowStart} onChange={set('windowStart')} />)}
         {field('Supply back by *', <input style={inp} type="datetime-local" value={f.windowEnd} onChange={set('windowEnd')} />)}
@@ -151,6 +165,14 @@ function OutageDetail({ id, crews, onChanged }) {
         <div className="kv-row"><span className="k">Work</span><span className="v">{o.work_description}</span></div>
         <div className="kv-row"><span className="k">Supply off</span><span className="v mono">{when(o.window_start)} - {when(o.window_end)}</span></div>
         <div className="kv-row"><span className="k">Customers</span><span className="v mono">{(inc.customers || 0).toLocaleString()}</span></div>
+        <div className="kv-row"><span className="k">Where</span><span className="v">{inc.substation || 'substation not set'}{inc.feeder ? ` · feeder ${inc.feeder}` : ''}</span></div>
+        <div className="kv-row"><span className="k">Customer complaints</span><span className="v mono">{o.complaints?.total || 0}{o.complaints?.last_at ? ` (last ${timeAgo(o.complaints.last_at)})` : ''}</span></div>
+        {o.complaints?.after_window > 0 && !['resolved', 'closed', 'cancelled'].includes(inc.status) && (
+          <div style={{ background: 'var(--crit-bg, #fdecea)', border: '1px solid var(--crit)', borderRadius: 8, padding: '8px 10px', margin: '6px 0', fontSize: 13 }}>
+            <b style={{ color: 'var(--crit)' }}>Complaints are still arriving after the planned window ended</b> ({o.complaints.after_window} since {when(o.window_end)}).
+            Restore supply or extend the window and notify customers.
+          </div>
+        )}
         <div className="kv-row"><span className="k">Priority</span><span className="v">{inc.severity}</span></div>
         <div className="kv-row"><span className="k">De-energisation</span><span className="v">{scopeText(o)}</span></div>
         <div className="kv-row"><span className="k">Customer notice</span><span className="v">

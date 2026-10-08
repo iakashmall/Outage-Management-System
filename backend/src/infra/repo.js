@@ -30,10 +30,14 @@ async function loadOutage(t, plannedOutageId, { lock = false } = {}) {
   const permits = await t.any('SELECT * FROM work_permits WHERE planned_outage_id=$1 ORDER BY requested_at', [po.id]);
   const jobs = await t.any('SELECT id, crew_id, status, priority, updated_at FROM jobs WHERE incident_id=$1 ORDER BY id', [po.incident_id]);
   const reports = await t.any('SELECT * FROM planned_crew_reports WHERE planned_outage_id=$1 ORDER BY reported_at', [po.id]);
-  return { po, plan, incident, steps, permits, jobs, reports };
+  // Customer complaints linked to this outage (F1); counts only, no contact data.
+  const complaints = await t.one(
+    `SELECT count(*)::int AS total, count(*) FILTER (WHERE ts > $2)::int AS after_window, max(ts) AS last_at
+     FROM complaints WHERE incident_id=$1`, [po.incident_id, po.window_end]);
+  return { po, plan, incident, steps, permits, jobs, reports, complaints };
 }
 
-const outageView = ({ po, plan, incident, steps, permits, jobs, reports }) => ({ ...po, incident, plan, steps, permits, jobs, reports });
+const outageView = ({ po, plan, incident, steps, permits, jobs, reports, complaints }) => ({ ...po, incident, plan, steps, permits, jobs, reports, complaints });
 const hhmmIST = (d) => new Date(d).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' });
 async function addEvent(t, incidentId, actor, kind, note) {
   await t.none(`INSERT INTO incident_events (id,incident_id,ts,actor,kind,note) VALUES ($1,$2,$3,$4,$5,$6)`,
@@ -241,6 +245,12 @@ export const repo = {
   activePlannedOutagesAtSubstation: (substation) => db.any(
     `SELECT po.id, po.incident_id, i.status FROM planned_outages po JOIN incidents i ON i.id = po.incident_id
      WHERE i.substation IS NOT DISTINCT FROM $1 AND i.status IN ('isolating','in_progress','restoring')`, [substation]),
+  // Planned outages a complaint at this substation might belong to; the
+  // window and feeder decision is domain/plannedComplaints.js.
+  plannedOutagesForComplaint: (substation) => db.any(
+    `SELECT po.id, po.incident_id, po.window_start, po.window_end, i.status, i.feeder, i.substation
+     FROM planned_outages po JOIN incidents i ON i.id = po.incident_id
+     WHERE i.substation = $1 AND i.status IN ('notified','isolating','in_progress','restoring')`, [substation]),
   latestPermitForJob: (jobId) =>
     db.oneOrNone('SELECT * FROM work_permits WHERE job_id=$1 ORDER BY requested_at DESC LIMIT 1', [jobId]),
 
@@ -522,7 +532,9 @@ export const repo = {
             (SELECT count(*) FROM switching_steps s WHERE s.plan_id = sp.id)::int AS step_count,
             (SELECT count(*) FROM switching_steps s WHERE s.plan_id = sp.id AND s.state = 'confirmed')::int AS steps_confirmed,
             (SELECT count(*) FROM work_permits p WHERE p.planned_outage_id = po.id AND p.state IN ('requested','issued'))::int AS open_permits,
-            (SELECT count(*) FROM planned_crew_reports r WHERE r.planned_outage_id = po.id AND r.state = 'pending')::int AS pending_delay_reports
+            (SELECT count(*) FROM planned_crew_reports r WHERE r.planned_outage_id = po.id AND r.state = 'pending')::int AS pending_delay_reports,
+            (SELECT count(*) FROM complaints c WHERE c.incident_id = po.incident_id)::int AS complaint_count,
+            (SELECT count(*) FROM complaints c WHERE c.incident_id = po.incident_id AND c.ts > po.window_end)::int AS complaints_after_window
      FROM planned_outages po
      JOIN incidents i ON i.id = po.incident_id
      JOIN switching_plans sp ON sp.planned_outage_id = po.id

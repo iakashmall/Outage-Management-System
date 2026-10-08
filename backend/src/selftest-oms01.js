@@ -19,6 +19,35 @@ import { handleScadaEvent, _resetDedupState } from './realtime/scada.js';
 import { publishRestoration } from './realtime/restoration.js';
 import { sendDueNotices } from './realtime/plannedNotices.js';
 import { startNotifier, transport, maskEmail } from './realtime/notifier.js';
+import { plannedComplaintDecision } from './domain/plannedComplaints.js';
+import { distTx, resolve as resolveAsset } from './infra/geo.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+// Real substations from network.json (planned outages must name one).
+const LALJIWALA = '33/11 kV LALJIWALA S/s';
+const ARYA_NAGAR = '33/11 kV ARYA NAGAR S/s';
+// Same throwaway key selftest.js uses when none is set (complaint phones).
+process.env.ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'selftest-only-key';
+
+// Complaint intake stores phones with pgcrypto, set up by the manual
+// migrations in db/migrations (CI does not apply them). Apply them to this
+// test database when pgcrypto is available; returns why not, otherwise null.
+const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
+async function enableComplaintPhones() {
+  try {
+    if (!(await db.oneOrNone("SELECT 1 FROM pg_available_extensions WHERE name = 'pgcrypto'"))) {
+      return 'the pgcrypto extension is not available on this PostgreSQL server';
+    }
+    const sql = (file) => readFileSync(`${REPO_ROOT}db/migrations/${file}`, 'utf8');
+    // encrypt_phone_at_rest.sql takes the key as a psql variable (:key).
+    await db.none(sql('encrypt_phone_at_rest.sql').replace(/:key\b/g, db.$config.pgp.as.text(process.env.ENCRYPTION_KEY)));
+    await db.none(sql('safe_decrypt_phone.sql'));
+    return null;
+  } catch (err) {
+    return err.message;
+  }
+}
 // The crew app's planned-outage rules are plain JS (no React Native imports).
 import * as crewApp from '../../src/lib/plannedOutage.js';
 
@@ -85,6 +114,34 @@ const server = app.listen(PORT, async () => {
     check('clientTime trusts an offline time up to 72 h (FR-APP-010)', clientTime('2026-10-04T12:00:00Z', null, { now }) === '2026-10-04T12:00:00.000Z');
     check('clientTime older than 72 h -> server time', clientTime('2026-10-04T08:00:00Z', null, { now }) === '2026-10-07T10:00:00.000Z');
 
+    console.log('-- complaint during a planned outage: decision (F1, pure)');
+    {
+      const T0 = Date.parse('2026-10-07T10:00:00Z');
+      const out = (o = {}) => ({ incident_id: 'INC-P', status: 'in_progress', window_start: new Date(T0).toISOString(),
+        window_end: new Date(T0 + 4 * 3600e3).toISOString(), feeder: 'UPCL-AN-A', substation: ARYA_NAGAR, ...o });
+      const d = (c, outs) => plannedComplaintDecision({ category: 'No Supply', feeder: 'UPCL-AN-A', substation: ARYA_NAGAR, now: T0 + 3600e3, ...c }, outs).action;
+      check('same feeder inside the window -> attach', d({}, [out()]) === 'attach');
+      check('outage without a feeder -> attach on substation', d({ feeder: 'UPCL-AN-B' }, [out({ feeder: null })]) === 'attach');
+      check('complaint feeder unknown -> attach on substation', d({ feeder: null }, [out()]) === 'attach');
+      check('different feeder of the same substation -> note (own fault incident)', d({ feeder: 'UPCL-AN-B' }, [out()]) === 'note');
+      check('Wire Down / Meter / Other never attach',
+        ['Wire Down', 'Meter', 'Other'].every((category) => d({ category }, [out()]) === 'none'));
+      check('Partial Supply and Voltage attach', d({ category: 'Partial Supply' }, [out()]) === 'attach' && d({ category: 'Voltage' }, [out()]) === 'attach');
+      check('grace before start: 29 min attaches, 31 min does not',
+        d({ now: T0 - 29 * 60000 }, [out()]) === 'attach' && d({ now: T0 - 31 * 60000 }, [out()]) === 'none');
+      check('grace after end: 59 min attaches, 61 min does not',
+        d({ now: T0 + 4 * 3600e3 + 59 * 60000 }, [out()]) === 'attach' && d({ now: T0 + 4 * 3600e3 + 61 * 60000 }, [out()]) === 'none');
+      check('a delay that moved the window end extends the grace',
+        d({ now: T0 + 6 * 3600e3 }, [out({ window_end: new Date(T0 + 5.5 * 3600e3).toISOString() })]) === 'attach');
+      check('only notified/isolating/in_progress/restoring outages count',
+        ['notified', 'isolating', 'restoring'].every((status) => d({}, [out({ status })]) === 'attach')
+        && ['scheduled', 'resolved', 'closed', 'cancelled'].every((status) => d({}, [out({ status })]) === 'none'));
+      check('another substation -> none', d({ substation: LALJIWALA }, [out()]) === 'none');
+      check('an exact feeder match wins over a substation-wide outage',
+        plannedComplaintDecision({ category: 'No Supply', feeder: 'UPCL-AN-A', substation: ARYA_NAGAR, now: T0 + 3600e3 },
+          [out({ incident_id: 'WIDE', feeder: null }), out({ incident_id: 'EXACT' })]).outage?.incident_id === 'EXACT');
+    }
+
     console.log('-- input validation (F7)');
     const okInput = { zone: 'Kankhal-2', workDescription: 'x', windowStart: hours(30), windowEnd: hours(34) };
     const bad = async (label, patch) => {
@@ -121,7 +178,7 @@ const server = app.listen(PORT, async () => {
 
     console.log('-- control room: create, plan, notify');
     check('crew cannot create a planned outage', (await call('c3', 'POST', '/planned-outages', { zone: 'Z' })).status === 403);
-    let r = await call('op', 'POST', '/planned-outages', { zone: 'Kankhal-2', substation: 'TESTPO', workDescription: 'Replace DT-14 bushings', windowStart: hours(30), windowEnd: hours(34), customers: 120 });
+    let r = await call('op', 'POST', '/planned-outages', { zone: 'Kankhal-2', substation: LALJIWALA, workDescription: 'Replace DT-14 bushings', windowStart: hours(30), windowEnd: hours(34), customers: 120 });
     const po = r.body.outage;
     check('create -> 201, incident Scheduled/scheduled, draft plan', r.status === 201 && po?.incident.status === 'scheduled' && po.incident.type === 'Scheduled' && po.plan.state === 'draft', po?.incident.id);
     check('de-energisation defaults to complete when not given', po.deenergisation === 'complete');
@@ -273,13 +330,13 @@ const server = app.listen(PORT, async () => {
 
     console.log('-- SCADA during planned work');
     _resetDedupState();
-    const trip = await handleScadaEvent({ tag: 'TESTPO.F1.CB11', condition: 'CRITICAL', substation: 'TESTPO' });
+    const trip = await handleScadaEvent({ tag: 'TESTPO.F1.CB11', condition: 'CRITICAL', substation: LALJIWALA });
     check('SCADA trip at the substation opens its own incident, not merged into the planned one', !!trip?.incidentId && trip.incidentId !== incId && trip.deduplicated === false, trip?.incidentId);
     const evs = (await repo.incidentEvents(incId)).map((e) => e.note).join(' | ');
     check('planned outage timeline notes the trip', evs.includes(trip.incidentId));
     const reclose = await handleScadaEvent({ event: 'reclose', tag: 'TESTPO.F1.CB11' });
     check('reclose never restores the planned outage', (await repo.incident(incId)).status === 'in_progress' && !(reclose.restored || []).some((x) => x.incidentId === incId));
-    check('planned incidents are never merge candidates', !(await repo.activeIncidentsAtSubstation('TESTPO')).some((i) => i.id === incId));
+    check('planned incidents are never merge candidates', !(await repo.activeIncidentsAtSubstation(LALJIWALA)).some((i) => i.id === incId));
 
     console.log('-- return and restore');
     r = await call('c3', 'POST', `/mobile/permits/${permitId}/return`, { clientRequestId: 'ret-1', declaration: { menWithdrawn: true, earthsRemoved: true } });
@@ -400,6 +457,66 @@ const server = app.listen(PORT, async () => {
     await crewApp.flushConfirmations(lost, sendAsC3);
     const eLog = (await repo.safetyLog(e.id)).filter((l) => l.action === 'step.confirm' && l.entity_id === eo.steps[1].id);
     check('resend of the same id: accepted as replay, recorded once', lost.items.length === 0 && eLog.length === 1);
+
+    console.log('-- complaint during a planned outage: end to end (F1)');
+    const phoneSetup = await enableComplaintPhones();
+    if (phoneSetup) {
+      console.log(`  [SKIPPED] F1 complaint integration NOT RUN: ${phoneSetup}. Complaint storage needs db/migrations/*phone*.sql (pgcrypto); only the pure decision tests above ran.`);
+    } else {
+      const dtA = distTx.find((x) => x.feeder === 'UPCL-AN-A'), dtB = distTx.find((x) => x.feeder === 'UPCL-AN-B'), dtL = distTx.find((x) => x.ss === 'UPCL-LW');
+      check('test locations resolve to the expected substation and feeders',
+        resolveAsset(dtA.lat, dtA.lon).feeder === 'UPCL-AN-A' && resolveAsset(dtA.lat, dtA.lon).substation === ARYA_NAGAR && resolveAsset(dtB.lat, dtB.lon).feeder === 'UPCL-AN-B');
+      r = await call('op', 'POST', '/planned-outages', { zone: 'Arya Nagar', substation: 'Arya Nagar', workDescription: 'x', windowStart: hours(1), windowEnd: hours(2) });
+      check('unknown substation name is refused (400)', r.status === 400 && r.body.code === 'BAD_INPUT');
+      r = await call('op', 'POST', '/planned-outages', { zone: 'Arya Nagar', substation: ARYA_NAGAR, feeder: 'UPCL-LW-A', workDescription: 'x', windowStart: hours(1), windowEnd: hours(2) });
+      check('feeder of another substation is refused (400)', r.status === 400 && r.body.code === 'BAD_INPUT');
+      const areas = (await call('op', 'GET', '/planned-outages/areas')).body;
+      check('areas list gives substations with their feeder codes', areas.find((a) => a.value === ARYA_NAGAR)?.feeders.includes('UPCL-AN-A'));
+      const pc = (await call('op', 'POST', '/planned-outages', { zone: 'Arya Nagar', substation: ARYA_NAGAR, feeder: 'UPCL-AN-A', workDescription: 'F1 complaint test', windowStart: hours(0.02), windowEnd: hours(3) })).body.outage;
+      await call('op', 'PUT', `/planned-outages/${pc.id}/switching-plan/steps`, { steps: [
+        { phase: 'isolate', seq: 1, action: 'open', device_label: 'AN-A CB', location: 'Arya Nagar S/s', assignee: 'control_room' },
+        { phase: 'restore', seq: 1, action: 'close', device_label: 'AN-A CB', location: 'Arya Nagar S/s', assignee: 'control_room' },
+      ] });
+      await call('op', 'POST', `/planned-outages/${pc.id}/switching-plan/approve`);
+      await call('op', 'POST', `/planned-outages/${pc.id}/notify`, { skip: true, reason: 'test' });
+      const pcSteps = (await repo.plannedOutage(pc.id)).steps;
+      await call('op', 'POST', `/switching-steps/${pcSteps[0].id}/confirm`, { clientConfirmationId: 'pc-1' });
+      const nInc = async () => (await repo.incidents()).length;
+      const complain = (category, dt) => call('op', 'POST', '/complaints', { category, lat: dt.lat, lon: dt.lon, customer: 'F1 test', phone: '9000000001', externalId: `EXT-F1-${category}` });
+      let before = await nInc();
+      r = await complain('No Supply', dtA);
+      check('No Supply on the planned feeder -> linked to the planned outage, no fault incident',
+        r.status === 201 && r.body.action === 'merged' && !!r.body.plannedOutage && r.body.incidentId === pc.incident.id && (await nInc()) === before, `${r.status} ${r.body.action} ${r.body.incidentId}`);
+      check('response is additive: usual fields plus plannedOutage with the end time for the customer',
+        !!r.body.queryId && r.body.substation === ARYA_NAGAR && Date.parse(r.body.plannedOutage?.windowEnd) === Date.parse(pc.window_end)
+        && /expected to be restored by/.test(r.body.plannedOutage.message));
+      check('planned outage timeline notes the complaint', (await repo.incidentEvents(pc.incident.id)).some((e) => e.note.startsWith('Customer complaint during planned outage')));
+      r = await complain('Wire Down', dtA);
+      check('Wire Down on the planned feeder still opens its own incident', r.body.action === 'created' && r.body.incidentId !== pc.incident.id);
+      r = await complain('No Supply', dtB);
+      const otherFeederInc = r.body.incidentId;
+      check('No Supply on another feeder of the substation -> own fault incident', !r.body.plannedOutage && otherFeederInc !== pc.incident.id);
+      check('... with a note naming the active planned outage and its feeder',
+        (await repo.incidentEvents(otherFeederInc)).some((e) => e.note.includes(`Planned outage ${pc.incident.id} is active at this substation on feeder UPCL-AN-A`)));
+      r = await complain('No Supply', dtL);
+      check('a complaint at another substation is untouched by it', r.body.incidentId !== pc.incident.id && !r.body.plannedOutage);
+      let view = (await call('op', 'GET', `/planned-outages/${pc.id}`)).body;
+      check('planned outage view counts its complaints', view.complaints?.total === 1 && view.complaints.after_window === 0);
+      // Test-only shortcut (the API refuses past windows): the window ended
+      // 20 minutes ago and the outage is still isolating.
+      await db.none("UPDATE planned_outages SET window_start = now() - interval '3 hours', window_end = now() - interval '20 minutes' WHERE id=$1", [pc.id]);
+      r = await complain('No Supply', dtA);
+      view = (await call('op', 'GET', `/planned-outages/${pc.id}`)).body;
+      const inList = (await call('op', 'GET', '/planned-outages')).body.find((x) => x.id === pc.id);
+      // Both complaints are now later than the (moved) window end.
+      check('within the +60 min grace it still attaches, and is flagged as after the window',
+        r.body.action === 'merged' && !!r.body.plannedOutage && view.complaints.total === 2 && view.complaints.after_window === 2 && inList.complaints_after_window === 2,
+        `${r.body.action} total=${view.complaints.total} after=${view.complaints.after_window} list=${inList.complaints_after_window}`);
+      await call('op', 'POST', `/switching-steps/${pcSteps[1].id}/confirm`, { clientConfirmationId: 'pc-2' });
+      before = await nInc();
+      r = await complain('No Supply', dtA);
+      check('once the planned outage is resolved, a complaint opens a fault incident again', !r.body.plannedOutage && r.body.incidentId !== pc.incident.id);
+    }
 
     console.log('-- customer notices (F6)');
     const settle = () => new Promise((res) => setTimeout(res, 600));

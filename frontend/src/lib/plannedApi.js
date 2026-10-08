@@ -16,6 +16,7 @@ export const newClientId = () => (crypto.randomUUID ? crypto.randomUUID() : `cr-
 
 export const plannedApi = {
   list: () => call('GET', '/planned-outages'),
+  areas: () => call('GET', '/planned-outages/areas'), // [{ value, label, feeders: [code] }]
   get: (id) => call('GET', `/planned-outages/${id}`),
   safetyLog: (id) => call('GET', `/planned-outages/${id}/safety-log`),
   create: (body) => call('POST', '/planned-outages', body),

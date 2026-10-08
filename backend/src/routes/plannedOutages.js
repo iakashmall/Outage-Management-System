@@ -20,6 +20,8 @@ import { draftFromTrace } from '../domain/switchingPlan.js';
 import { traceSection } from '../domain/sectionalize.js';
 import { clientTime } from '../domain/clientTime.js';
 import { publishNotice } from '../realtime/plannedNotices.js';
+import { substations as netSubstations, isKnownSubstation, substationFeeders } from '../infra/geo.js';
+import { cleanSubstation } from '../domain/callState.js';
 
 export const plannedOutageRoutes = Router();
 const r = plannedOutageRoutes;
@@ -116,6 +118,14 @@ r.patch('/mobile/jobs/:id/status', async (req, res, next) => {
 
 r.get('/planned-outages', controlRoom, async (req, res) => res.json(await repo.plannedOutages()));
 
+// Substations and their feeder codes for the New planned outage form: the
+// same names/codes a complaint resolves to, so F1 matching can work.
+// (Registered before /planned-outages/:id.)
+r.get('/planned-outages/areas', controlRoom, (req, res) =>
+  res.json(netSubstations.filter((s) => substationFeeders(s.name).length).map((s) => ({
+    value: s.name, label: cleanSubstation(s.name), feeders: substationFeeders(s.name),
+  }))));
+
 r.get('/planned-outages/:id', controlRoom, async (req, res) => {
   const po = await repo.plannedOutage(req.params.id);
   if (!po) return res.status(404).json({ code: 'NOT_FOUND', message: 'planned outage not found' });
@@ -126,6 +136,14 @@ r.get('/planned-outages/:id/safety-log', controlRoom, async (req, res) => res.js
 
 r.post('/planned-outages', operator, needActor, async (req, res) => {
   const b = req.body || {};
+  // Names must be the network's own, or complaints and SCADA can never be
+  // matched to this outage.
+  if (b.substation && !isKnownSubstation(b.substation)) {
+    return res.status(400).json({ code: 'BAD_INPUT', message: `unknown substation "${String(b.substation).slice(0, 80)}"; pick one from /planned-outages/areas` });
+  }
+  if (b.feeder && !(b.substation && substationFeeders(b.substation).includes(b.feeder))) {
+    return res.status(400).json({ code: 'BAD_INPUT', message: `feeder "${String(b.feeder).slice(0, 80)}" is not a feeder of the selected substation` });
+  }
   const out = await repo.createPlannedOutage({
     zone: b.zone, feeder: b.feeder, substation: b.substation, customers: b.customers, lat: b.lat, lon: b.lon,
     severity: b.severity, windowStart: b.windowStart, windowEnd: b.windowEnd, workDescription: b.workDescription,
