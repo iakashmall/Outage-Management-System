@@ -4,7 +4,9 @@ import { Icon, SevBadge, StatusBadge, timeAgo, hhmm, useLiveRefresh, toast } fro
 import { Drawer, DrawerContent } from '../components/ui/drawer.jsx';
 
 const SEVS = ['all', 'critical', 'high', 'medium', 'low'];
-const STATS = ['all', 'open', 'dispatched', 'in_progress', 'pending', 'resolved'];
+// 'planned' is a type filter, not a status: planned outages (OMS-01) move
+// through their own states (notified, isolating, restoring ...).
+const STATS = ['all', 'open', 'dispatched', 'in_progress', 'pending', 'resolved', 'planned'];
 
 export default function Incidents({ openId, focusIncidentId, clearFocus } = {}) {
   const [inc, setInc] = useState([]);
@@ -37,7 +39,8 @@ export default function Incidents({ openId, focusIncidentId, clearFocus } = {}) 
     api.incident(focusIncidentId).then(setSel).finally(() => clearFocus && clearFocus());
   }, [focusIncidentId]); // eslint-disable-line
 
-  const rows = inc.filter((i) => (sev === 'all' || i.severity === sev) && (st === 'all' || i.status === st));
+  const rows = inc.filter((i) => (sev === 'all' || i.severity === sev)
+    && (st === 'all' || (st === 'planned' ? i.type === 'Scheduled' : i.status === st)));
 
   const open = (i) => api.incident(i.id).then(setSel);
 
@@ -52,7 +55,7 @@ export default function Incidents({ openId, focusIncidentId, clearFocus } = {}) 
       <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
         {SEVS.map((s) => <button key={s} className={`pill ${sev === s ? 'on' : ''}`} onClick={() => setSev(s)}>{s === 'all' ? 'All severities' : s}</button>)}
         <span style={{ width: 1, background: 'var(--line)', margin: '0 4px' }} />
-        {STATS.map((s) => <button key={s} className={`pill ${st === s ? 'on' : ''}`} onClick={() => setSt(s)}>{s === 'all' ? 'All statuses' : s.replace('_', ' ')}</button>)}
+        {STATS.map((s) => <button key={s} className={`pill ${st === s ? 'on' : ''}`} onClick={() => setSt(s)}>{s === 'all' ? 'All statuses' : s === 'planned' ? 'Planned outages' : s.replace('_', ' ')}</button>)}
       </div>
 
       <div className="card">

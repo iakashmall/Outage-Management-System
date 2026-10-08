@@ -22,6 +22,7 @@ import { startNotifier, transport, maskEmail } from './realtime/notifier.js';
 import { plannedComplaintDecision } from './domain/plannedComplaints.js';
 import { computeIndices, computePlannedIndices, computeMTTR } from './domain/indices.js';
 import { buildPdf } from './domain/reports.js';
+import { publicOutages } from './domain/publicStatus.js';
 import { distTx, resolve as resolveAsset } from './infra/geo.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -560,6 +561,20 @@ const server = app.listen(PORT, async () => {
       check('PDF report still builds', pdfRes.status === 200 && pdfRes.headers.get('content-type') === 'application/pdf');
       const schedPdf = await buildPdf(computeIndices(incs), { generatedAt: new Date().toISOString(), filters: {} });
       check('scheduled report path (no planned block) still builds its PDF', Buffer.isBuffer(schedPdf) && schedPdf.length > 500);
+    }
+
+    console.log('-- public outage status (F10)');
+    {
+      const fault = { id: 'INC-F', zone: 'Mayapur', status: 'open', customers: 10, ert: null, opened_at: '2026-10-07T10:00:00Z' };
+      const pl = { id: 'INC-P', zone: 'Gurukul', status: 'notified', customers: 200, ert: '2026-10-09T14:00:00Z', opened_at: '2026-10-07T09:00:00Z' };
+      const gone = { id: 'INC-X', zone: 'Gurukul', status: 'cancelled', customers: 5, ert: null, opened_at: '2026-10-07T09:00:00Z' };
+      const planned = new Map([['INC-P', { window_start: '2026-10-09T10:00:00Z', window_end: '2026-10-09T14:00:00Z' }], ['INC-X', { window_start: 'a', window_end: 'b' }]]);
+      const pub = publicOutages([fault, pl, gone], planned);
+      check('public status: fault rows keep exactly their old fields',
+        JSON.stringify(Object.keys(pub.find((o) => o.ref === 'INC-F')).sort()) === JSON.stringify(['customersAffected', 'estimatedRestoration', 'ref', 'since', 'status', 'zone']));
+      check('public status: planned outage labelled with its window',
+        pub.find((o) => o.ref === 'INC-P')?.statusLabel === 'Planned shutdown - customers notified' && pub.find((o) => o.ref === 'INC-P').plannedEnd === '2026-10-09T14:00:00Z');
+      check('public status: a cancelled planned outage is not shown', !pub.some((o) => o.ref === 'INC-X'));
     }
 
     console.log('-- customer notices (F6)');
