@@ -350,6 +350,46 @@ const server = app.listen(PORT, async () => {
     const eLog = (await repo.safetyLog(e.id)).filter((l) => l.action === 'step.confirm' && l.entity_id === eo.steps[1].id);
     check('resend of the same id: accepted as replay, recorded once', lost.items.length === 0 && eLog.length === 1);
 
+    console.log('-- work-order completion and closure (F4)');
+    const jr = (status, permit, incidentStatus) => rules.checkJobStatus({ status, permit, incidentStatus })?.code || null;
+    check('job rule: Work Complete needs the permit returned while work is on',
+      jr('Work Complete', { state: 'issued' }, 'in_progress') === 'PERMIT_NOT_RETURNED' && jr('Work Complete', null, 'in_progress') === 'PERMIT_NOT_RETURNED'
+      && jr('Work Complete', { state: 'returned' }, 'in_progress') === null);
+    check('job rule: aborted outage (no open permit) lets the job complete',
+      jr('Work Complete', null, 'restoring') === null && jr('Work Complete', { state: 'refused' }, 'resolved') === null
+      && jr('Work Complete', { state: 'withdrawn' }, 'cancelled') === null && jr('Work Complete', { state: 'issued' }, 'restoring') === 'PERMIT_NOT_RETURNED');
+    check('crew app gate mirrors it', crewApp.gateFor({ status: 'restoring', steps: [], permit: null }, 'Work Finished') === null
+      && !!crewApp.gateFor({ status: 'in_progress', steps: [], permit: null }, 'Work Finished')
+      && !!crewApp.gateFor({ status: 'restoring', steps: [], permit: { state: 'issued' } }, 'Work Finished'));
+    // An outage aborted before any permit: isolate, then restore at once.
+    const ab = (await call('op', 'POST', '/planned-outages', { zone: 'Jwalapur-I', workDescription: 'aborted', windowStart: hours(1), windowEnd: hours(3) })).body.outage;
+    await call('op', 'PUT', `/planned-outages/${ab.id}/switching-plan/steps`, { steps: [
+      { phase: 'isolate', seq: 1, action: 'open', device_label: 'CB-7', location: 'S/s', assignee: 'control_room' },
+      { phase: 'restore', seq: 1, action: 'close', device_label: 'CB-7', location: 'S/s', assignee: 'control_room' },
+    ] });
+    await call('op', 'POST', `/planned-outages/${ab.id}/switching-plan/approve`);
+    await call('op', 'POST', `/planned-outages/${ab.id}/notify`, { skip: true, reason: 'test outage' });
+    const abJob = (await call('op', 'POST', `/incidents/${ab.incident.id}/assign`, { crewId: 'C005' })).body.job.id;
+    const abSteps = (await repo.plannedOutage(ab.id)).steps;
+    await call('op', 'POST', `/switching-steps/${abSteps[0].id}/confirm`, { clientConfirmationId: 'ab-1' });
+    r = await call('op', 'POST', `/switching-steps/${abSteps[1].id}/confirm`, { clientConfirmationId: 'ab-2' });
+    check('aborted outage restores to resolved without any permit', r.body.outage?.incident.status === 'resolved', r.body.outage?.incident.status);
+    check('aborted outage: Work Started still needs a permit', (await call('c5', 'PATCH', `/mobile/jobs/${abJob}/status`, { status: 'Work Started' })).body.code === 'PERMIT_NOT_ISSUED');
+    r = await call('op', 'POST', `/planned-outages/${ab.id}/close`);
+    check('close with a crew job still open -> 409 JOBS_OPEN', r.status === 409 && r.body.code === 'JOBS_OPEN', r.body.message);
+    r = await call('op', 'POST', `/planned-outages/${ab.id}/close`, { force: true, reason: 'too short' });
+    check('forced close needs a reason of 10+ characters -> 400', r.status === 400 && r.body.code === 'REASON_REQUIRED');
+    r = await call('c5', 'POST', `/planned-outages/${ab.id}/close`, { force: true, reason: 'crew cannot force this' });
+    check('crew cannot force a close (403)', r.status === 403);
+    r = await call('op', 'POST', `/planned-outages/${ab.id}/close`, { force: true, reason: 'crew phone lost, job confirmed done by radio' });
+    check('forced close by an operator -> closed', r.status === 200 && r.body.outage.incident.status === 'closed');
+    const abLog = await repo.safetyLog(ab.id);
+    check('forced close is in the safety log with the reason and the open job',
+      abLog.some((l) => l.action === 'outage.close_forced' && l.actor === 'op.sharma' && l.details.reason.includes('radio') && l.details.openJobs[0].id === abJob));
+    check('forced close is on the incident timeline', (await repo.incidentEvents(ab.incident.id)).some((e) => e.note.includes('closed with open jobs by op.sharma: crew phone lost')));
+    r = await call('c5', 'PATCH', `/mobile/jobs/${abJob}/status`, { status: 'Work Finished' });
+    check('the crew can still finish the job afterwards (no permit, outage over)', r.status === 200 && r.body.status === 'Work Complete');
+
     console.log('-- fault incidents and jobs unchanged');
     const fault = (await call('op', 'POST', '/incidents', { zone: 'Mayapur', severity: 'high', type: 'Power Outage' })).body;
     check('fault incident created as open', fault.status === 'open');

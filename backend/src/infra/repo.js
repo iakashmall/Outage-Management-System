@@ -28,10 +28,11 @@ async function loadOutage(t, plannedOutageId, { lock = false } = {}) {
   const incident = await t.one('SELECT * FROM incidents WHERE id=$1', [po.incident_id]);
   const steps = await t.any(`SELECT * FROM switching_steps WHERE plan_id=$1 ${STEP_ORDER}`, [plan.id]);
   const permits = await t.any('SELECT * FROM work_permits WHERE planned_outage_id=$1 ORDER BY requested_at', [po.id]);
-  return { po, plan, incident, steps, permits };
+  const jobs = await t.any('SELECT id, crew_id, status, priority, updated_at FROM jobs WHERE incident_id=$1 ORDER BY id', [po.incident_id]);
+  return { po, plan, incident, steps, permits, jobs };
 }
 
-const outageView = ({ po, plan, incident, steps, permits }) => ({ ...po, incident, plan, steps, permits });
+const outageView = ({ po, plan, incident, steps, permits, jobs }) => ({ ...po, incident, plan, steps, permits, jobs });
 
 function requireActor(actor) {
   if (!actor?.username || !Array.isArray(actor.roles)) throw new Error('planned-outage changes need a verified actor { username, roles, crewId }');
@@ -603,11 +604,16 @@ export const repo = {
       return { result: {}, transitions: [await moveIncident(t, ctx, 'cancelled', actor, reason)] };
     }),
 
-  closePlannedOutage: (plannedOutageId, actor) =>
+  closePlannedOutage: (plannedOutageId, actor, { force = false, reason = null } = {}) =>
     withOutage(plannedOutageId, actor, async (t, ctx) => {
-      const reject = rules.checkClose({ incident: ctx.incident, actor });
+      const reject = rules.checkClose({ incident: ctx.incident, actor, jobs: ctx.jobs, force, reason });
       if (reject) return { reject, entity: 'outage', entityId: ctx.po.id, action: 'outage.close' };
-      return { result: {}, transitions: [await moveIncident(t, ctx, 'closed', actor, 'work order closed')] };
+      const open = ctx.jobs.filter((j) => j.status !== 'Work Complete');
+      if (!open.length) return { result: {}, transitions: [await moveIncident(t, ctx, 'closed', actor, 'work order closed')] };
+      const note = `closed with open jobs by ${actor.username}: ${reason.trim()}`;
+      await logSafety(t, ctx.po.id, actor, { entity: 'outage', entityId: ctx.po.id, action: 'outage.close_forced',
+        details: { reason: reason.trim(), openJobs: open.map((j) => ({ id: j.id, crewId: j.crew_id, status: j.status })) } });
+      return { result: {}, transitions: [await moveIncident(t, ctx, 'closed', actor, note)] };
     }),
 
   // One switching step done. performedAt: when it physically happened (the

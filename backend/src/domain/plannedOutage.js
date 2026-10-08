@@ -283,9 +283,39 @@ export function checkCancel({ incident, steps, actor, reason }) {
   return null;
 }
 
-export function checkClose({ incident, actor }) {
+// Closing the work order. Every crew job on the outage must be Work Complete;
+// the control room may force it with a reason (>= 10 chars), which is
+// recorded as such.
+export const FORCE_REASON_MIN = 10;
+export function checkClose({ incident, actor, jobs = [], force = false, reason = null }) {
   if (!isOperator(actor)) return reject('FORBIDDEN', 'only the control room closes outages', 403);
   if (incident.status !== 'resolved') return reject('NOT_RESOLVED', `outage is ${incident.status}`);
+  const open = jobs.filter((j) => j.status !== 'Work Complete');
+  if (open.length && !force) {
+    return reject('JOBS_OPEN', `crew job(s) not complete: ${open.map((j) => `${j.id} (${j.status})`).join(', ')}. Complete them, or force the close with a reason`);
+  }
+  if (open.length && (blank(reason) || reason.trim().length < FORCE_REASON_MIN)) {
+    return reject('REASON_REQUIRED', `closing with open jobs needs a reason of at least ${FORCE_REASON_MIN} characters`, 400);
+  }
+  if (tooLong(reason)) return badInput(`reason is limited to ${LIMITS.maxText} characters`);
+  return null;
+}
+
+// A crew job on a planned outage: Work Started only under an issued permit;
+// Work Complete once its permit is returned, or -- when the outage was
+// aborted or ended without this job ever holding an open permit -- once the
+// outage is restoring, resolved, closed or cancelled.
+export const JOB_COMPLETE_WITHOUT_PERMIT = ['restoring', 'resolved', 'closed', 'cancelled'];
+export function checkJobStatus({ status, permit, incidentStatus }) {
+  if (status === 'Work Started' && permit?.state !== 'issued') {
+    return reject('PERMIT_NOT_ISSUED', 'work can start only under an issued permit');
+  }
+  if (status === 'Work Complete' && permit?.state !== 'returned') {
+    const noOpenPermit = !permit || !OPEN_PERMIT.includes(permit.state);
+    if (!(noOpenPermit && JOB_COMPLETE_WITHOUT_PERMIT.includes(incidentStatus))) {
+      return reject('PERMIT_NOT_RETURNED', 'return the permit before completing the job');
+    }
+  }
   return null;
 }
 

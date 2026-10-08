@@ -35,6 +35,8 @@ export function stepUiState(step, view, pending) {
   return step.actionable ? 'actionable' : 'pending';
 }
 
+const OUTAGE_OVER_FOR_JOB = ['restoring', 'resolved', 'closed', 'cancelled'];
+
 // The gates in requestAdvance, decided on the server's view only. Returns
 // null when the job may move to `next`, else a message for the crew.
 export function gateFor(view, next) {
@@ -51,7 +53,15 @@ export function gateFor(view, next) {
     }
   }
   if (next === 'Work Finished' && permit?.state !== 'returned') {
-    return 'Return the work permit before finishing the job.';
+    // Same rule as the server (backend domain/plannedOutage.js checkJobStatus):
+    // without an open permit, the job can finish once the outage is being
+    // restored or is over (e.g. aborted before any permit was issued).
+    const noOpenPermit = !permit || !['requested', 'issued'].includes(permit.state);
+    if (!(noOpenPermit && OUTAGE_OVER_FOR_JOB.includes(view.status))) {
+      return permit?.state === 'issued' || permit?.state === 'requested'
+        ? 'Return the work permit before finishing the job.'
+        : 'The outage is still active: finish once the control room is restoring supply.';
+    }
   }
   return null;
 }

@@ -99,14 +99,9 @@ r.patch('/mobile/jobs/:id/status', async (req, res, next) => {
   }
   const status = req.body?.status === 'Work Finished' ? 'Work Complete' : req.body?.status;
   if (status === 'Work Started' || status === 'Work Complete') {
-    const permit = await repo.latestPermitForJob(job.id);
-    const need = status === 'Work Started' ? 'issued' : 'returned';
-    if (permit?.state !== need) {
-      return res.status(409).json({
-        code: status === 'Work Started' ? 'PERMIT_NOT_ISSUED' : 'PERMIT_NOT_RETURNED',
-        message: status === 'Work Started' ? 'work can start only under an issued permit' : 'return the permit before completing the job',
-      });
-    }
+    const [permit, incident] = await Promise.all([repo.latestPermitForJob(job.id), repo.incident(job.incident_id)]);
+    const blocked = rules.checkJobStatus({ status, permit, incidentStatus: incident?.status });
+    if (blocked) return res.status(blocked.status).json({ code: blocked.code, message: blocked.message });
   }
   const { lat, lon, note } = req.body || {};
   const updated = await repo.updateJob(job.id, { status, updated_at: new Date().toISOString() });
@@ -187,8 +182,9 @@ r.post('/planned-outages/:id/notify', operator, needActor, async (req, res) => {
 r.post('/planned-outages/:id/cancel', operator, needActor, async (req, res) =>
   reply(res, await repo.cancelPlannedOutage(req.params.id, actor(req), { reason: req.body?.reason })));
 
+// { force: true, reason } closes even with crew jobs still open (logged).
 r.post('/planned-outages/:id/close', operator, needActor, async (req, res) =>
-  reply(res, await repo.closePlannedOutage(req.params.id, actor(req))));
+  reply(res, await repo.closePlannedOutage(req.params.id, actor(req), { force: req.body?.force === true, reason: req.body?.reason ?? null })));
 
 // A step confirmed from the control room: its own steps, or a crew step
 // reported by phone/radio (onBehalfNote required, logged as such).

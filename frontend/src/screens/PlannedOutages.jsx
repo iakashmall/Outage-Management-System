@@ -155,6 +155,9 @@ function OutageDetail({ id, crews, onChanged }) {
         <div className="kv-row"><span className="k">Customer notice</span><span className="v">
           {o.notice_sent_at ? `sent ${when(o.notice_sent_at)}` : o.notice_skipped_reason ? `skipped: ${o.notice_skipped_reason}` : `due ${when(o.notice_due_at)}`}
         </span></div>
+        {o.jobs?.length > 0 && <div className="kv-row"><span className="k">Crew jobs</span><span className="v mono">
+          {o.jobs.map((j) => <div key={j.id} style={{ color: j.status === 'Work Complete' ? 'var(--low)' : undefined }}>{j.id} · {j.crew_id} · {j.status}</div>)}
+        </span></div>}
         <div className="kv-row"><span className="k">Crew</span><span className="v">{inc.crew_id || <CrewAssign incidentId={inc.id} priority={JOB_PRIORITY[inc.severity] || 'Normal'} crews={crews} onDone={() => { load(); onChanged(); }} />}</span></div>
 
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', margin: '12px 0' }}>
@@ -164,7 +167,11 @@ function OutageDetail({ id, crews, onChanged }) {
           {inc.status === 'scheduled' && <button className="btn sm" onClick={() => { const r = ask('Why is the customer notice being skipped?'); if (r) act(() => plannedApi.skipNotice(id, r), 'Notice skipped'); }}>Skip notice…</button>}
           {['scheduled', 'notified'].includes(inc.status) && !anyConfirmed && <Reschedule o={o} onDone={() => { load(); onChanged(); }} />}
           {['scheduled', 'notified'].includes(inc.status) && !anyConfirmed && <button className="btn sm danger" onClick={() => { const r = ask('Reason for cancelling this planned outage?'); if (r) act(() => plannedApi.cancel(id, r), 'Cancelled'); }}>Cancel outage…</button>}
-          {inc.status === 'resolved' && <button className="btn sm primary" onClick={() => act(() => plannedApi.close(id), 'Work order closed')}>Close work order</button>}
+          {inc.status === 'resolved' && <button className="btn sm primary" onClick={async () => {
+            try { await plannedApi.close(id); toast('Work order closed'); load(); onChanged(); return; } catch (e) { if (e.code !== 'JOBS_OPEN') { fail(e); return; } }
+            const reason = ask('Crew jobs on this outage are not complete. Close the work order anyway?\n\nThis is recorded in the safety log. Reason (at least 10 characters):');
+            if (reason) act(() => plannedApi.close(id, { force: true, reason }), 'Work order closed with open jobs');
+          }}>Close work order</button>}
         </div>
 
         <div style={{ display: 'flex', gap: 6, borderBottom: '1px solid var(--line)', marginBottom: 12 }}>
