@@ -355,7 +355,7 @@ tr.row-hot td{background:var(--crit-bg)}
 .lp-clear:hover{background:var(--surface)}
 .lp-hint{margin:8px 8px 2px;padding-top:10px;border-top:1px solid var(--line);font-size:10.5px;line-height:1.5;color:var(--faint)}
 
-.map-stage{position:relative;padding:0;overflow:hidden;border-radius:14px;height:clamp(520px,76vh,900px);background:#e7f1f0}
+.map-stage{position:relative;isolation:isolate;padding:0;overflow:hidden;border-radius:14px;height:clamp(520px,76vh,900px);background:#e7f1f0}
 .leaflet-host{position:absolute;inset:0;width:100%;height:100%;background:#e7f1f0}
 .leaflet-container{font-family:var(--body,inherit)}
 
