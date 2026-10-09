@@ -264,6 +264,16 @@ export function confirmSwitchingStep(stepId, body) {
   return plannedReq(`/mobile/switching-steps/${stepId}/confirm`, "POST", { ...body, sentAt: new Date().toISOString() });
 }
 
+// Site report (preliminary info) or delay report, online only:
+// { kind: 'site_report'|'delay', note, expectedEnd?, clientReportId }.
+// The caller keeps clientReportId for a retry of the same report, so a
+// lost reply followed by a retry is answered as a replay, not a duplicate.
+export function sendCrewReport(jobId, body) {
+  return plannedReq(`/mobile/jobs/${jobId}/planned-outage/report`, "POST", body);
+}
+
+export const newReportId = newRequestId;
+
 // Gated status change for a planned job (Work Started / Work Finished):
 // online only, so a refused or unsent change is reported, never queued.
 export function updatePlannedJobStatus(id, status, location = {}) {

@@ -8,8 +8,8 @@
 // server acknowledges it; nothing after it unlocks meanwhile. Permit
 // request/return need a connection: there is no offline version.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
-import { getPlannedOutage, requestPermit, withdrawPermit, returnPermit } from '../lib/api';
+import { ActivityIndicator, Alert, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { getPlannedOutage, requestPermit, withdrawPermit, returnPermit, sendCrewReport, newReportId } from '../lib/api';
 import { recordConfirmation, pendingConfirmations, flushSafety, discardRejected } from '../lib/safetyStore';
 import { stepUiState, isUnreachable } from '../lib/plannedOutage';
 import { getLocation } from '../lib/location';
@@ -20,6 +20,9 @@ const ACTION_TEXT = {
   earth_apply: 'Apply earth', earth_remove: 'Remove earth', tag_apply: 'Apply danger tag', tag_remove: 'Remove danger tag',
 };
 const hhmm = (iso) => (iso ? new Date(iso).toTimeString().slice(0, 5) : '');
+// Outage states in which the crew can send a site or delay report (server: DELAY_STATES).
+const REPORT_STATES = ['notified', 'isolating', 'in_progress', 'restoring'];
+const DELAY_CHOICES = [[30, '+30 min'], [60, '+1 h'], [120, '+2 h'], [240, '+4 h']];
 const notSent = (err) => (isUnreachable(err)
   ? 'NOT SENT - no connection. The control room has NOT received this.'
   : `Refused by the control room: ${err.message}`);
@@ -184,6 +187,87 @@ export default function PlannedOutagePanel({ job }) {
         <Text style={styles.okText}>{permit.permit_no} returned at {hhmm(permit.returned_at)} - the line is handed back to the control room.</Text>
       )}
       {message ? <Text style={styles.warn}>{message}</Text> : null}
+
+      {(REPORT_STATES.includes(view.status) || view.reports?.length > 0) && (
+        <CrewReports job={job} view={view} offline={offline} onSent={load} />
+      )}
+    </View>
+  );
+}
+
+// Site report (preliminary info) and delay report to the control room.
+// Online only. A delay report changes nothing by itself: the control room
+// applies it (and notifies customers) or dismisses it.
+function CrewReports({ job, view, offline, onSent }) {
+  const [draft, setDraft] = useState(null); // { kind, note, addMin, clientReportId }
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  const active = REPORT_STATES.includes(view.status);
+  // One id per draft: a retry after a lost reply is the same report.
+  const open = (kind) => { setMessage(''); setDraft({ kind, note: '', addMin: kind === 'delay' ? 60 : null, clientReportId: newReportId() }); };
+  const expectedEnd = draft?.kind === 'delay' ? new Date(new Date(view.windowEnd).getTime() + draft.addMin * 60000) : null;
+
+  const send = async () => {
+    setBusy(true); setMessage('');
+    try {
+      await sendCrewReport(job.id, {
+        kind: draft.kind, note: draft.note.trim(), clientReportId: draft.clientReportId,
+        ...(expectedEnd ? { expectedEnd: expectedEnd.toISOString() } : {}),
+      });
+      setMessage(draft.kind === 'delay'
+        ? 'Delay reported. The window and customers are NOT changed until the control room applies it.'
+        : 'Site report sent to the control room.');
+      setDraft(null);
+      await onSent();
+    } catch (err) {
+      setMessage(notSent(err)); // the draft stays, with the same id, for a retry
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <View style={{ marginTop: 12 }}>
+      <Text style={styles.section}>REPORTS TO THE CONTROL ROOM</Text>
+      {(view.reports || []).map((r) => (
+        <Text key={r.id} style={styles.stepSub}>
+          {hhmm(r.reportedAt)} · {r.kind === 'delay' ? `Delay to ${hhmm(r.expectedEnd)} - ${r.state === 'pending' ? 'waiting for the control room' : r.state === 'applied' ? `applied, new end ${hhmm(r.appliedEnd)}` : `${r.state}${r.resolutionNote ? `: ${r.resolutionNote}` : ''}`}` : 'Site report'}: {r.note}
+        </Text>
+      ))}
+      {active && !draft && (
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          <Pressable style={[styles.smallBtn, { flex: 1 }]} disabled={offline} onPress={() => open('site_report')}>
+            <Text style={styles.smallBtnText}>Send site report</Text>
+          </Pressable>
+          <Pressable style={[styles.smallBtn, { flex: 1 }]} disabled={offline} onPress={() => open('delay')}>
+            <Text style={styles.smallBtnText}>Report delay</Text>
+          </Pressable>
+        </View>
+      )}
+      {draft && (
+        <View style={styles.permitCard}>
+          <Text style={styles.stepText}>{draft.kind === 'delay' ? 'Report a delay' : 'Site report (men on site, conditions, what you found)'}</Text>
+          {draft.kind === 'delay' && (
+            <View>
+              <Text style={styles.stepSub}>Window ends {hhmm(view.windowEnd)}. Expected finish:</Text>
+              <View style={{ flexDirection: 'row', gap: 6, marginTop: 4 }}>
+                {DELAY_CHOICES.map(([min, label]) => (
+                  <Pressable key={min} style={[styles.chip, draft.addMin === min && styles.chipOn]} onPress={() => setDraft({ ...draft, addMin: min })}>
+                    <Text style={[styles.chipText, draft.addMin === min && { color: '#FFFFFF' }]}>{label}</Text>
+                  </Pressable>
+                ))}
+              </View>
+              <Text style={styles.stepText}>New finish: {hhmm(expectedEnd.toISOString())}</Text>
+            </View>
+          )}
+          <TextInput style={styles.input} multiline maxLength={500} value={draft.note} onChangeText={(note) => setDraft({ ...draft, note })}
+            placeholder={draft.kind === 'delay' ? 'Why (e.g. bushing flange seized)' : 'e.g. 4 men on site, area barricaded'} />
+          <Pressable style={[styles.primary, (!draft.note.trim() || busy || offline) && styles.disabled]} disabled={!draft.note.trim() || busy || offline} onPress={send}>
+            <Text style={styles.primaryText}>{busy ? 'Sending…' : 'Send to control room'}</Text>
+          </Pressable>
+          <Pressable style={styles.smallBtn} disabled={busy} onPress={() => setDraft(null)}><Text style={styles.smallBtnText}>Cancel</Text></Pressable>
+        </View>
+      )}
+      {offline && active && <Text style={styles.stepSub}>Reports need a connection.</Text>}
+      {message ? <Text style={styles.warn}>{message}</Text> : null}
     </View>
   );
 }
@@ -248,4 +332,8 @@ const styles = StyleSheet.create({
   permitCard: { backgroundColor: '#EEF6FF', borderRadius: 10, padding: 10, borderWidth: 1, borderColor: '#9DB8DB' },
   permitNo: { color: '#1F3864', fontWeight: '800', fontSize: 15 },
   declRow: { flexDirection: 'row', alignItems: 'center', marginTop: 6 },
+  input: { backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#D5DCE5', borderRadius: 8, padding: 8, marginTop: 8, minHeight: 60, textAlignVertical: 'top', color: '#1D2939' },
+  chip: { borderWidth: 1, borderColor: '#1F3864', borderRadius: 14, paddingHorizontal: 10, paddingVertical: 5 },
+  chipOn: { backgroundColor: '#1F3864' },
+  chipText: { color: '#1F3864', fontWeight: '700', fontSize: 13 },
 });
