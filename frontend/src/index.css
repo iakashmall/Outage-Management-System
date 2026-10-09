@@ -91,7 +91,7 @@ button{font-family:inherit;cursor:pointer}
 .navbtn svg{width:20px;height:20px}
 .navbtn .tip{position:absolute;left:52px;background:var(--ink);color:#fff;padding:5px 9px;
   border-radius:6px;font-size:12px;white-space:nowrap;opacity:0;pointer-events:none;
-  transform:translateX(-4px);transition:.13s;z-index:40;box-shadow:var(--shadow-lg)}
+  transform:translateX(-4px);transition:.13s;z-index:2040;box-shadow:var(--shadow-lg)}
 .navbtn:hover .tip{opacity:1;transform:translateX(0)}
 .rail .spacer{flex:1}
 
@@ -222,12 +222,12 @@ tbody tr.click{cursor:pointer}
 .pill.on{background:var(--navy);border-color:var(--navy);color:#fff}
 
 /* ---- detail drawer ---- */
-.drawer-mask{position:fixed;inset:0;background:rgba(15,27,45,.34);z-index:50;
+.drawer-mask{position:fixed;inset:0;background:rgba(15,27,45,.34);z-index:2050;
   backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
   animation:fade .18s ease}
 @keyframes fade{from{opacity:0}}
 .drawer{position:fixed;top:0;right:0;bottom:0;width:min(440px,94vw);background:var(--surface);
-  z-index:51;box-shadow:var(--shadow-lg);display:flex;flex-direction:column;
+  z-index:2051;box-shadow:var(--shadow-lg);display:flex;flex-direction:column;
   animation:slidein .22s cubic-bezier(.2,.8,.2,1)}
 @keyframes slidein{from{transform:translateX(100%)}}
 .drawer-h{padding:18px 20px;border-bottom:1px solid var(--line);display:flex;
@@ -261,7 +261,7 @@ tbody tr.click{cursor:pointer}
 .empty{padding:34px;text-align:center;color:var(--muted);font-size:13px}
 .empty .disp{display:block;font-size:15px;color:var(--ink-2);margin-bottom:4px}
 
-.toast-wrap{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:80;
+.toast-wrap{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:2080;
   display:flex;flex-direction:column;gap:8px;align-items:center}
 .toast{background:var(--ink);color:#fff;padding:10px 16px;border-radius:9px;font-size:13px;
   box-shadow:var(--shadow-lg);animation:pop .2s ease;display:flex;align-items:center;gap:9px}
@@ -355,7 +355,7 @@ tr.row-hot td{background:var(--crit-bg)}
 .lp-clear:hover{background:var(--surface)}
 .lp-hint{margin:8px 8px 2px;padding-top:10px;border-top:1px solid var(--line);font-size:10.5px;line-height:1.5;color:var(--faint)}
 
-.map-stage{position:relative;isolation:isolate;padding:0;overflow:hidden;border-radius:14px;height:clamp(520px,76vh,900px);background:#e7f1f0}
+.map-stage{position:relative;padding:0;overflow:hidden;border-radius:14px;height:clamp(520px,76vh,900px);background:#e7f1f0}
 .leaflet-host{position:absolute;inset:0;width:100%;height:100%;background:#e7f1f0}
 .leaflet-container{font-family:var(--body,inherit)}
 
