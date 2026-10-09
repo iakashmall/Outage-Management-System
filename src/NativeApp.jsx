@@ -1,7 +1,10 @@
 import { useEffect, useState, useCallback, useMemo, useRef, Component } from 'react';
 import {
   ActivityIndicator,
+  AppState,
+  Linking,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StatusBar,
@@ -37,8 +40,8 @@ import { navigateTo } from './lib/navigate';
 import { isOnlineState, distanceAndDirection } from './lib/offlineNavigation';
 import { getRoadRoute, preloadRoadGraph, formatDistance, formatDuration } from './lib/roadRouting';
 import { openMultiJobRoute } from './lib/routing';
-import { queueUpdate, flushQueue, getQueueLength, getQueueItems } from './lib/offlineQueue';
-import { startCrewTracking, stopCrewTracking, autoStartCrewTracking, setTrackingPausedByCrew } from './lib/backgroundLocation';
+import { queueUpdate, queueScan, isRetryable, flushQueue, getQueueLength, getQueueItems } from './lib/offlineQueue';
+import { startCrewTracking, stopCrewTracking, autoStartCrewTracking, setTrackingPausedByCrew, isLocationServiceOn } from './lib/backgroundLocation';
 import { flushLocations, getPendingLocationCount } from './lib/locationQueue';
 import { downloadPack, cancelPackDownload, getInstalledPack, getPackStatus, subscribePackStatus } from './lib/offlineMap/tileStore';
 import OfflineMap from './components/OfflineMap';
@@ -67,6 +70,18 @@ const NEXT_STATUS = {
   'On Site': 'Work Started',
   'Work Started': 'Work Finished',
   'Work Finished': null,
+};
+
+// The app's last step is 'Work Finished'; the server stores it as
+// 'Work Complete', and dashboard-closed jobs come back Completed/Closed.
+const DONE_STATUSES = ['work finished', 'work complete', 'completed', 'closed'];
+const isJobDone = (job) => DONE_STATUSES.includes(String(job.status).toLowerCase());
+
+// Pending = still to do, so Total = Pending + Done.
+const JOB_FILTERS = {
+  all: { section: 'ALL JOBS', empty: 'No jobs assigned.', test: () => true },
+  pending: { section: 'PENDING JOBS', empty: 'No pending jobs.', test: (job) => !isJobDone(job) },
+  done: { section: 'JOBS DONE', empty: 'No jobs done yet.', test: isJobDone },
 };
 
 // Severity color coding: High -> orange, Medium -> blue, Low -> green,
@@ -143,6 +158,7 @@ function NativeAppScreen() {
   const [crew, setCrew] = useState({ name: 'Crew Gamma-2', role: 'Field Technician', id: 'C003' });
   const [jobs, setJobs] = useState(FALLBACK_JOBS);
   const [tab, setTab] = useState('Dashboard');
+  const [jobFilter, setJobFilter] = useState('all');
   const [activeJob, setActiveJob] = useState(null);
   const [mapJobId, setMapJobId] = useState(null);
   // Set by a job's "Navigate to site": the Map tab then guides to that one
@@ -223,23 +239,89 @@ function NativeAppScreen() {
   // permission the first time), so dispatch sees every crew on duty without
   // anyone having to remember the Tracking button. The crew can still switch
   // it off; that holds until they sign in again. Demo mode never tracks.
-  useEffect(() => {
-    if (!authenticated || !isAuthenticated()) return undefined;
-    let cancelled = false;
+  // Why tracking is not running (null while it runs): a reason reported to
+  // dispatch, plus the error text when starting failed, shown in a banner.
+  const [trackingReason, setTrackingReason] = useState(null);
+  const [trackingError, setTrackingError] = useState('');
+  const trackingRef = useRef({ on: false, reason: null });
+  const startingRef = useRef(false);
+  const applyTracking = useCallback((on, reason = null, error = '') => {
+    trackingRef.current = { on, reason: on ? null : reason };
+    setTrackingOn(on);
+    setTrackingReason(on ? null : reason);
+    setTrackingError(on ? '' : error);
+  }, []);
+
+  const runAutoStart = useCallback(async () => {
+    if (!isAuthenticated() || startingRef.current) return;
+    startingRef.current = true;
     setTrackingBusy(true);
     const crewId = myCrewId();
-    autoStartCrewTracking(crewId)
-      .catch(() => ({ on: false, reason: 'permission_denied' }))
-      .then(({ on, reason }) => {
-        // Re-reported on every start so dispatch's view heals after an
-        // offline report was lost; the backend only alerts on a change.
-        reportTrackingState(crewId, on ? 'on' : 'off', reason).catch(() => {});
-        if (cancelled) return;
-        setTrackingOn(on);
-        setTrackingBusy(false);
-      });
-    return () => { cancelled = true; };
-  }, [authenticated]);
+    let error = '';
+    const { on, reason } = await autoStartCrewTracking(crewId).catch((err) => {
+      // Not a permission problem (those come back as a reason): e.g. Android
+      // refusing to start the foreground service. Keep the real message.
+      error = err?.message || String(err);
+      console.warn('[tracking] start failed:', error);
+      return { on: false, reason: 'start_failed' };
+    });
+    // Re-reported on every start so dispatch's view heals after an offline
+    // report was lost; the backend only alerts on a change.
+    reportTrackingState(crewId, on ? 'on' : 'off', reason).catch(() => {});
+    applyTracking(on, reason, error);
+    setTrackingBusy(false);
+    startingRef.current = false;
+  }, [applyTracking]);
+
+  useEffect(() => {
+    if (authenticated) runAutoStart();
+  }, [authenticated, runAutoStart]);
+
+  // Whenever signed in (every 20 s and when the app comes back to the
+  // front): warn the crew and dispatch if the phone's Location switch is off,
+  // and retry tracking that failed to start, e.g. after the crew granted the
+  // permission in Settings. A crew who switched tracking off is left alone.
+  const [locationOff, setLocationOff] = useState(false);
+  const locationOffRef = useRef(null);
+  useEffect(() => {
+    if (!authenticated || !isAuthenticated()) {
+      locationOffRef.current = null;
+      setLocationOff(false);
+      return undefined;
+    }
+    const crewId = myCrewId();
+    // Retries only on returning to the app or Location coming back, never on
+    // the timer, so a permission prompt can't pop up every 20 s.
+    const check = async (returned = false) => {
+      const off = !(await isLocationServiceOn());
+      const wasKnown = locationOffRef.current !== null;
+      const changed = off !== locationOffRef.current;
+      locationOffRef.current = off;
+      setLocationOff(off);
+      const { on, reason } = trackingRef.current;
+      if (off) {
+        if (changed) reportTrackingState(crewId, 'off', 'location_services_off').catch(() => {});
+      } else if (!on && reason !== 'turned_off') {
+        if (returned || (changed && wasKnown)) runAutoStart();
+      } else if (changed && wasKnown && on) {
+        reportTrackingState(crewId, 'on').catch(() => {});
+      }
+    };
+    check();
+    const timer = setInterval(() => check(), 20000);
+    const sub = AppState.addEventListener('change', (s) => { if (s === 'active') check(true); });
+    return () => { clearInterval(timer); sub.remove(); };
+  }, [authenticated, runAutoStart]);
+
+  const openAppSettings = useCallback(() => { Linking.openSettings().catch(() => {}); }, []);
+
+  const openLocationSettings = useCallback(() => {
+    if (Platform.OS === 'android') {
+      Linking.sendIntent('android.settings.LOCATION_SOURCE_SETTINGS').catch(() => Linking.openSettings());
+    } else {
+      Linking.openSettings().catch(() => {});
+    }
+  }, []);
 
   const handleBiometricUnlock = useCallback(async () => {
     setBiometricBusy(true);
@@ -288,7 +370,7 @@ function NativeAppScreen() {
         await stopCrewTracking();
         await setTrackingPausedByCrew(true);
         console.log('[toggleTracking] stopped.');
-        setTrackingOn(false);
+        applyTracking(false, 'turned_off');
         reportTrackingState(crew.id, 'off', 'turned_off').catch(() => {});
         return;
       }
@@ -296,11 +378,13 @@ function NativeAppScreen() {
       await setTrackingPausedByCrew(false);
       const { on, reason } = await startCrewTracking(crew.id);
       console.log('[toggleTracking] startCrewTracking returned:', on, reason);
-      setTrackingOn(on);
+      applyTracking(on, reason);
       reportTrackingState(crew.id, on ? 'on' : 'off', reason).catch(() => {});
     } catch (err) {
-      console.log('[toggleTracking] ERROR:', err?.message || err);
-      setTrackingOn(false);
+      const error = err?.message || String(err);
+      console.log('[toggleTracking] ERROR:', error);
+      applyTracking(false, 'start_failed', error);
+      reportTrackingState(crew.id, 'off', 'start_failed').catch(() => {});
     } finally {
       setTrackingBusy(false);
     }
@@ -317,10 +401,10 @@ function NativeAppScreen() {
     ]);
     await stopCrewTracking().catch(() => {});
     await setTrackingPausedByCrew(false);
-    setTrackingOn(false);
+    applyTracking(false, 'signed_out');
     await authLogout();
     setAuthenticated(false);
-  }, []);
+  }, [applyTracking]);
 
   const refresh = useCallback(() => {
     if (!authenticated) return;
@@ -354,36 +438,41 @@ function NativeAppScreen() {
     };
   }, [authenticated, crew.id]);
 
-  // Flush any status updates that were queued while offline whenever we
-  // have a session, and again periodically.
+  const reloadPending = useCallback(() => getQueueItems()
+    .then((items) => {
+      setPendingItems(items);
+      setPendingCount(items.length);
+    })
+    .catch(() => {}), []);
+
+  // Send pending-sync items (status changes, photos, QR scans made without
+  // signal): on sign-in, as soon as the network comes back, and every 30 s.
+  const syncPending = useCallback(() => {
+    if (!authenticated) return Promise.resolve();
+    // Demo mode has no real backend to flush against, and re-fetching demo
+    // jobs would just overwrite locally-advanced statuses — only refresh the
+    // pending list for display.
+    if (!isAuthenticated()) return reloadPending();
+    return flushQueue()
+      .then(reloadPending)
+      .then(refresh)
+      .catch(() => {});
+  }, [authenticated, refresh, reloadPending]);
+
   useEffect(() => {
-    if (!authenticated) return;
-    const sync = () => {
-      if (!isAuthenticated()) {
-        // Demo mode has no real backend to flush against, and re-fetching
-        // demo jobs would just overwrite locally-advanced statuses — only
-        // refresh the pending list for display.
-        getQueueItems()
-          .then((items) => {
-            setPendingItems(items);
-            setPendingCount(items.length);
-          })
-          .catch(() => {});
-        return;
-      }
-      flushQueue()
-        .then(() => getQueueItems())
-        .then((items) => {
-          setPendingItems(items);
-          setPendingCount(items.length);
-        })
-        .then(refresh)
-        .catch(() => {});
+    if (!authenticated) return undefined;
+    syncPending();
+    const interval = setInterval(syncPending, 30000);
+    const subscription = Network.addNetworkStateListener((state) => {
+      // isConnected, not internet reachability: the server may be on a
+      // local network (the PC hotspot) with no internet behind it.
+      if (state.isConnected) syncPending();
+    });
+    return () => {
+      clearInterval(interval);
+      subscription.remove();
     };
-    sync();
-    const interval = setInterval(sync, 30000);
-    return () => clearInterval(interval);
-  }, [authenticated, refresh]);
+  }, [authenticated, syncPending]);
 
   // Upload GPS fixes recorded while offline: immediately when the network
   // comes back, plus a periodic retry. The background task also flushes on
@@ -425,23 +514,28 @@ function NativeAppScreen() {
     // Demo mode has no real backend to sync with — queue immediately so
     // the pending-sync section actually shows something, instead of the
     // update silently "succeeding" against nothing.
+    const enqueue = async () => {
+      await queueUpdate({ id: job.id, status: nextStatus, location, queuedAt: Date.now() });
+      await reloadPending();
+    };
     if (!isAuthenticated()) {
-      const queued = { id: job.id, status: nextStatus, location, queuedAt: Date.now() };
-      await queueUpdate(queued);
-      setPendingItems((current) => [...current, queued]);
-      setPendingCount((n) => n + 1);
+      await enqueue();
       return;
     }
 
+    // Older updates still waiting: this one goes behind them, so the server
+    // gets them in the order the crew made them.
+    if ((await getQueueLength()) > 0) {
+      await enqueue();
+      syncPending();
+      return;
+    }
     try {
       await updateJobStatus(job.id, nextStatus, location);
     } catch {
-      const queued = { id: job.id, status: nextStatus, location, queuedAt: Date.now() };
-      await queueUpdate(queued);
-      setPendingItems((current) => [...current, queued]);
-      setPendingCount((n) => n + 1);
+      await enqueue();
     }
-  }, []);
+  }, [reloadPending, syncPending]);
 
   if (checkingSession) {
     return (
@@ -548,24 +642,43 @@ function NativeAppScreen() {
           />
         </View>
       </View>
+      {(() => {
+        // One warning at a time, most fixable first. None when the crew
+        // switched tracking off themselves (the Tracking button shows that).
+        let banner = null;
+        if (locationOff) {
+          banner = { title: 'Location is off', text: "Dispatch can't see where you are. Tap to turn on Location.", onPress: openLocationSettings };
+        } else if (trackingReason === 'permission_denied' || trackingReason === 'background_permission_denied') {
+          banner = {
+            title: 'Location permission needed',
+            text: trackingReason === 'background_permission_denied'
+              ? 'Tap, open Permissions > Location and choose "Allow all the time".'
+              : 'Tap, open Permissions > Location and allow location.',
+            onPress: openAppSettings,
+          };
+        } else if (trackingReason === 'start_failed') {
+          banner = { title: "Tracking couldn't start", text: `${trackingError || 'Unknown error'}. Tap to try again.`, onPress: runAutoStart };
+        }
+        if (!banner || (trackingBusy && !locationOff)) return null;
+        return (
+          <Pressable style={styles.locationOffBanner} onPress={banner.onPress} accessibilityRole="button" accessibilityLabel={`${banner.title}. ${banner.text}`}>
+            <Text style={styles.locationOffTitle}>{banner.title}</Text>
+            <Text style={styles.locationOffText}>{banner.text}</Text>
+          </Pressable>
+        );
+      })()}
       <ScrollView contentContainerStyle={[styles.content, { paddingBottom: 100 + insets.bottom }]}>
         {tab === 'Dashboard' ? (
           <>
             <Text style={styles.title}>Today&apos;s field work</Text>
             <Text style={styles.subtitle}>Priority outages assigned to your crew.</Text>
-            <View style={styles.stats}>
-              <Stat value={String(jobs.length)} label="Total jobs" />
-              <Stat
-                value={String(jobs.filter((job) => job.status === 'Pending Acceptance').length)}
-                label="Pending jobs"
-              />
-              <Stat
-                value={String(jobs.filter((job) =>
-                  ['work complete', 'completed', 'closed'].includes(String(job.status).toLowerCase())
-                ).length)}
-                label="Jobs done"
-              />
-            </View>
+            <JobStats
+              jobs={jobs}
+              onSelect={(filter) => {
+                setJobFilter(filter);
+                openPage({ tab: 'Jobs' });
+              }}
+            />
 
             {pendingItems.length > 0 && (
               <View style={styles.pendingSection}>
@@ -576,13 +689,15 @@ function NativeAppScreen() {
                   </View>
                 </View>
                 <Text style={styles.pendingSectionSubtitle}>
-                  These status updates didn't reach the server yet. They'll retry automatically.
+                  Saved on the phone with no signal. They're sent automatically, with the time you made them, once there is signal.
                 </Text>
                 {pendingItems.map((item, i) => (
                   <View key={`${item.id}-${item.queuedAt ?? i}`} style={styles.pendingItemRow}>
                     <View style={styles.pendingDot} />
                     <View style={{ flex: 1 }}>
-                      <Text style={styles.pendingItemTitle}>{item.id} → {item.status}</Text>
+                      <Text style={styles.pendingItemTitle}>
+                        {item.type === 'photo' ? `${item.id} · Photo` : item.type === 'scan' ? `${item.id} · QR scan ${item.scan?.assetId ?? ''}` : `${item.id} → ${item.status}`}
+                      </Text>
                       <Text style={styles.pendingItemMeta}>
                         {item.queuedAt ? `Queued ${timeAgo(item.queuedAt)}` : 'Queued offline'}
                       </Text>
@@ -598,7 +713,12 @@ function NativeAppScreen() {
             ))}
           </>
         ) : tab === 'Jobs' ? (
-          <NativeJobsPage jobs={jobs} onPressJob={(job) => openPage({ tab: 'Jobs', jobId: job.id })} />
+          <NativeJobsPage
+            jobs={jobs}
+            filter={jobFilter}
+            onFilter={setJobFilter}
+            onPressJob={(job) => openPage({ tab: 'Jobs', jobId: job.id })}
+          />
         ) : tab === 'Map' ? (
           <MapScreen
             jobs={jobs}
@@ -641,6 +761,7 @@ function NativeAppScreen() {
             crew={crew}
             onClose={goBack}
             onAdvance={handleAdvance}
+            onQueued={reloadPending}
             onNavigate={(job) => {
               setMapJobId(job.id);
               setNavJobId(job.id);
@@ -673,23 +794,29 @@ function NativeAppScreen() {
   );
 }
 
-function NativeJobsPage({ jobs, onPressJob }) {
-  const pendingJobs = jobs.filter((job) => job.status === 'Pending Acceptance');
-  const completedJobs = jobs.filter((job) =>
-    ['work complete', 'completed', 'closed'].includes(String(job.status).toLowerCase())
+function JobStats({ jobs, active, onSelect }) {
+  const count = (filter) => String(jobs.filter(JOB_FILTERS[filter].test).length);
+  return (
+    <View style={styles.stats}>
+      <Stat value={count('all')} label="Total jobs" active={active === 'all'} onPress={() => onSelect('all')} />
+      <Stat value={count('pending')} label="Pending jobs" active={active === 'pending'} onPress={() => onSelect('pending')} />
+      <Stat value={count('done')} label="Jobs done" active={active === 'done'} onPress={() => onSelect('done')} />
+    </View>
   );
+}
+
+function NativeJobsPage({ jobs, filter, onFilter, onPressJob }) {
+  const { section, empty, test } = JOB_FILTERS[filter] || JOB_FILTERS.all;
+  const shown = jobs.filter(test);
 
   return (
     <>
       <Text style={styles.title}>Jobs</Text>
       <Text style={styles.subtitle}>Track every assignment and its current status.</Text>
-      <View style={styles.stats}>
-        <Stat value={String(jobs.length)} label="Total jobs" />
-        <Stat value={String(pendingJobs.length)} label="Pending jobs" />
-        <Stat value={String(completedJobs.length)} label="Jobs done" />
-      </View>
-      <Text style={styles.section}>ALL JOBS</Text>
-      {jobs.map((job) => (
+      <JobStats jobs={jobs} active={filter} onSelect={onFilter} />
+      <Text style={styles.section}>{section}</Text>
+      {!shown.length ? <Text style={styles.mapEmpty}>{empty}</Text> : null}
+      {shown.map((job) => (
         <JobCard key={job.id} job={job} onPress={() => onPressJob(job)} />
       ))}
     </>
@@ -898,12 +1025,24 @@ function HeaderAction({ label, on, count, danger, onPress, disabled, accessibili
   );
 }
 
-function Stat({ value, label }) {
+function Stat({ value, label, active, onPress }) {
+  const content = (
+    <>
+      <Text style={[styles.statValue, active && styles.statValueActive]}>{value}</Text>
+      <Text style={[styles.statLabel, active && styles.statLabelActive]}>{label}</Text>
+    </>
+  );
+  if (!onPress) return <View style={styles.stat}>{content}</View>;
   return (
-    <View style={styles.stat}>
-      <Text style={styles.statValue}>{value}</Text>
-      <Text style={styles.statLabel}>{label}</Text>
-    </View>
+    <Pressable
+      style={({ pressed }) => [styles.stat, active && styles.statActive, pressed && { opacity: 0.7 }]}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityState={{ selected: !!active }}
+      accessibilityLabel={`${label}: ${value}`}
+    >
+      {content}
+    </Pressable>
   );
 }
 
@@ -983,7 +1122,7 @@ function PhotoCamera({ onCapture, onClose }) {
   );
 }
 
-function JobDetail({ job, crew, onClose, onAdvance, onNavigate }) {
+function JobDetail({ job, crew, onClose, onAdvance, onQueued, onNavigate }) {
   const [showSafety, setShowSafety] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
   const [showPhotoCamera, setShowPhotoCamera] = useState(false);
@@ -1008,7 +1147,12 @@ function JobDetail({ job, crew, onClose, onAdvance, onNavigate }) {
   const [signOff, setSignOff] = useState(null);
 
   useEffect(() => {
-    getJobPhotos(job.id).then((photos) => setPhotoCount(Array.isArray(photos) ? photos.length : 0)).catch(() => {});
+    // Photos still waiting in Pending sync count too, so a crew with no
+    // signal on site is not blocked by the photo rule below.
+    Promise.all([
+      getJobPhotos(job.id).then((photos) => (Array.isArray(photos) ? photos.length : 0)).catch(() => 0),
+      getQueueItems().then((items) => items.filter((i) => i.type === 'photo' && i.id === job.id).length).catch(() => 0),
+    ]).then(([sent, queued]) => setPhotoCount(sent + queued));
     getAssetScans(job.id).then((scans) => setAssetScans(Array.isArray(scans) ? scans : [])).catch(() => {});
   }, [job.id]);
 
@@ -1017,6 +1161,11 @@ function JobDetail({ job, crew, onClose, onAdvance, onNavigate }) {
   const requestAdvance = async () => {
     if (!next || !checklistDone) return;
     if (job.status === 'On Site') {
+      // At least one site photo before work can start; asset scans stay optional.
+      if (photoCount < 1) {
+        setMessage('Take at least one site photo before starting work. Scanning the asset QR is optional.');
+        return;
+      }
       setShowSafety(true);
       return;
     }
@@ -1055,9 +1204,14 @@ function JobDetail({ job, crew, onClose, onAdvance, onNavigate }) {
   const saveCapturedPhoto = async (photo) => {
     setUploading(true);
     try {
-      await uploadCapturedPhoto(job.id, photo, assetId ? `Asset: ${assetId}` : undefined, crew);
+      const result = await uploadCapturedPhoto(job.id, photo, assetId ? `Asset: ${assetId}` : undefined, crew);
       setPhotoCount((count) => count + 1);
-      setMessage(`Photo ${photoCount + 1} of ${MAX_JOB_PHOTOS} stored as compressed WebP.`);
+      if (result?.queued) {
+        onQueued?.();
+        setMessage(`No signal: photo ${photoCount + 1} of ${MAX_JOB_PHOTOS} saved on the phone. It uploads by itself once there is signal (see Pending sync).`);
+      } else {
+        setMessage(`Photo ${photoCount + 1} of ${MAX_JOB_PHOTOS} stored as compressed WebP.`);
+      }
       setShowPhotoCamera(false);
     } catch (err) {
       setMessage(err?.message || 'Photo upload failed.');
@@ -1094,19 +1248,33 @@ function JobDetail({ job, crew, onClose, onAdvance, onNavigate }) {
       if (!Number.isFinite(location.lat) || !Number.isFinite(location.lon)) {
         throw new Error('Location not available. Asset scan was not stored. Enable GPS and try again.');
       }
-      const saved = await saveAssetScan(job.id, {
+      const scan = {
         rawValue,
         assetId: parsedDetails.assetId || parsedDetails.asset_id || parsedDetails.id || parsedDetails.tag || rawValue,
         assetDetails: parsedDetails,
         lat: location.lat,
         lon: location.lon,
         crewId: crew?.id,
-      });
+      };
+      let saved;
+      let queued = false;
+      try {
+        saved = await saveAssetScan(job.id, scan);
+      } catch (err) {
+        // No signal: keep the scan for pending sync instead of losing it.
+        if (!isRetryable(err)) throw err;
+        await queueScan(job.id, scan);
+        onQueued?.();
+        queued = true;
+        saved = { id: `pending-${Date.now()}`, asset_id: scan.assetId, asset_details: parsedDetails, lat: scan.lat, lon: scan.lon, scanned_at: new Date().toISOString(), pending: true };
+      }
       setAssetId(saved.asset_id || saved.assetId || rawValue);
       setAssetDetails(saved.asset_details || parsedDetails);
       setAssetScans((current) => [saved, ...current]);
       setShowScanner(false);
-      setMessage('Asset QR details stored in the database.');
+      setMessage(queued
+        ? 'No signal: asset scan saved on the phone. It uploads by itself once there is signal (see Pending sync).'
+        : 'Asset QR details stored in the database.');
     } catch (err) {
       setMessage(err?.message || 'Asset scan could not be stored.');
     } finally {
@@ -1272,8 +1440,20 @@ function JobDetail({ job, crew, onClose, onAdvance, onNavigate }) {
         {checklistDone && showPhotoCamera && <PhotoCamera onCapture={saveCapturedPhoto} onClose={() => setShowPhotoCamera(false)} />}
         {message ? <Text style={styles.assetValue}>{message}</Text> : null}
 
+        {checklistDone && job.status === 'On Site' && photoCount < 1 && (
+          <View style={styles.checklistLock}>
+            <Text style={styles.checklistLockText}>
+              Photo required: take at least one site photo to start work. Scanning the asset QR is optional.
+            </Text>
+          </View>
+        )}
+
         {checklistDone && next && !completionStep && (
-          <Pressable style={styles.primaryBtn} onPress={requestAdvance} disabled={advancing}>
+          <Pressable
+            style={[styles.primaryBtn, job.status === 'On Site' && photoCount < 1 && { opacity: 0.5 }]}
+            onPress={requestAdvance}
+            disabled={advancing}
+          >
             <Text style={styles.primaryBtnText}>
               {advancing ? 'Updating status…' : job.status === 'Pending Acceptance' ? 'Accept task' : `${next} →`}
             </Text>
@@ -1466,7 +1646,9 @@ function MapScreen({ jobs, selectedJobId, onSelect, crew, navJobId, onExitNav })
   };
 
   let packLine;
-  if (downloading) {
+  if (pack?.web) {
+    packLine = 'Online map · needs internet (the offline map is in the phone app)';
+  } else if (downloading) {
     packLine = packStatus.total
       ? `Downloading offline map · ${Math.floor((packStatus.done / packStatus.total) * 100)}% (${packStatus.done}/${packStatus.total} tiles)`
       : 'Checking for offline map…';
@@ -1515,7 +1697,7 @@ function MapScreen({ jobs, selectedJobId, onSelect, crew, navJobId, onExitNav })
         </Pressable>
       )}
 
-      {pack?.complete && !pack.roadsUri && canDownload && (
+      {pack?.complete && !pack.web && !pack.roadsUri && canDownload && (
         <Pressable style={styles.routeAllBtn} onPress={startDownload}>
           <Text style={styles.routeAllBtnText}>Download offline road directions</Text>
         </Pressable>
@@ -1628,7 +1810,7 @@ function MapScreen({ jobs, selectedJobId, onSelect, crew, navJobId, onExitNav })
 }
 
 function ProfileScreen({ crew, jobs, onLogout }) {
-  const activeJobs = jobs.filter((job) => !['Work Complete', 'Completed', 'Closed'].includes(job.status));
+  const activeJobs = jobs.filter((job) => !isJobDone(job));
   return (
     <View>
       <Text style={styles.title}>My profile</Text>
@@ -1688,6 +1870,9 @@ const styles = StyleSheet.create({
   loginFooter: { color: '#77938c', fontSize: 11, textAlign: 'center', marginTop: 'auto', paddingBottom: 24 },
   safe: { flex: 1, backgroundColor: '#f2f5f9' },
   center: { alignItems: 'center', justifyContent: 'center' },
+  locationOffBanner: { backgroundColor: '#B42318', marginHorizontal: 14, marginTop: 10, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10 },
+  locationOffTitle: { color: '#FFFFFF', fontWeight: '800', fontSize: 15 },
+  locationOffText: { color: '#FFE4E1', fontSize: 13, marginTop: 2 },
   header: { backgroundColor: '#173355', paddingHorizontal: 18, paddingTop: 16, paddingBottom: 14, borderBottomLeftRadius: 18, borderBottomRightRadius: 18 },
   headerTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
   headerIdentity: { flex: 1, marginRight: 12 },
@@ -1722,6 +1907,9 @@ const styles = StyleSheet.create({
   stat: { flex: 1, backgroundColor: '#fff', borderRadius: 12, padding: 13, borderWidth: 1, borderColor: '#e6ecf3' },
   statValue: { color: '#173355', fontSize: 18, fontWeight: '800' },
   statLabel: { color: '#7c8da3', fontSize: 11, marginTop: 4 },
+  statActive: { backgroundColor: '#173355', borderColor: '#173355' },
+  statValueActive: { color: '#fff' },
+  statLabelActive: { color: '#c9d6e6' },
   section: { color: '#7c8da3', fontSize: 11, fontWeight: '800', letterSpacing: 1.5, marginBottom: 11 },
   pendingSection: { backgroundColor: '#fff7ea', borderRadius: 12, borderWidth: 1, borderColor: '#f2d9a8', padding: 14, marginBottom: 24, gap: 10 },
   pendingSectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
