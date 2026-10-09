@@ -40,7 +40,7 @@ import { openMultiJobRoute } from './lib/routing';
 import { queueUpdate, flushQueue, getQueueLength, getQueueItems } from './lib/offlineQueue';
 import { startCrewTracking, stopCrewTracking, autoStartCrewTracking, setTrackingPausedByCrew } from './lib/backgroundLocation';
 import { flushLocations, getPendingLocationCount } from './lib/locationQueue';
-import { downloadPack, cancelPackDownload, getInstalledPack, getPackStatus, subscribePackStatus } from './lib/offlineMap/tileStore';
+import { downloadPack, cancelPackDownload, getInstalledPack, getPackStatus, subscribePackStatus } from './lib/offlineMap/areaStore';
 import OfflineMap from './components/OfflineMap';
 import { usingMapTestServer } from './lib/mapServer';
 import { checkServer, getServer, setServer } from './lib/server';
