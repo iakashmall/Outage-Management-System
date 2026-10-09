@@ -568,6 +568,30 @@ change later.
 | 6 Network schema in migrate() | Not added. Draft-from-trace answers `409 NETWORK_UNAVAILABLE`; plans are built by hand. |
 | 7 Permit number | `PTW-YYYY-NNNNNN` from `permit_no_seq`. |
 | 8 SCADA on planned isolation devices | Never merged into, never restores, a planned outage. A trip at a substation with active planned switching still **raises its own incident** (a real fault is never hidden), with a note on both timelines. |
+| 9 Offline confirmation times | A crew's offline confirmation time is trusted up to **72 h** back (the app's offline limit, FR-APP-010), not 7 days (`clientTime.js`). The server's receive time is stored next to the client time in the safety log. Notifying needs an approved plan; reschedule and cancel are only allowed before the first confirmed step. |
+
+All nine defaults were approved in the PR #25 review, with #9 changed to 72 h.
+
+### Fixes after the PR #25 review
+
+One commit each, on top of the original phases. The tests are in `selftest-oms01.js` unless noted.
+
+| Fix | What changed |
+|---|---|
+| F3 | `seed --force` clears the planned-outage tables before incidents (`safety_log` is kept: append-only, no FK). |
+| F8 | Authorisation: another crew's step is **403** `WRONG_ASSIGNEE`. A crew token without `crew_id` is refused (`NO_CREW_ID`). The `/planned-outages` reads need `oms_operator`/`system_admin`, so a `field_crew`-only token gets 403. |
+| F7 | Input bounds (window starts ≥ now − 5 min and lasts ≤ 72 h, customers 0–1,000,000, notice lead ≤ 7 days, text ≤ 500 chars). Priority (low/medium/high/critical) maps to job priority. A required **de-energisation** field (complete/partial + affected section); older rows show "not recorded". |
+| F4 | Close refuses with `409 JOBS_OPEN` while a job is not Work Complete. An operator may force it with a reason (≥ 10 chars), recorded in the safety log and timeline. Work Complete is also allowed on an aborted outage (no open permit, outage restoring/resolved), in the server and the crew app's `gateFor`. |
+| F5 | Crew **site reports** and **delay reports** (`POST /mobile/jobs/:id/planned-outage/report`). A delay report changes nothing until the control room clicks **Apply & notify** (or dismisses it). Operators can also extend directly (`POST /planned-outages/:id/delay`). Applying moves `window_end` and `ert` and sends an "extended" notice. |
+| F6 | Planned-specific restoration notice, sent once (not again on close). Cancellation and reschedule notices. Recipients are masked in notification rows and console logs. |
+| F1 | A supply complaint (No Supply / Partial Supply / Voltage) on the planned outage's feeder (or substation, if no feeder is recorded), within −30/+60 min of the **current** window, is attached to the planned outage instead of opening a fault incident. A different feeder opens its own incident with a note. Substation and feeder are pick-lists, validated on the server. The decision is a pure function (`domain/plannedComplaints.js`) with unit tests. |
+| F2 | The seed creates its demo planned outages (Gurukul, Kankhal-2) through the planned-outage model. |
+| F9 | Planned outages are out of MTTR and reported separately (`planned` block in `/indicators`, the reliability report and Analytics). |
+| F10 | "Planned outages" filter on Incidents, "Customers notified" badge, planned labels on the customer portal. |
+| F12 | Priority management: create and reschedule return `overlaps: [ids]` when another planned outage overlaps in time at the same substation/feeder. The UI warns with links but does not block. |
+| F5b | Crew app: **Send site report** and **Report delay** buttons in `PlannedOutagePanel.js`. Not device-tested. |
+
+Not changed here: the `offlineQueue.js` flush race (§8; separate PR), fault-path ownership (Q5), and real customer contact data for notices.
 
 ### Where things are
 
@@ -585,8 +609,16 @@ change later.
 ### How to test
 
 1. **Automated**: `cd backend && DATABASE_URL=<scratch db> npm run test:oms01`
-   (76 checks). `npm test` runs it after the existing self-test. Use a scratch
-   database: both suites write data.
+   (189 checks). `npm test` runs it after the existing self-test. Use a scratch
+   database: both suites write data. The F1 integration checks need the
+   `db/migrations/*phone*.sql` migrations (pgcrypto). The suite applies them
+   itself when pgcrypto is available; otherwise it prints a SKIPPED line.
+   CI does not apply those migrations today.
+
+   The click-by-click FAT demo, with setup and logins, is in
+   `docs/FAT_OMS-01_planned_outages.md`. Crew-side steps need a crew login
+   (`npm run keycloak:mobile` creates `field_crew` and `crew01`–`crew06`);
+   `test.operator` cannot do them.
 2. **Control room**: Planned outages → New → fill zone, window, work →
    build the plan (isolate: control-room OPEN breaker, crew earth; restore in
    reverse) → Save → Approve → Send notice → Assign crew → Confirm done on
