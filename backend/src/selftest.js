@@ -3,7 +3,7 @@
 import 'dotenv/config'; // loads .env into process.env
 process.env.PORT = process.env.PORT || '4100'; // so the restoration publisher's mock-DMS URL matches this test server
 import express from 'express';
-import { migrate } from './infra/db.js';
+import { db, migrate } from './infra/db.js';
 import { seed } from './infra/seed.js';
 import { api, pickIncident } from './routes/api.js';
 import { distTx } from './infra/geo.js';
@@ -287,6 +287,9 @@ const server = app.listen(4100, async () => {
 
   // Crew trail: the dashboard draws this. A long window must keep the NEWEST points.
   {
+    // seed --force keeps crew_locations, so an earlier run's points would
+    // still be inside this window: remove this test's own rows first.
+    await db.none("DELETE FROM crew_locations WHERE id LIKE 'selftest-trail-%'");
     const t0 = Date.now() - 50 * 60 * 1000;
     const pts = [0, 1, 2, 3, 4].map((k) => ({ id: `selftest-trail-${k}-${t0}`, lat: 30.0 + k * 0.001, lon: 78.0 + k * 0.001, accuracy: 8, recordedAt: t0 + k * 10 * 60 * 1000 }));
     const up = await j('POST', '/mobile/crews/C006/locations', { points: pts });
