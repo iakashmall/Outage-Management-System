@@ -80,6 +80,31 @@ export function buildCatalogue({ network, config }) {
   return [...out.values()];
 }
 
+// ---- export limits (one rule for raw areas and named regions) ----
+// The cost of an export on the map server is its tile count, so that is what is capped.
+// The Dehradun-Haridwar corridor at zoom 8-14 is under 1,000 tiles; 200,000 allows about 40,000 km² (a 200 km square) at zoom 8-16.
+export const MAX_EXPORT_ZOOM = 16;
+export const MAX_EXPORT_TILES = 200000;
+const MAX_LAT = 85.05112878; // web-mercator limit
+
+const tileX = (lon, z) => Math.min(2 ** z - 1, Math.max(0, Math.floor(((lon + 180) / 360) * 2 ** z)));
+const tileY = (lat, z) => {
+  const s = Math.sin(Math.max(-MAX_LAT, Math.min(MAX_LAT, lat)) * R);
+  return Math.min(2 ** z - 1, Math.max(0, Math.floor((0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * 2 ** z)));
+};
+// Number of tiles an export of bbox [minLon, minLat, maxLon, maxLat] covers over minZoom..maxZoom.
+export function exportTileCount([x0, y0, x1, y1], minZoom, maxZoom) {
+  let n = 0;
+  for (let z = minZoom; z <= maxZoom; z++) n += (tileX(x1, z) - tileX(x0, z) + 1) * (tileY(y0, z) - tileY(y1, z) + 1);
+  return n;
+}
+// null when the export is allowed, else a message for a 400.
+export function exportLimitError(bbox, minZoom, maxZoom) {
+  if (maxZoom > MAX_EXPORT_ZOOM) return `maxZoom may be at most ${MAX_EXPORT_ZOOM}.`;
+  const tiles = exportTileCount(bbox, minZoom, maxZoom);
+  return tiles > MAX_EXPORT_TILES ? `This export would be ${tiles} tiles; the limit is ${MAX_EXPORT_TILES}. Choose a smaller area or zoom range.` : null;
+}
+
 // Which region should this crew's phone download?  override > the smallest crew-region containing the crew > nearest > default
 export function pickCrewRegion(catalogue, config, { crewId, lat, lon } = {}) {
   const byId = new Map(catalogue.map((r) => [r.id, r]));

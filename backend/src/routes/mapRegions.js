@@ -8,7 +8,7 @@
 // Everything else under /api/map falls through to mapProxy.js. Regions come from the OMS's own GIS data and
 // infra/map-regions.json, so the apps never need coordinates.
 import express from 'express';
-import { buildCatalogue, pickCrewRegion, readJson } from '../infra/mapRegions.js';
+import { buildCatalogue, exportLimitError, pickCrewRegion, readJson } from '../infra/mapRegions.js';
 
 const publicRegion = ({ id, name, kind, center, bbox, areaKm2, forCrews }) => ({ id, name, kind, center, bbox, areaKm2, forCrews });
 const isCrewDevice = (req) => Boolean(req.user?.crewId);
@@ -52,6 +52,8 @@ export function createMapRegionRoutes({ getNetwork, getCrew } = {}) {
     if (![minZoom, maxZoom].every(Number.isInteger) || minZoom < 0 || maxZoom > 22 || minZoom > maxZoom) {
       return res.status(400).json({ error: 'minZoom and maxZoom must be whole numbers with 0 <= minZoom <= maxZoom <= 22.' });
     }
+    const tooBig = exportLimitError(region.bbox, minZoom, maxZoom);
+    if (tooBig) return res.status(400).json({ error: tooBig });
 
     let upstream, body;
     try {
