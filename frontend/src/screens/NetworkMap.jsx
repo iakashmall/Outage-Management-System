@@ -9,6 +9,10 @@ import { authHeader } from '../lib/auth.js';
 import { TRAIL_WINDOWS, DEFAULT_WINDOW, MAX_POINTS, windowMs, normalizeTrack, splitTrail, summarize, thinDots, fmtClock, fmtDur, fmtAgo } from '../lib/trail.js';
 import { Icon, SevBadge, StatusBadge, useLiveRefresh } from '../lib/ui.jsx';
 
+// VITE_BASEMAP_FALLBACK=osm: if the in-house basemap cannot load, show OpenStreetMap instead (loaded from the public
+// internet). Default: no fallback, just a notice; the OMS layers are drawn either way.
+const OSM_FALLBACK = String(import.meta.env.VITE_BASEMAP_FALLBACK || '').toLowerCase() === 'osm';
+
 const SEVC = { critical: '#e23b2e', high: '#ef9021', medium: '#3b82f6', low: '#22b06b' };
 const CREWC = { available: '#0fb39d', in_service: '#3b82f6', in_transit: '#ef9021', on_break: '#9fb0c4', off_shift: '#9fb0c4' };
 const PALETTE = ['#3b82f6', '#0fb39d', '#e0742b', '#8b5cf6', '#22b06b', '#e0447a', '#d1a017', '#2fa3a3', '#7a9e2e', '#c2622a', '#5b6ee0', '#c94f9a'];
@@ -58,6 +62,7 @@ export default function NetworkMap() {
   const [trace, setTrace] = useState(null);     // result of /api/network/section/:mrid
   const [regions, setRegions] = useState([]);   // regions from /api/map/regions (substations, zones, divisions)
   const [regionId, setRegionId] = useState('');
+  const [basemapDown, setBasemapDown] = useState(false); // in-house basemap could not load; OMS layers still shown
   const [traceBusy, setTraceBusy] = useState(false);
   const [trailWin, setTrailWin] = useState(DEFAULT_WINDOW); // how far back trails reach
   const [trailCrew, setTrailCrew] = useState(null);         // null = every crew, else one crew id
@@ -171,20 +176,40 @@ export default function NetworkMap() {
     // Basemap: vector map from the in-house map server, reached through the OMS backend (/api/map), so the
     // normal login protects it and nothing is loaded from the public internet. transformRequest attaches the
     // Bearer token to every map request (style, tiles, fonts). Leaflet layers (feeders, crews...) draw on top.
-    // A basemap failure (map server down, WebGL missing) must never take the OMS layers down with it.
+    // A basemap failure (map server down, style 4xx/5xx, WebGL missing) must never take the OMS layers down with it:
+    // the map shows a notice instead, and only with VITE_BASEMAP_FALLBACK=osm loads OpenStreetMap from the internet.
+    let alive = true, gl = null, glLoaded = false, failed = false;
+    const basemapFailed = (why) => {
+      if (!alive || failed) return;
+      failed = true;
+      console.error('[map] basemap unavailable; showing OMS layers without it:', why);
+      if (gl) { try { map.removeLayer(gl); } catch { /* already gone */ } }
+      if (OSM_FALLBACK) L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap', opacity: 0.92 }).addTo(map);
+      setBasemapDown(true);
+    };
     try {
-      L.maplibreGL({
+      gl = L.maplibreGL({
         style: '/api/map/style.json',
         attributionControl: { customAttribution: 'Spintech-inhouse map' },
         transformRequest: (url) => (new URL(url, location.href).pathname.startsWith('/api/map/') ? { url, headers: authHeader() } : undefined),
       }).addTo(map);
-    } catch (e) { console.error('[map] basemap failed to start; showing OMS layers without it:', e); }
+      const glMap = gl.getMaplibreMap();
+      let tileErrors = 0; // consecutive tile failures since the last tile that loaded
+      glMap.on('load', () => { glLoaded = true; });
+      glMap.on('data', (e) => { if (e?.tile) tileErrors = 0; });
+      // Before the first load, an error that is not about one tile means the style or its sources failed.
+      // After it, 10 tile failures in a row (map server gone mid-session) count as the basemap failing too.
+      glMap.on('error', (e) => {
+        if (!e?.tile) { if (!glLoaded) basemapFailed(e?.error || e); }
+        else if (glLoaded && ++tileErrors >= 10) basemapFailed(e?.error || e);
+      });
+    } catch (e) { basemapFailed(e); }
     map.attributionControl.setPrefix(false); // drop the "Leaflet" prefix; the corner shows only our own credit
     L.control.zoom({ position: 'topright' }).addTo(map);
     mapRef.current = map;
     map.__bounds = bounds;
     setReady(true);
-    return () => { map.remove(); mapRef.current = null; };
+    return () => { alive = false; map.remove(); mapRef.current = null; };
   }, [net]);
 
   // build static network layers once the map exists
@@ -551,6 +576,11 @@ export default function NetworkMap() {
 
         <div className="card map-stage">
           <div ref={boxRef} className="leaflet-host" />
+          {basemapDown && (
+            <div className="map-basemap-note" role="status">
+              Basemap unavailable - network layers are still shown{OSM_FALLBACK ? ' (OpenStreetMap fallback)' : ''}
+            </div>
+          )}
 
           <div className="map-search">
             <div className="ms-box">
