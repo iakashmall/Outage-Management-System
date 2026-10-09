@@ -18,7 +18,7 @@ export default function AboutOverlay({ onClose }) {
       aria-label="About GridQ"
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
       style={{
-        position: 'fixed', inset: 0, zIndex: 200,
+        position: 'fixed', inset: 0, zIndex: 2200,
         background: 'rgba(9,18,32,.55)', backdropFilter: 'blur(2px)',
         display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
       }}
