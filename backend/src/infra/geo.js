@@ -44,3 +44,14 @@ export function resolve(lat, lon) {
 
 export const substations = NET.substations;
 export const distTx = NET.distTx;
+
+// Feeder codes per substation name, exactly as resolve() reports them for a
+// complaint (distribution transformers' `feeder`). network.json's `feeders`
+// list holds display names, which complaints never resolve to.
+const feedersBySub = new Map();
+for (const dt of NET.distTx) {
+  const s = codeToSub.get(dt.ss);
+  if (s && dt.feeder) (feedersBySub.get(s.name) || feedersBySub.set(s.name, new Set()).get(s.name)).add(dt.feeder);
+}
+export const isKnownSubstation = (name) => NET.substations.some((s) => s.name === name);
+export const substationFeeders = (name) => [...(feedersBySub.get(name) || [])].sort();

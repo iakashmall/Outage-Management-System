@@ -26,6 +26,16 @@ export function buildCsv(indices, meta) {
     ['Filter: zone', meta.filters.zone || 'all zones'],
     ['Filter: source (asset-type stand-in)', meta.filters.assetType || 'all sources'],
     ['Generated at', meta.generatedAt],
+    // OMS-01: planned outages, reported separately (excluded from the indices
+    // above). Appended at the end so existing row positions do not move.
+    ...(indices.planned ? [
+      [],
+      ['Planned outages (excluded from the indices above)'],
+      ['Planned SAIDI (min)', indices.planned.saidi],
+      ['Planned SAIFI', indices.planned.saifi],
+      ['Planned customers interrupted', indices.planned.customersInterrupted],
+      ['Planned outages counted', indices.planned.count],
+    ] : []),
   ];
   return rows.map((r) => r.map(csvEscape).join(',')).join('\r\n');
 }
@@ -69,6 +79,15 @@ export function buildPdf(indices, meta) {
     doc.text(`Customers served (base): ${indices.customersServed}`);
     doc.text(`Customers affected: ${indices.customersAffected}`);
     doc.text(`Incidents counted: ${indices.incidentCount}`);
+
+    // OMS-01: planned outages, reported separately (only when provided).
+    if (indices.planned) {
+      doc.moveDown(1);
+      doc.fontSize(11).font('Helvetica-Bold').fillColor('#0b2033').text('Planned outages (excluded from the indices above)');
+      doc.fontSize(10).font('Helvetica').fillColor('#0b2033');
+      doc.text(`Planned SAIDI: ${indices.planned.saidi} min  ·  Planned SAIFI: ${indices.planned.saifi}`);
+      doc.text(`Customers interrupted: ${indices.planned.customersInterrupted}  ·  Planned outages counted: ${indices.planned.count}`);
+    }
 
     doc.moveDown(1.2);
     doc.fontSize(8).fillColor('#94a3b8').font('Helvetica-Oblique').text(

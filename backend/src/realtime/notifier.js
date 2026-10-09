@@ -16,15 +16,28 @@ export const transport = nodemailer.createTransport({
 });
 
 const FROM = process.env.NOTIFY_FROM;
-const TEST_TO = process.env.NOTIFY_TEST_TO;
+// Read at send time (not import time) so a test can point it at a fixed address.
+const testTo = () => process.env.NOTIFY_TEST_TO;
+
+// The notifications table and the console get a masked address
+// (f*********@example.com); only the opt-out check and the mail server see
+// the real one. Nothing reads notifications.recipient back.
+export const maskEmail = (e) => {
+  const s = String(e || '');
+  const at = s.indexOf('@');
+  if (at < 1) return s ? '*'.repeat(s.length) : null;
+  return s[0] + '*'.repeat(at - 1) + s.slice(at);
+};
+// Mail-server errors can echo the address back ("550 x@y rejected").
+const maskEmailsIn = (text) => (text ? String(text).replace(/[^\s@<>"'(),;:]+@[^\s@<>"'(),;:]+/g, maskEmail) : text);
 
 async function record(incidentId, channel, recipient, subject, body, status, error) {
   try {
     await db.none(
       `INSERT INTO notifications (id, incident_id, channel, recipient, subject, body, status, error, ts)
        VALUES ($/id/, $/incident_id/, $/channel/, $/recipient/, $/subject/, $/body/, $/status/, $/error/, $/ts/)`,
-      { id: 'NOT' + nanoid(8), incident_id: incidentId, channel, recipient, subject, body, status,
-        error: error || null, ts: new Date().toISOString() }
+      { id: 'NOT' + nanoid(8), incident_id: incidentId, channel, recipient: maskEmail(recipient), subject, body, status,
+        error: maskEmailsIn(error) || null, ts: new Date().toISOString() }
     );
   } catch (e) {
     console.error('[notifier] could not record notification:', e.message);
@@ -32,29 +45,31 @@ async function record(incidentId, channel, recipient, subject, body, status, err
 }
 
 async function sendEmail(incidentId, subject, body) {
-  if (await repo.isOptedOut(TEST_TO, 'email')) {
-    console.log(`[notifier] EMAIL skipped (opted out) -> ${TEST_TO}`);
-    await record(incidentId, 'email', TEST_TO, subject, body, 'skipped-optout', null);
+  const to = testTo();
+  if (await repo.isOptedOut(to, 'email')) {
+    console.log(`[notifier] EMAIL skipped (opted out) -> ${maskEmail(to)}`);
+    await record(incidentId, 'email', to, subject, body, 'skipped-optout', null);
     return;
   }
   try {
-    await transport.sendMail({ from: FROM, to: TEST_TO, subject, text: body });
-    console.log(`[notifier] EMAIL sent -> ${TEST_TO}: ${subject}`);
-    await record(incidentId, 'email', TEST_TO, subject, body, 'sent', null);
+    await transport.sendMail({ from: FROM, to, subject, text: body });
+    console.log(`[notifier] EMAIL sent -> ${maskEmail(to)}: ${subject}`);
+    await record(incidentId, 'email', to, subject, body, 'sent', null);
   } catch (e) {
-    console.error('[notifier] EMAIL failed:', e.message);
-    await record(incidentId, 'email', TEST_TO, subject, body, 'failed', e.message);
+    console.error('[notifier] EMAIL failed:', maskEmailsIn(e.message));
+    await record(incidentId, 'email', to, subject, body, 'failed', e.message);
   }
 }
 
 async function sendSms(incidentId, body) {
-  if (await repo.isOptedOut(TEST_TO, 'sms')) {
-    console.log(`[notifier] SMS skipped (opted out) -> ${TEST_TO}`);
-    await record(incidentId, 'sms', TEST_TO, null, body, 'skipped-optout', null);
+  const to = testTo();
+  if (await repo.isOptedOut(to, 'sms')) {
+    console.log(`[notifier] SMS skipped (opted out) -> ${maskEmail(to)}`);
+    await record(incidentId, 'sms', to, null, body, 'skipped-optout', null);
     return;
   }
   console.log(`[notifier] SMS (console only) -> customer: ${body}`);
-  await record(incidentId, 'sms', TEST_TO, null, body, 'logged', null);
+  await record(incidentId, 'sms', to, null, body, 'logged', null);
 }
 
 // ---- Restoration callbacks (OMS-02) ----
@@ -122,6 +137,8 @@ function describe(inc) {
 
 export function startNotifier() {
   bus.subscribe(TOPICS.INCIDENT_CREATED, async (inc) => {
+    // A planned outage is not "detected"; it gets its own advance notice below.
+    if (inc.type === 'Scheduled') return;
     const { where } = describe(inc);
     const subject = `Power outage reported in ${where}`;
     const body = `We have detected a power outage affecting ${where}` +
@@ -131,8 +148,57 @@ export function startNotifier() {
     await sendSms(inc.id, body);
   });
 
+  // OMS-01 advance notice of a planned outage. The restoration notice is the
+  // ordinary "power restored" message below, sent when it is resolved.
+  bus.subscribe(TOPICS.PLANNED_NOTICE, async ({ kind = 'advance', incident: inc, windowStart, windowEnd, workDescription, deenergisation, affectedSection,
+    previousWindowStart, previousWindowEnd, reason }) => {
+    const { where } = describe(inc);
+    const fmt = (iso) => new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' });
+    if (kind === 'cancelled') {
+      const subject = `Planned power shutdown in ${where} cancelled`;
+      const body = `The planned shutdown in ${where} on ${fmt(windowStart)} has been cancelled. Supply will not be interrupted. Ref: ${inc.id}.`;
+      await sendEmail(inc.id, subject, body);
+      await sendSms(inc.id, body);
+      return;
+    }
+    if (kind === 'rescheduled') {
+      const subject = `Planned power shutdown in ${where} rescheduled`;
+      const body = `The planned shutdown in ${where} has been moved. New time: ${fmt(windowStart)} to ${fmt(windowEnd)}` +
+        (previousWindowStart ? ` (was ${fmt(previousWindowStart)} to ${fmt(previousWindowEnd)})` : '') + ` for ${workDescription}. Ref: ${inc.id}.`;
+      await sendEmail(inc.id, subject, body);
+      await sendSms(inc.id, body);
+      return;
+    }
+    if (kind === 'extended') {
+      const subject = `Planned power shutdown in ${where} extended`;
+      const body = `The planned shutdown in ${where} is taking longer than planned. Supply is now expected by ${fmt(windowEnd)}` +
+        (previousWindowEnd ? ` (previously ${fmt(previousWindowEnd)})` : '') + `. Reason: ${reason}. Ref: ${inc.id}.`;
+      await sendEmail(inc.id, subject, body);
+      await sendSms(inc.id, body);
+      return;
+    }
+    const scope = deenergisation === 'partial' ? `Partial shutdown (${affectedSection || 'part of the area'})` : deenergisation === 'complete' ? 'Complete shutdown' : 'Planned shutdown';
+    const subject = `Planned power shutdown in ${where}`;
+    const body = `${scope} in ${where} from ${fmt(windowStart)} to ${fmt(windowEnd)} for ${workDescription}` +
+      (inc.customers ? ` (approx. ${inc.customers} customers)` : '') +
+      `. Supply will be restored as soon as the work is complete. Ref: ${inc.id}.`;
+    await sendEmail(inc.id, subject, body);
+    await sendSms(inc.id, body);
+  });
+
   bus.subscribe(TOPICS.INCIDENT_UPDATED, async (inc) => {
     const s = (inc.status || '').toLowerCase();
+    // A planned outage (OMS-01) gets one completion notice, when supply is
+    // back; closing its work order afterwards sends nothing more.
+    if (inc.type === 'Scheduled' && await repo.isPlannedIncident(inc.id)) {
+      if (s !== 'resolved') return;
+      const { where } = describe(inc);
+      const subject = `Planned work complete in ${where}`;
+      const body = `The planned work in ${where} is complete and supply has been restored. Thank you for your patience. Ref: ${inc.id}.`;
+      await sendEmail(inc.id, subject, body);
+      await sendSms(inc.id, body);
+      return;
+    }
     if (s === 'resolved' || s === 'restored' || s === 'closed') {
       const { where } = describe(inc);
       const subject = `Power restored in ${where}`;

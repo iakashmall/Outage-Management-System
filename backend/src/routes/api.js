@@ -6,7 +6,7 @@ import { repo } from '../infra/repo.js';
 import { requireRole } from './auth.js';
 import { bus, TOPICS } from '../domain/bus.js';     
 import { canTransition, nextStates, LABELS } from '../domain/lifecycle.js';
-import { computeIndices, computeMTTR, computeSLACompliance, computeCrewProductivity, computeOutageFrequency } from '../domain/indices.js';
+import { computeIndices, computePlannedIndices, computeMTTR, computeSLACompliance, computeCrewProductivity, computeOutageFrequency } from '../domain/indices.js';
 import { buildCsv, buildPdf } from '../domain/reports.js';
 import { MAX_LOCATION_BATCH, parseLocationBatch, newestLivePoint, parseTileParams } from '../domain/locations.js';
 import { createRouter } from '../domain/roadRouter.js';
@@ -19,6 +19,8 @@ import { decodePhotoDataUrl, compressPhoto } from '../domain/photos.js';
 import { CALL_CATEGORIES, CALL_SEVERITY, cleanSubstation, deriveCallState } from '../domain/callState.js';
 import { nanoid } from 'nanoid';
 import { substationForFeeder } from '../domain/prediction.js';
+import { plannedOutageRoutes } from './plannedOutages.js';
+import { plannedComplaintDecision } from '../domain/plannedComplaints.js';
 
 export const api = Router();
 
@@ -35,6 +37,11 @@ for (const method of ['get', 'post', 'patch', 'put', 'delete']) {
       ? (req, res, next) => Promise.resolve(h(req, res, next)).catch(next)
       : h));
 }
+
+// OMS-01 planned outages. Mounted first: for planned outages it takes over
+// GET /incidents/:id, PATCH /incidents/:id/status and PATCH
+// /mobile/jobs/:id/status, and passes every other request on unchanged.
+api.use(plannedOutageRoutes);
 
 const actor = (req) => req.header('x-user') || 'operator';
 // ---------- network topology (real Haridwar GIS, loaded once - unchanged, no DB) ----------
@@ -421,11 +428,32 @@ async function ingestComplaint(body, who) {
   const lon = typeof body.lon === 'number' ? body.lon : null;
   const loc = resolveAsset(lat, lon);                       // - nearest DT, feeder, substation (in-memory, sync)
 
-  const candidates = loc.substation ? await repo.activeIncidentsAtSubstation(loc.substation) : [];
-  const match = pickIncident(candidates, category);
-  let incidentId, action;
+  // OMS-01: a supply complaint inside an active planned outage's window (same
+  // feeder, or same substation when a feeder is unknown) belongs to that
+  // planned outage, not to a new fault incident. A different feeder of the
+  // same substation still opens a fault incident, noted below.
+  const plannedDecision = loc.substation
+    ? plannedComplaintDecision({ category, feeder: loc.feeder, substation: loc.substation }, await repo.plannedOutagesForComplaint(loc.substation))
+    : { action: 'none' };
+  const planned = plannedDecision.action === 'attach' ? plannedDecision.outage : null;
 
-  if (match) {                                              // MERGE
+  const candidates = loc.substation && !planned ? await repo.activeIncidentsAtSubstation(loc.substation) : [];
+  const match = pickIncident(candidates, category);
+  let incidentId, action, plannedOutage = null;
+
+  if (planned) {                                            // PLANNED OUTAGE
+    // action stays 'merged' (an existing incident) so the response values API
+    // consumers know are unchanged; the new plannedOutage field marks it.
+    incidentId = planned.incident_id; action = 'merged';
+    await repo.addIncidentEvent(incidentId, who, 'complaint',
+      `Customer complaint during planned outage: ${qid}${body.externalId ? ' (ext ' + body.externalId + ')' : ''} - ${category}, ${body.customer || 'customer'}`);
+    const end = new Date(planned.window_end);
+    plannedOutage = {
+      incidentId, plannedOutageId: planned.id, windowEnd: end.toISOString(),
+      message: `Planned maintenance is in progress in your area. Supply is expected to be restored by ${end.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })}. Ref: ${incidentId}.`,
+    };
+    bus.publish(TOPICS.PLANNED_OUTAGE_UPDATED, { id: planned.id, incidentId, status: planned.status, complaint: qid });
+  } else if (match) {                                       // MERGE
     incidentId = match.id; action = 'merged';
     await repo.updateIncident(match.id, { customers: (match.customers || 0) + 1 });
     await repo.addIncidentEvent(match.id, who, 'complaint', `Merged complaint ${qid}${body.externalId ? ' (ext ' + body.externalId + ')' : ''} - ${category}, ${body.customer || 'customer'}`);
@@ -442,6 +470,11 @@ async function ingestComplaint(body, who) {
     await repo.addIncidentEvent(incidentId, who, 'created', `Opened from complaint ${qid} - ${category} near ${loc.substation || 'unknown'}`);
     bus.publish(TOPICS.INCIDENT_CREATED, inc);
   }
+  if (plannedDecision.action === 'note') {
+    const po = plannedDecision.outage;
+    await repo.addIncidentEvent(incidentId, who, 'complaint',
+      `Planned outage ${po.incident_id} is active at this substation on feeder ${po.feeder} (this complaint resolved to feeder ${loc.feeder || 'unknown'})`);
+  }
   await cacheDel('indicators');
 
   const complaint = await repo.addComplaint({
@@ -449,7 +482,7 @@ async function ingestComplaint(body, who) {
     address: body.address || null, category, lat, lon, dt_id: loc.dt_id, feeder: loc.feeder,
     substation: loc.substation, incident_id: incidentId, action, ts,
   });
-  return { complaint, action, incidentId, resolved: loc };
+  return { complaint, action, incidentId, resolved: loc, plannedOutage };
 }
 
 api.get('/complaints', async (req, res) => res.json(await repo.complaints()));
@@ -461,6 +494,9 @@ api.post('/complaints', async (req, res) => {
     queryId: r.complaint.qid, externalId: r.complaint.external_id, action: r.action,
     incidentId: r.incidentId, feeder: r.resolved.feeder, substation: r.resolved.substation,
     complaint: r.complaint,
+    // OMS-01, additive: present only when the complaint was linked to a
+    // planned outage; `message` is what to tell the customer.
+    ...(r.plannedOutage ? { plannedOutage: r.plannedOutage } : {}),
   });
 });
 
@@ -492,7 +528,8 @@ api.post('/complaints/simulate', async (req, res) => {
     lat: s.lat + (Math.random() - 0.5) * 0.006, lon: s.lon + (Math.random() - 0.5) * 0.006,
   };
   const r = await ingestComplaint(body, 'complaint-api');
-  res.status(201).json({ queryId: r.complaint.qid, action: r.action, incidentId: r.incidentId, substation: r.resolved.substation, feeder: r.resolved.feeder, category: body.category, customer: body.customer });
+  res.status(201).json({ queryId: r.complaint.qid, action: r.action, incidentId: r.incidentId, substation: r.resolved.substation, feeder: r.resolved.feeder, category: body.category, customer: body.customer,
+    ...(r.plannedOutage ? { plannedOutage: r.plannedOutage } : {}) });
 });
 
 // ---------- indicators / analytics ----------
@@ -504,7 +541,8 @@ api.post('/complaints/simulate', async (req, res) => {
 api.get('/indicators', async (req, res) => {
   const cached = await cacheGet('indicators');
   if (cached) return res.json(cached);
-  const fresh = computeIndices(await repo.incidents());
+  // `planned` (OMS-01) is additive: planned outages, reported separately.
+  const fresh = { ...computeIndices(await repo.incidents()), planned: computePlannedIndices(await repo.plannedOutagesForIndices()) };
   await cacheSet('indicators', fresh, 15);
   res.json(fresh);
 });
@@ -573,7 +611,7 @@ api.get('/analytics/outage-frequency', async (req, res) => {
     const { from, to, zone, assetType, format = 'json' } = req.query;
     const filters = { from, to, zone, assetType };
     const incidents = await repo.incidents();
-    const indices = computeIndices(incidents, filters);
+    const indices = { ...computeIndices(incidents, filters), planned: computePlannedIndices(await repo.plannedOutagesForIndices(), filters) };
     const meta = { generatedAt: new Date().toISOString(), filters: indices.filters };
 
     if (format === 'csv') {

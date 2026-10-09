@@ -11,6 +11,7 @@ import TCS from './screens/TCS.jsx';
 import Complaints from './screens/Complaints.jsx';
 import Analytics from './screens/Analytics.jsx';
 import Admin from './screens/Admin.jsx';
+import PlannedOutages from './screens/PlannedOutages.jsx';
 import IncidentSearch from './components/IncidentSearch.jsx';
 import ProfileMenu from './components/ProfileMenu.jsx';
 import AboutOverlay from './components/AboutOverlay.jsx';
@@ -39,6 +40,7 @@ const NAV = [
   ['map', 'Network Map', 'map', NetworkMap],
   ['incidents', 'Incidents', 'bolt', Incidents],
   ['dispatch', 'Dispatch', 'users', Dispatch],
+  ['planned', 'Planned outages', 'clock', PlannedOutages],
   ['alarms', 'Alarms', 'bell', Alarms],
   ['tcs', 'TCS / IVR', 'phone', TCS],
   ['complaints', 'Complaints', 'inbox', Complaints],
@@ -49,6 +51,10 @@ const NAV = [
 const TAPE_LABEL = {
   'oms.incident.created': ['NEW INCIDENT', 'crit'],
   'oms.incident.updated': ['INCIDENT', ''],
+  'oms.permit.changed': ['PERMIT', ''],
+  'oms.switching.confirmed': ['SWITCHING', 'ok'],
+  'oms.switching.rejected': ['SWITCHING REJECTED', 'crit'],
+  'oms.planned.crew_report': ['CREW REPORT', ''],
   'scada.alarm.raised': ['SCADA ALARM', 'crit'],
   'scada.alarm.acked': ['ALARM ACK', 'ok'],
   'tcs.call.received': ['TROUBLE CALL', ''],
@@ -65,6 +71,10 @@ function LiveTape() {
       const [label, cls] = TAPE_LABEL[topic];
       let detail = '';
       if (topic.startsWith('oms.incident')) detail = `${p.id} . ${p.zone} . ${p.status}`;
+      else if (topic === 'oms.permit.changed') detail = `${p.permit_no} . ${p.crew_id} . ${p.state}`;
+      else if (topic === 'oms.switching.confirmed') detail = `${p.phase} ${p.seq} . ${p.device_label} . ${p.confirmed_by}`;
+      else if (topic === 'oms.switching.rejected') detail = `${p.code}`;
+      else if (topic === 'oms.planned.crew_report') detail = `${p.incidentId} . ${p.report?.crew_id} . ${p.report?.kind === 'delay' ? 'DELAY' : 'site report'}`;
       else if (topic.startsWith('scada')) detail = `${p.tag} . ${p.condition}`;
       else if (topic === 'tcs.call.received') detail = `${p.customer} . ${p.category}`;
       else if (topic === 'crew.updated') detail = `${p.name} . ${p.status}`;
@@ -118,6 +128,21 @@ export default function App() {
   // used by the Alarms table so an operator can go straight from "this alarm
   // fired" to "here's the incident it created" in one click.
   const openIncident = (id) => { setFocusIncidentId(id); setTab('incidents'); };
+
+  // OMS-01: switching attempted out of order, or a permit waiting for the
+  // control room, must be seen on every screen.
+  useEffect(() => {
+    const onRejected = (p) => toast(`Switching step REJECTED (${p.code}): ${p.message}`, 'err', 20000);
+    const onPermit = (p) => { if (p.state === 'requested') toast(`Permit ${p.permit_no} requested by crew ${p.crew_id}: waiting for issue`, 'err', 20000); };
+    // A crew delay report waits for the control room to apply or dismiss it.
+    const onCrewReport = (p) => (p.report?.kind === 'delay'
+      ? toast(`Crew ${p.report.crew_id} reports a DELAY on ${p.incidentId} (${p.zone}): open Planned outages to apply & notify`, 'err', 20000)
+      : toast(`Crew ${p.report?.crew_id} site report on ${p.incidentId}: ${p.report?.note || ''}`));
+    socket.on('oms.switching.rejected', onRejected);
+    socket.on('oms.permit.changed', onPermit);
+    socket.on('oms.planned.crew_report', onCrewReport);
+    return () => { socket.off('oms.switching.rejected', onRejected); socket.off('oms.permit.changed', onPermit); socket.off('oms.planned.crew_report', onCrewReport); };
+  }, []);
 
   const active = NAV.find((n) => n[0] === tab);
   const Screen = active[3];

@@ -1,5 +1,7 @@
 import { db } from './db.js';
 import { nanoid } from 'nanoid';
+import { canTransition, LABELS } from '../domain/lifecycle.js';
+import * as rules from '../domain/plannedOutage.js';
 
 // The only module that talks SQL. Every function is now async because the
 // pg driver is async (unlike node:sqlite/better-sqlite3, which were sync).
@@ -9,6 +11,102 @@ const parseSkills = (r) => r ? { ...r, skills: r.skills ? r.skills.split(',') : 
 // Builds a "col=$/col/" SET clause from a patch object -- same dynamic-update
 // pattern as before, just async at the call site now.
 const setClause = (patch) => Object.keys(patch).map(k => `${k}=$/${k}/`).join(',');
+
+// ---- OMS-01 planned outages: shared transaction helpers ----
+// Every change to a planned outage runs in one transaction that first locks
+// its switching_plans row, so two confirmations for the same outage are
+// processed strictly one after the other. The rules themselves are in
+// domain/plannedOutage.js; the change and its safety_log row commit together.
+
+const STEP_ORDER = "ORDER BY CASE phase WHEN 'isolate' THEN 0 ELSE 1 END, seq";
+const notFound = (what) => ({ error: { code: 'NOT_FOUND', message: `${what} not found`, status: 404 } });
+
+async function loadOutage(t, plannedOutageId, { lock = false } = {}) {
+  const po = await t.oneOrNone('SELECT * FROM planned_outages WHERE id=$1', [plannedOutageId]);
+  if (!po) return null;
+  const plan = await t.one(`SELECT * FROM switching_plans WHERE planned_outage_id=$1${lock ? ' FOR UPDATE' : ''}`, [po.id]);
+  const incident = await t.one('SELECT * FROM incidents WHERE id=$1', [po.incident_id]);
+  const steps = await t.any(`SELECT * FROM switching_steps WHERE plan_id=$1 ${STEP_ORDER}`, [plan.id]);
+  const permits = await t.any('SELECT * FROM work_permits WHERE planned_outage_id=$1 ORDER BY requested_at', [po.id]);
+  const jobs = await t.any('SELECT id, crew_id, status, priority, updated_at FROM jobs WHERE incident_id=$1 ORDER BY id', [po.incident_id]);
+  const reports = await t.any('SELECT * FROM planned_crew_reports WHERE planned_outage_id=$1 ORDER BY reported_at', [po.id]);
+  // Customer complaints linked to this outage (F1); counts only, no contact data.
+  const complaints = await t.one(
+    `SELECT count(*)::int AS total, count(*) FILTER (WHERE ts > $2)::int AS after_window, max(ts) AS last_at
+     FROM complaints WHERE incident_id=$1`, [po.incident_id, po.window_end]);
+  return { po, plan, incident, steps, permits, jobs, reports, complaints };
+}
+
+const outageView = ({ po, plan, incident, steps, permits, jobs, reports, complaints }) => ({ ...po, incident, plan, steps, permits, jobs, reports, complaints });
+const hhmmIST = (d) => new Date(d).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' });
+async function addEvent(t, incidentId, actor, kind, note) {
+  await t.none(`INSERT INTO incident_events (id,incident_id,ts,actor,kind,note) VALUES ($1,$2,$3,$4,$5,$6)`,
+    ['EV' + nanoid(8), incidentId, new Date().toISOString(), actor, kind, note]);
+}
+
+function requireActor(actor) {
+  if (!actor?.username || !Array.isArray(actor.roles)) throw new Error('planned-outage changes need a verified actor { username, roles, crewId }');
+}
+
+async function logSafety(t, plannedOutageId, actor, { entity, entityId, action, from = null, to = null, details = {}, occurredAt = null }) {
+  await t.none(
+    `INSERT INTO safety_log (id, occurred_at, actor, actor_role, actor_crew_id, planned_outage_id, entity, entity_id, action, from_state, to_state, details)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)`,
+    ['SL' + nanoid(10), occurredAt, actor.username, rules.primaryRole(actor), actor.crewId || null,
+      plannedOutageId, entity, entityId, action, from, to, JSON.stringify(details)]
+  );
+  // One line in the general audit trail too, so the Admin audit view shows it.
+  await t.none('INSERT INTO audit_log (id,ts,actor,action,target) VALUES ($1,$2,$3,$4,$5)',
+    ['AU' + nanoid(8), new Date().toISOString(), actor.username, `oms01.${action}`, `${plannedOutageId}:${entityId}`]);
+}
+
+// The only way a planned outage's incident changes status: checked against
+// lifecycle.js, recorded as an incident event and in the safety log.
+async function moveIncident(t, ctx, to, actor, note) {
+  const from = ctx.incident.status;
+  if (!canTransition(from, to, true)) throw new Error(`illegal planned-outage transition ${from} -> ${to}`);
+  const patch = { status: to };
+  if (to === 'resolved') Object.assign(patch, { resolved_at: new Date().toISOString(), restored_by: 'SWITCHING_PLAN', ert: null });
+  await t.none(`UPDATE incidents SET ${setClause(patch)} WHERE id=$/id/`, { ...patch, id: ctx.incident.id });
+  await t.none(`INSERT INTO incident_events (id,incident_id,ts,actor,kind,note) VALUES ($1,$2,$3,$4,'status',$5)`,
+    ['EV' + nanoid(8), ctx.incident.id, new Date().toISOString(), actor.username, `${LABELS[from]} - ${LABELS[to]}${note ? ' - ' + note : ''}`]);
+  await logSafety(t, ctx.po.id, actor, { entity: 'outage', entityId: ctx.po.id, action: 'outage.transition', from, to, details: { note: note || null } });
+  ctx.incident = { ...ctx.incident, ...patch };
+  return { from, to };
+}
+
+// Runs one change to a planned outage. `fn(t, ctx)` returns either
+// { reject, entity, entityId, action } (logged as `${action}.rejected`, nothing
+// else changes) or { result }. Afterwards the automatic transitions the plan
+// and permits now imply are applied (notified -> isolating -> in_progress ...).
+async function withOutage(plannedOutageId, actor, fn) {
+  requireActor(actor);
+  return db.tx(async (t) => {
+    const ctx = await loadOutage(t, plannedOutageId, { lock: true });
+    if (!ctx) return notFound('planned outage');
+    const out = await fn(t, ctx);
+    if (out.reject) {
+      const { code, message, status } = out.reject;
+      await logSafety(t, ctx.po.id, actor, { entity: out.entity, entityId: out.entityId, action: `${out.action}.rejected`, details: { code, message, ...(out.details || {}) } });
+      return { error: { code, message, status } };
+    }
+    const transitions = [...(out.transitions || [])];
+    for (let i = 0; i < 6; i++) {
+      const fresh = await loadOutage(t, plannedOutageId);
+      const to = rules.nextAutomaticStatus(fresh);
+      if (!to) break;
+      transitions.push(await moveIncident(t, fresh, to, actor, 'automatic'));
+    }
+    return { ...out.result, transitions, outage: outageView(await loadOutage(t, plannedOutageId)) };
+  });
+}
+
+// A client-generated id must not already belong to a different record (a
+// bug or a replay against the wrong item); checked before the UNIQUE
+// constraint would turn it into a 500.
+async function clientIdTaken(t, table, column, value, exceptId) {
+  return !!(await t.oneOrNone(`SELECT 1 FROM ${table} WHERE ${column}=$1 AND id<>$2`, [value, exceptId || '']));
+}
 
 export const repo = {
   // ---- incidents
@@ -126,17 +224,55 @@ export const repo = {
     return repo.complaint(c.qid);
   },
   // Active incidents at a substation within the correlation window (most recent first).
+  // Planned outages (OMS-01) are never candidates: a SCADA trip merged into
+  // one would get a trip tag, and its reclose would then "restore" the
+  // planned outage while the crew is still working under a permit.
   activeIncidentsAtSubstation: (substation, windowMin = 240) => {
     const cutoff = new Date(Date.now() - windowMin * 60000).toISOString();
     return db.any(
-      `SELECT * FROM incidents
+      `SELECT * FROM incidents i
        WHERE substation IS NOT DISTINCT FROM $/substation/
          AND status NOT IN ('resolved','closed','cancelled')
          AND opened_at >= $/cutoff/
+         AND NOT EXISTS (SELECT 1 FROM planned_outages po WHERE po.incident_id = i.id)
        ORDER BY opened_at DESC`,
       { substation, cutoff }
     );
   },
+  isPlannedIncident: async (incidentId) =>
+    !!(await db.oneOrNone('SELECT 1 FROM planned_outages WHERE incident_id=$1', [incidentId])),
+  // Planned outages with supply off (or being switched) at a substation.
+  activePlannedOutagesAtSubstation: (substation) => db.any(
+    `SELECT po.id, po.incident_id, i.status FROM planned_outages po JOIN incidents i ON i.id = po.incident_id
+     WHERE i.substation IS NOT DISTINCT FROM $1 AND i.status IN ('isolating','in_progress','restoring')`, [substation]),
+  // Other live planned outages whose window overlaps this one at the same
+  // substation or on the same feeder (F12: a warning, never a block).
+  overlappingPlannedOutages: (plannedOutageId) => db.any(
+    `SELECT o.id, o.incident_id, o.window_start, o.window_end, oi.zone, oi.substation, oi.feeder, oi.status
+     FROM planned_outages me
+     JOIN incidents mi ON mi.id = me.incident_id
+     JOIN planned_outages o ON o.id <> me.id
+     JOIN incidents oi ON oi.id = o.incident_id
+     WHERE me.id = $1
+       AND oi.status NOT IN ('resolved', 'closed', 'cancelled')
+       AND o.window_start < me.window_end AND o.window_end > me.window_start
+       AND ((mi.substation IS NOT NULL AND oi.substation = mi.substation) OR (mi.feeder IS NOT NULL AND oi.feeder = mi.feeder))
+     ORDER BY o.window_start`, [plannedOutageId]),
+  // One row per planned outage for the separate planned indices: off_at is
+  // the first confirmed isolation step (domain/indices.js computePlannedIndices).
+  plannedOutagesForIndices: () => db.any(
+    `SELECT i.id, i.zone, i.source, i.customers, i.resolved_at, i.status,
+            (SELECT min(s.performed_at) FROM switching_steps s JOIN switching_plans sp ON sp.id = s.plan_id
+              WHERE sp.planned_outage_id = po.id AND s.phase = 'isolate' AND s.state = 'confirmed') AS off_at
+     FROM planned_outages po JOIN incidents i ON i.id = po.incident_id`),
+  // Planned outages a complaint at this substation might belong to; the
+  // window and feeder decision is domain/plannedComplaints.js.
+  plannedOutagesForComplaint: (substation) => db.any(
+    `SELECT po.id, po.incident_id, po.window_start, po.window_end, i.status, i.feeder, i.substation
+     FROM planned_outages po JOIN incidents i ON i.id = po.incident_id
+     WHERE i.substation = $1 AND i.status IN ('notified','isolating','in_progress','restoring')`, [substation]),
+  latestPermitForJob: (jobId) =>
+    db.oneOrNone('SELECT * FROM work_permits WHERE job_id=$1 ORDER BY requested_at DESC LIMIT 1', [jobId]),
 
   // ---- crews
   crews: async () => (await db.any('SELECT * FROM crews ORDER BY name')).map(parseSkills),
@@ -357,4 +493,347 @@ export const repo = {
   },
   getMonthlySnapshots: (limit = 12) =>
     db.any('SELECT * FROM monthly_indices ORDER BY month_key DESC LIMIT $1', [limit]),
+
+  // ---- OMS-01 planned outages (docs/OMS-01-DESIGN.md) ----
+  // Every write takes a verified actor { username, roles, crewId } and returns
+  // either { error: { code, message, status } } or its result plus
+  // `transitions` (incident status moves it caused) and the fresh `outage`.
+
+  // Incident (type 'Scheduled', status 'scheduled', no SLA clock) + planned
+  // outage + an empty draft switching plan.
+  createPlannedOutage: async (input, actor) => {
+    requireActor(actor);
+    const bad = rules.checkCreateOutage(input, actor);
+    if (bad) return { error: bad };
+    const id = await repo.nextIncidentId();
+    const poId = 'PO' + nanoid(8);
+    const now = new Date().toISOString();
+    const lead = input.noticeLeadMinutes != null ? Number(input.noticeLeadMinutes) : 1440;
+    const customers = input.customers != null && input.customers !== '' ? Number(input.customers) : 0;
+    const deenergisation = input.deenergisation || 'complete';
+    await db.tx(async (t) => {
+      await t.none(`INSERT INTO incidents
+        (id,type,severity,status,zone,feeder,customers,cause,lat,lon,crew_id,opened_at,ert,sla_due_at,source,substation)
+        VALUES ($/id/,'Scheduled',$/severity/,'scheduled',$/zone/,$/feeder/,$/customers/,$/cause/,$/lat/,$/lon/,NULL,$/now/,$/ert/,NULL,'PLANNED',$/substation/)`,
+        { id, severity: input.severity || 'low', zone: input.zone, feeder: input.feeder || null, customers,
+          cause: input.workDescription, lat: input.lat ?? null, lon: input.lon ?? null, now, ert: input.windowEnd, substation: input.substation || null });
+      await t.none(`INSERT INTO planned_outages
+        (id,incident_id,window_start,window_end,work_description,work_mrid,notice_lead_minutes,notice_due_at,created_by,created_at,
+         deenergisation,affected_section)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        [poId, id, input.windowStart, input.windowEnd, input.workDescription, input.workMrid || null, lead,
+          new Date(Date.parse(input.windowStart) - lead * 60000).toISOString(), actor.username, now,
+          deenergisation, input.affectedSection || null]);
+      await t.none('INSERT INTO switching_plans (id, planned_outage_id) VALUES ($1,$2)', ['SP' + nanoid(8), poId]);
+      await t.none(`INSERT INTO incident_events (id,incident_id,ts,actor,kind,note) VALUES ($1,$2,$3,$4,'created',$5)`,
+        ['EV' + nanoid(8), id, now, actor.username, `Planned outage scheduled - ${input.workDescription}`]);
+      await logSafety(t, poId, actor, { entity: 'outage', entityId: poId, action: 'outage.create', to: 'scheduled',
+        details: { incidentId: id, windowStart: input.windowStart, windowEnd: input.windowEnd, priority: input.severity || 'low',
+          deenergisation, affectedSection: input.affectedSection || null } });
+    });
+    return { outage: await repo.plannedOutage(poId), transitions: [] };
+  },
+
+  plannedOutage: async (id) => {
+    const ctx = await loadOutage(db, id);
+    return ctx ? outageView(ctx) : null;
+  },
+  plannedOutageByIncident: async (incidentId) => {
+    const row = await db.oneOrNone('SELECT id FROM planned_outages WHERE incident_id=$1', [incidentId]);
+    return row ? repo.plannedOutage(row.id) : null;
+  },
+  plannedOutageForJob: async (jobId) => {
+    const row = await db.oneOrNone('SELECT po.id FROM planned_outages po JOIN jobs j ON j.incident_id = po.incident_id WHERE j.id=$1', [jobId]);
+    return row ? repo.plannedOutage(row.id) : null;
+  },
+  plannedOutages: () => db.any(
+    `SELECT po.*, i.status, i.zone, i.feeder, i.substation, i.customers, i.crew_id, i.severity,
+            sp.state AS plan_state,
+            (SELECT count(*) FROM switching_steps s WHERE s.plan_id = sp.id)::int AS step_count,
+            (SELECT count(*) FROM switching_steps s WHERE s.plan_id = sp.id AND s.state = 'confirmed')::int AS steps_confirmed,
+            (SELECT count(*) FROM work_permits p WHERE p.planned_outage_id = po.id AND p.state IN ('requested','issued'))::int AS open_permits,
+            (SELECT count(*) FROM planned_crew_reports r WHERE r.planned_outage_id = po.id AND r.state = 'pending')::int AS pending_delay_reports,
+            (SELECT count(*) FROM complaints c WHERE c.incident_id = po.incident_id)::int AS complaint_count,
+            (SELECT count(*) FROM complaints c WHERE c.incident_id = po.incident_id AND c.ts > po.window_end)::int AS complaints_after_window
+     FROM planned_outages po
+     JOIN incidents i ON i.id = po.incident_id
+     JOIN switching_plans sp ON sp.planned_outage_id = po.id
+     ORDER BY po.window_start`),
+  safetyLog: (plannedOutageId) => db.any('SELECT * FROM safety_log WHERE planned_outage_id=$1 ORDER BY ts, id', [plannedOutageId]),
+
+  // Replace every step of a draft plan. opts.source/traceCaveat when the
+  // steps were drafted from sectionalize.js (Phase 3).
+  replaceDraftSteps: (plannedOutageId, steps, actor, { source = 'manual', traceCaveat = null } = {}) =>
+    withOutage(plannedOutageId, actor, async (t, ctx) => {
+      const reject = rules.checkEditPlan({ plan: ctx.plan, actor }) || rules.checkDraftSteps(steps);
+      if (reject) return { reject, entity: 'plan', entityId: ctx.plan.id, action: 'plan.edit' };
+      await t.none('DELETE FROM switching_steps WHERE plan_id=$1', [ctx.plan.id]);
+      for (const s of steps) {
+        await t.none(`INSERT INTO switching_steps (id,plan_id,phase,seq,action,device_mrid,device_label,location,assignee,assignee_crew_id)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+          ['SS' + nanoid(8), ctx.plan.id, s.phase, s.seq, s.action, s.device_mrid || null, s.device_label, s.location, s.assignee,
+            s.assignee === 'crew' ? s.assignee_crew_id : null]);
+      }
+      await t.none('UPDATE switching_plans SET source=$2, trace_caveat=$3 WHERE id=$1', [ctx.plan.id, source, traceCaveat]);
+      await logSafety(t, ctx.po.id, actor, { entity: 'plan', entityId: ctx.plan.id, action: 'plan.edit', details: { source, steps } });
+      return { result: {} };
+    }),
+
+  // Approval is a named, logged act: the approver takes responsibility for
+  // the order and content of the plan (the trace can't know switch states).
+  approvePlan: (plannedOutageId, actor) =>
+    withOutage(plannedOutageId, actor, async (t, ctx) => {
+      const reject = rules.checkApprovePlan({ plan: ctx.plan, steps: ctx.steps, actor });
+      if (reject) return { reject, entity: 'plan', entityId: ctx.plan.id, action: 'plan.approve' };
+      await t.none("UPDATE switching_plans SET state='approved', approved_by=$2, approved_at=now() WHERE id=$1", [ctx.plan.id, actor.username]);
+      await logSafety(t, ctx.po.id, actor, { entity: 'plan', entityId: ctx.plan.id, action: 'plan.approve', from: 'draft', to: 'approved',
+        details: { steps: ctx.steps.map(({ phase, seq, action, device_label, location, assignee, assignee_crew_id }) => ({ phase, seq, action, device_label, location, assignee, assignee_crew_id })), traceCaveat: ctx.plan.trace_caveat } });
+      return { result: {} };
+    }),
+
+  unapprovePlan: (plannedOutageId, actor) =>
+    withOutage(plannedOutageId, actor, async (t, ctx) => {
+      const reject = rules.checkUnapprovePlan({ plan: ctx.plan, steps: ctx.steps, actor });
+      if (reject) return { reject, entity: 'plan', entityId: ctx.plan.id, action: 'plan.unapprove' };
+      await t.none("UPDATE switching_plans SET state='draft', approved_by=NULL, approved_at=NULL WHERE id=$1", [ctx.plan.id]);
+      await logSafety(t, ctx.po.id, actor, { entity: 'plan', entityId: ctx.plan.id, action: 'plan.unapprove', from: 'approved', to: 'draft' });
+      return { result: {} };
+    }),
+
+  // scheduled -> notified: notice sent (by the notifier / scheduler) or
+  // skipped by an operator with a reason.
+  markNotified: (plannedOutageId, actor, { skip = false, reason = null } = {}) =>
+    withOutage(plannedOutageId, actor, async (t, ctx) => {
+      const reject = rules.checkNotify({ incident: ctx.incident, plan: ctx.plan, actor, skip, reason });
+      if (reject) return { reject, entity: 'outage', entityId: ctx.po.id, action: 'outage.notify' };
+      if (skip) await t.none('UPDATE planned_outages SET notice_skipped_reason=$2 WHERE id=$1', [ctx.po.id, reason]);
+      else await t.none('UPDATE planned_outages SET notice_sent_at=now() WHERE id=$1', [ctx.po.id]);
+      await logSafety(t, ctx.po.id, actor, { entity: 'outage', entityId: ctx.po.id, action: skip ? 'outage.notice_skipped' : 'outage.notice_sent', details: { reason } });
+      return { result: {}, transitions: [await moveIncident(t, ctx, 'notified', actor, skip ? `notice skipped: ${reason}` : 'customers notified')] };
+    }),
+
+  // Approved plans whose notice is due and not yet sent or skipped.
+  dueNotices: (now = new Date()) => db.any(
+    `SELECT po.* FROM planned_outages po
+     JOIN incidents i ON i.id = po.incident_id AND i.status = 'scheduled'
+     JOIN switching_plans sp ON sp.planned_outage_id = po.id AND sp.state = 'approved'
+     WHERE po.notice_sent_at IS NULL AND po.notice_skipped_reason IS NULL AND po.notice_due_at <= $1
+     ORDER BY po.notice_due_at`, [now.toISOString()]),
+
+  // New window; a notified outage goes back to scheduled so it is notified again.
+  reschedulePlannedOutage: (plannedOutageId, actor, { windowStart, windowEnd, workDescription }) =>
+    withOutage(plannedOutageId, actor, async (t, ctx) => {
+      const reject = rules.checkReschedule({ incident: ctx.incident, steps: ctx.steps, actor, windowStart, windowEnd, workDescription });
+      if (reject) return { reject, entity: 'outage', entityId: ctx.po.id, action: 'outage.reschedule' };
+      const dueAt = new Date(Date.parse(windowStart) - ctx.po.notice_lead_minutes * 60000).toISOString();
+      await t.none(`UPDATE planned_outages SET window_start=$2, window_end=$3, work_description=COALESCE($4, work_description),
+          notice_due_at=$5, notice_sent_at=NULL, notice_skipped_reason=NULL WHERE id=$1`,
+        [ctx.po.id, windowStart, windowEnd, workDescription || null, dueAt]);
+      await t.none('UPDATE incidents SET ert=$2 WHERE id=$1', [ctx.incident.id, windowEnd]);
+      await logSafety(t, ctx.po.id, actor, { entity: 'outage', entityId: ctx.po.id, action: 'outage.reschedule',
+        details: { from: { windowStart: ctx.po.window_start, windowEnd: ctx.po.window_end }, to: { windowStart, windowEnd } } });
+      const transitions = ctx.incident.status === 'notified' ? [await moveIncident(t, ctx, 'scheduled', actor, 'rescheduled')] : [];
+      // Customers who already had the notice must hear about the new time.
+      const result = {
+        noticeWasSent: !!ctx.po.notice_sent_at,
+        previousWindowStart: new Date(ctx.po.window_start).toISOString(), previousWindowEnd: new Date(ctx.po.window_end).toISOString(),
+      };
+      return { result, transitions };
+    }),
+
+  cancelPlannedOutage: (plannedOutageId, actor, { reason }) =>
+    withOutage(plannedOutageId, actor, async (t, ctx) => {
+      const reject = rules.checkCancel({ incident: ctx.incident, steps: ctx.steps, actor, reason });
+      if (reject) return { reject, entity: 'outage', entityId: ctx.po.id, action: 'outage.cancel' };
+      return { result: {}, transitions: [await moveIncident(t, ctx, 'cancelled', actor, reason)] };
+    }),
+
+  closePlannedOutage: (plannedOutageId, actor, { force = false, reason = null } = {}) =>
+    withOutage(plannedOutageId, actor, async (t, ctx) => {
+      const reject = rules.checkClose({ incident: ctx.incident, actor, jobs: ctx.jobs, force, reason });
+      if (reject) return { reject, entity: 'outage', entityId: ctx.po.id, action: 'outage.close' };
+      const open = ctx.jobs.filter((j) => j.status !== 'Work Complete');
+      if (!open.length) return { result: {}, transitions: [await moveIncident(t, ctx, 'closed', actor, 'work order closed')] };
+      const note = `closed with open jobs by ${actor.username}: ${reason.trim()}`;
+      await logSafety(t, ctx.po.id, actor, { entity: 'outage', entityId: ctx.po.id, action: 'outage.close_forced',
+        details: { reason: reason.trim(), openJobs: open.map((j) => ({ id: j.id, crewId: j.crew_id, status: j.status })) } });
+      return { result: {}, transitions: [await moveIncident(t, ctx, 'closed', actor, note)] };
+    }),
+
+  // One switching step done. performedAt: when it physically happened (the
+  // route clock-corrects it); received_at is always the server's now.
+  // clientPerformedAt / clientSentAt: what the device reported, kept verbatim
+  // in the safety log next to the corrected time and the server receive time.
+  confirmSwitchingStep: async (stepId, actor, { clientConfirmationId, performedAt = null, onBehalfNote = null, lat = null, lon = null,
+    clientPerformedAt = null, clientSentAt = null }) => {
+    const row = await db.oneOrNone('SELECT sp.planned_outage_id FROM switching_steps s JOIN switching_plans sp ON sp.id = s.plan_id WHERE s.id=$1', [stepId]);
+    if (!row) return notFound('switching step');
+    return withOutage(row.planned_outage_id, actor, async (t, ctx) => {
+      const step = ctx.steps.find((s) => s.id === stepId);
+      const base = { entity: 'step', entityId: stepId, action: 'step.confirm', details: { phase: step.phase, seq: step.seq, clientConfirmationId } };
+      let reject = rules.checkConfirmStep({ ...ctx, step, actor, clientConfirmationId, onBehalfNote });
+      if (reject?.replay) return { result: { step, replay: true } };
+      if (!reject && await clientIdTaken(t, 'switching_steps', 'client_confirmation_id', clientConfirmationId, stepId)) {
+        reject = { code: 'CLIENT_ID_REUSED', message: 'clientConfirmationId already belongs to another step', status: 409 };
+      }
+      if (reject) return { ...base, reject };
+      const receivedAt = new Date().toISOString();
+      const when = performedAt || receivedAt;
+      await t.none(`UPDATE switching_steps SET state='confirmed', confirmed_by=$2, performed_at=$3, received_at=$8,
+          client_confirmation_id=$4, on_behalf_note=$5, lat=$6, lon=$7 WHERE id=$1`,
+        [stepId, actor.username, when, clientConfirmationId, onBehalfNote, lat, lon, receivedAt]);
+      await logSafety(t, ctx.po.id, actor, { entity: 'step', entityId: stepId, action: 'step.confirm', from: 'pending', to: 'confirmed', occurredAt: when,
+        details: { phase: step.phase, seq: step.seq, action: step.action, device: step.device_label, location: step.location,
+          assignee: step.assignee, assigneeCrewId: step.assignee_crew_id, clientConfirmationId, onBehalfNote, lat, lon,
+          performedAt: when, receivedAt, clientPerformedAt: clientPerformedAt ?? null, clientSentAt: clientSentAt ?? null } });
+      return { result: { step: await t.one('SELECT * FROM switching_steps WHERE id=$1', [stepId]) } };
+    });
+  },
+
+  // ---- crew reports and delays (FAT: preliminary info, delay updates) ----
+
+  // A crew's site report or delay report on its own job. A delay report only
+  // records the request (state 'pending'); nothing about the window changes.
+  addCrewReport: async (jobId, actor, { kind, note, expectedEnd = null, clientReportId }) => {
+    const job = await db.oneOrNone('SELECT * FROM jobs WHERE id=$1', [jobId]);
+    if (!job) return notFound('job');
+    const row = await db.oneOrNone('SELECT id FROM planned_outages WHERE incident_id=$1', [job.incident_id]);
+    if (!row) return { error: { code: 'NOT_A_PLANNED_JOB', message: 'this job is not part of a planned outage', status: 409 } };
+    return withOutage(row.id, actor, async (t, ctx) => {
+      const reject = rules.checkCrewReport({ ...ctx, job, actor, kind, note, expectedEnd, clientReportId });
+      if (reject?.replay) return { result: { report: reject.report, replay: true } };
+      if (reject) return { reject, entity: 'report', entityId: jobId, action: `crew.${kind === 'delay' ? 'delay_report' : 'site_report'}`, details: { clientReportId } };
+      const report = {
+        id: 'CR' + nanoid(8), planned_outage_id: ctx.po.id, job_id: jobId, crew_id: job.crew_id, kind, note: note.trim(),
+        expected_end: kind === 'delay' ? expectedEnd : null, state: kind === 'delay' ? 'pending' : 'received',
+        client_report_id: clientReportId, reported_by: actor.username,
+      };
+      await t.none(`INSERT INTO planned_crew_reports (id,planned_outage_id,job_id,crew_id,kind,note,expected_end,state,client_report_id,reported_by,reported_at)
+        VALUES ($/id/,$/planned_outage_id/,$/job_id/,$/crew_id/,$/kind/,$/note/,$/expected_end/,$/state/,$/client_report_id/,$/reported_by/,now())`, report);
+      await logSafety(t, ctx.po.id, actor, { entity: 'report', entityId: report.id, action: kind === 'delay' ? 'crew.delay_report' : 'crew.site_report',
+        to: report.state, details: { jobId, note: report.note, expectedEnd: report.expected_end, clientReportId } });
+      await addEvent(t, ctx.incident.id, actor.username, 'field', kind === 'delay'
+        ? `Crew ${job.crew_id} reports a delay: expects to finish by ${hhmmIST(expectedEnd)} - ${report.note} (awaiting control room)`
+        : `Crew ${job.crew_id} site report: ${report.note}`);
+      return { result: { report: await t.one('SELECT * FROM planned_crew_reports WHERE id=$1', [report.id]) } };
+    });
+  },
+
+  // The control room extends the window, directly or by applying a crew's
+  // pending delay report. The route then sends the "extended" notice.
+  delayPlannedOutage: (plannedOutageId, actor, { newWindowEnd, reason, reportId = null }) =>
+    withOutage(plannedOutageId, actor, async (t, ctx) => {
+      const report = reportId ? ctx.reports.find((x) => x.id === reportId) : null;
+      if (reportId && !report) return { reject: { code: 'NOT_FOUND', message: 'delay report not found', status: 404 }, entity: 'outage', entityId: ctx.po.id, action: 'outage.delay' };
+      const reject = rules.checkDelay({ incident: ctx.incident, po: ctx.po, actor, newWindowEnd, reason, report });
+      if (reject) return { reject, entity: 'outage', entityId: ctx.po.id, action: 'outage.delay', details: { reportId } };
+      const previousWindowEnd = new Date(ctx.po.window_end).toISOString();
+      await t.none('UPDATE planned_outages SET window_end=$2 WHERE id=$1', [ctx.po.id, newWindowEnd]);
+      await t.none('UPDATE incidents SET ert=$2 WHERE id=$1', [ctx.incident.id, newWindowEnd]);
+      if (report) {
+        await t.none(`UPDATE planned_crew_reports SET state='applied', resolved_by=$2, resolved_at=now(), resolution_note=$3, applied_end=$4 WHERE id=$1`,
+          [report.id, actor.username, reason.trim(), newWindowEnd]);
+      }
+      await logSafety(t, ctx.po.id, actor, { entity: 'outage', entityId: ctx.po.id, action: 'outage.delay',
+        details: { from: previousWindowEnd, to: newWindowEnd, reason: reason.trim(), reportId } });
+      await addEvent(t, ctx.incident.id, actor.username, 'ert',
+        `Planned window extended to ${hhmmIST(newWindowEnd)} (was ${hhmmIST(previousWindowEnd)})${report ? ` on crew ${report.crew_id}'s report` : ''} - ${reason.trim()}`);
+      return { result: { previousWindowEnd, reason: reason.trim() } };
+    }),
+
+  dismissDelayReport: (plannedOutageId, reportId, actor, { reason }) =>
+    withOutage(plannedOutageId, actor, async (t, ctx) => {
+      const report = ctx.reports.find((x) => x.id === reportId);
+      if (!report) return { reject: { code: 'NOT_FOUND', message: 'delay report not found', status: 404 }, entity: 'report', entityId: reportId, action: 'crew.delay_dismiss' };
+      const reject = rules.checkDismissReport({ actor, report, reason });
+      if (reject) return { reject, entity: 'report', entityId: reportId, action: 'crew.delay_dismiss' };
+      await t.none(`UPDATE planned_crew_reports SET state='dismissed', resolved_by=$2, resolved_at=now(), resolution_note=$3 WHERE id=$1`,
+        [reportId, actor.username, reason.trim()]);
+      await logSafety(t, ctx.po.id, actor, { entity: 'report', entityId: reportId, action: 'crew.delay_dismiss', from: 'pending', to: 'dismissed', details: { reason: reason.trim() } });
+      await addEvent(t, ctx.incident.id, actor.username, 'field', `Delay report from crew ${report.crew_id} dismissed - ${reason.trim()}`);
+      return { result: {} };
+    }),
+
+  // ---- work permits: online-only handshake (§3.4) ----
+  requestPermit: async (jobId, actor, { clientRequestId }) => {
+    const job = await db.oneOrNone('SELECT * FROM jobs WHERE id=$1', [jobId]);
+    if (!job) return notFound('job');
+    const row = await db.oneOrNone('SELECT id FROM planned_outages WHERE incident_id=$1', [job.incident_id]);
+    if (!row) return { error: { code: 'NOT_A_PLANNED_JOB', message: 'this job is not part of a planned outage', status: 409 } };
+    return withOutage(row.id, actor, async (t, ctx) => {
+      let reject = rules.checkRequestPermit({ ...ctx, job, actor, clientRequestId });
+      if (reject?.replay) return { result: { permit: reject.permit, replay: true } };
+      if (!reject && await clientIdTaken(t, 'work_permits', 'request_client_id', clientRequestId, null)) {
+        reject = { code: 'CLIENT_ID_REUSED', message: 'clientRequestId already belongs to another permit', status: 409 };
+      }
+      if (reject) return { reject, entity: 'permit', entityId: jobId, action: 'permit.request', details: { clientRequestId } };
+      const { n } = await t.one("SELECT nextval('permit_no_seq') n");
+      const permit = {
+        id: 'PTW' + nanoid(8), permit_no: `PTW-${new Date().getFullYear()}-${String(n).padStart(6, '0')}`,
+        planned_outage_id: ctx.po.id, job_id: jobId, crew_id: job.crew_id, requested_by: actor.username, request_client_id: clientRequestId,
+      };
+      await t.none(`INSERT INTO work_permits (id,permit_no,planned_outage_id,job_id,crew_id,state,requested_by,requested_at,request_client_id)
+        VALUES ($/id/,$/permit_no/,$/planned_outage_id/,$/job_id/,$/crew_id/,'requested',$/requested_by/,now(),$/request_client_id/)`, permit);
+      await logSafety(t, ctx.po.id, actor, { entity: 'permit', entityId: permit.id, action: 'permit.request', to: 'requested',
+        details: { permitNo: permit.permit_no, jobId, crewId: job.crew_id, clientRequestId } });
+      return { result: { permit: await t.one('SELECT * FROM work_permits WHERE id=$1', [permit.id]) } };
+    });
+  },
+
+  issuePermit: (permitId, actor, { isolationPoints, earthingPoints }) =>
+    withPermit(permitId, actor, 'permit.issue', (ctx, permit) => rules.checkIssuePermit({ ...ctx, permit, actor, isolationPoints, earthingPoints }),
+      async (t, permit) => {
+        await t.none(`UPDATE work_permits SET state='issued', issued_by=$2, issued_at=now(), isolation_points=$3, earthing_points=$4 WHERE id=$1`,
+          [permit.id, actor.username, isolationPoints, earthingPoints]);
+        return { to: 'issued', details: { isolationPoints, earthingPoints } };
+      }),
+
+  refusePermit: (permitId, actor, { reason }) =>
+    withPermit(permitId, actor, 'permit.refuse', (ctx, permit) => rules.checkRefusePermit({ permit, actor, reason }),
+      async (t, permit) => {
+        await t.none(`UPDATE work_permits SET state='refused', closed_by=$2, closed_at=now(), refusal_reason=$3 WHERE id=$1`, [permit.id, actor.username, reason]);
+        return { to: 'refused', details: { reason } };
+      }),
+
+  withdrawPermit: (permitId, actor) =>
+    withPermit(permitId, actor, 'permit.withdraw', (ctx, permit) => rules.checkWithdrawPermit({ permit, actor }),
+      async (t, permit) => {
+        await t.none(`UPDATE work_permits SET state='withdrawn', closed_by=$2, closed_at=now() WHERE id=$1`, [permit.id, actor.username]);
+        return { to: 'withdrawn' };
+      }),
+
+  // The crew's declaration that the line is clear from their side. Restore
+  // steps stay blocked until every permit for the outage is returned.
+  returnPermit: (permitId, actor, { declaration, clientRequestId, onBehalfNote = null }) =>
+    withPermit(permitId, actor, 'permit.return',
+      (ctx, permit) => rules.checkReturnPermit({ permit, actor, declaration, clientRequestId, onBehalfNote }),
+      async (t, permit) => {
+        if (await clientIdTaken(t, 'work_permits', 'return_client_id', clientRequestId, permit.id)) {
+          return { reject: { code: 'CLIENT_ID_REUSED', message: 'clientRequestId already belongs to another permit', status: 409 } };
+        }
+        const decl = { menWithdrawn: true, earthsRemoved: true, toolsClear: true, remarks: declaration?.remarks || null };
+        await t.none(`UPDATE work_permits SET state='returned', returned_by=$2, returned_at=now(), return_client_id=$3,
+            return_declaration=$4::jsonb, on_behalf_note=$5 WHERE id=$1`,
+          [permit.id, actor.username, clientRequestId, JSON.stringify(decl), onBehalfNote]);
+        return { to: 'returned', details: { declaration: decl, clientRequestId, onBehalfNote } };
+      }),
 };
+
+// Shared shape of the permit transitions after the request: lock the
+// outage, check, apply, log. apply() may still reject (e.g. a reused id).
+async function withPermit(permitId, actor, action, check, apply) {
+  const row = await db.oneOrNone('SELECT planned_outage_id FROM work_permits WHERE id=$1', [permitId]);
+  if (!row) return notFound('permit');
+  return withOutage(row.planned_outage_id, actor, async (t, ctx) => {
+    const permit = ctx.permits.find((p) => p.id === permitId);
+    const base = { entity: 'permit', entityId: permitId, action, details: { permitNo: permit.permit_no } };
+    const reject = check(ctx, permit);
+    if (reject?.replay) return { result: { permit, replay: true } };
+    if (reject) return { ...base, reject };
+    const applied = await apply(t, permit);
+    if (applied.reject) return { ...base, reject: applied.reject };
+    await logSafety(t, ctx.po.id, actor, { entity: 'permit', entityId: permitId, action, from: permit.state, to: applied.to,
+      details: { permitNo: permit.permit_no, ...(applied.details || {}) } });
+    return { result: { permit: await t.one('SELECT * FROM work_permits WHERE id=$1', [permitId]) } };
+  });
+}

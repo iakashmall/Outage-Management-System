@@ -1,4 +1,5 @@
 import { db, migrate, syncIdSequences } from './db.js';
+import { repo } from './repo.js';
 
 // Seed mirrors the UPCL "Ganga Corridor" reference data from the SRS/screens:
 // Dehradun, Haridwar, Rishikesh — real coordinates, CIM-style feeder IDs, UNS tags.
@@ -8,6 +9,12 @@ export async function seed({ force = false } = {}) {
   if (Number(n) > 0 && !force) return { skipped: true };
 
   await db.tx(async (t) => {
+    // OMS-01 planned-outage rows reference incidents, so they go first.
+    // safety_log is left alone: it is append-only by design (a DB trigger
+    // refuses DELETE) and has no foreign keys, so it outlives the reset.
+    for (const table of ['planned_crew_reports', 'switching_steps', 'work_permits', 'switching_plans', 'planned_outages']) {
+      await t.none(`DELETE FROM ${table}`);
+    }
     for (const table of ['job_updates','jobs','incident_events','notifications','trouble_calls','alarms','audit_log','complaints','incidents','crews']) {
       await t.none(`DELETE FROM ${table}`);
     }
@@ -38,7 +45,8 @@ export async function seed({ force = false } = {}) {
     ['INC-2026-000004','Power Outage','critical','pending','Mayapur','UPCL-MP-A',890,'Breaker trip',29.940311,78.147653,'C003',145,'33/11 kV MAYAPUR S/s'],
     ['INC-2026-000005','Power Outage','low','resolved','Kankhal-2','UPCL-KK-C',120,'Equipment failure',29.918303,78.143566,'C004',220,'33/11 kV KANKHAL- 2 S/s'],
     ['INC-2026-000006','Power Outage','high','open','Bairagi Camp','UPCL-BC-A',445,'No Supply',29.938929,78.157583,null,8,'33/11 kV BAIRAGI CAMP S/s'],
-    ['INC-2026-000007','Scheduled','low','scheduled','Gurukul','UPCL-GK-D',200,'Maintenance',29.920027,78.116094,'C005',0,'33/11 kV GURUKUL S/s'],
+    // (INC-2026-000007 was an old-style 'Scheduled' row; planned outages are
+    // now seeded through the OMS-01 model below, see seedPlannedOutages.)
     // raised from trouble calls (source 'TCS'): one closed, one cancelled as a false alarm
     ['INC-2026-000008','Power Outage','medium','closed','Kankhal-2','UPCL-KK-C',1,'Customer reported',29.918303,78.143566,'C004',600,'33/11 kV KANKHAL- 2 S/s','TCS'],
     ['INC-2026-000009','Power Outage','medium','cancelled','Jwalapur-I','UPCL-JW-B',1,'Customer reported',29.920357,78.098809,null,400,'33/11 kV JWALAPUR-I S/s','TCS'],
@@ -131,7 +139,52 @@ export async function seed({ force = false } = {}) {
   // them now, or the next real incident collides with seed data.
   await syncIdSequences();
 
-  return { seeded: true, incidents: incidents.length, crews: crews.length };
+  const plannedOutages = await seedPlannedOutages(now);
+  return { seeded: true, incidents: incidents.length, crews: crews.length, plannedOutages };
+}
+
+// OMS-01 demo data, created through the same repo functions the API uses
+// (so plans, safety log and states are real): one outage scheduled with an
+// approved plan, one already notified. No crew is assigned and no message
+// is sent here. The scheduler (realtime/plannedNotices.js) sends the
+// Gurukul advance notice when it falls due, about a day after seeding.
+const SEED_ACTOR = Object.freeze({ username: 'seed', roles: ['oms_operator'], crewId: null });
+async function seedPlannedOutages(now) {
+  const at = (hours) => { const d = new Date(now.getTime() + hours * 3600e3); d.setMinutes(0, 0, 0); return d.toISOString(); };
+  const must = (out, what) => { if (out?.error) throw new Error(`seed: ${what}: ${out.error.code} ${out.error.message}`); return out; };
+  const step = (phase, seq, action, device_label, location, crew = null) =>
+    ({ phase, seq, action, device_label, location, assignee: crew ? 'crew' : 'control_room', assignee_crew_id: crew });
+
+  const gurukul = must(await repo.createPlannedOutage({
+    zone: 'Gurukul', substation: '33/11 kV GURUKUL S/s', feeder: 'UPCL-GU-A', customers: 200, severity: 'medium',
+    deenergisation: 'complete', windowStart: at(49), windowEnd: at(53), noticeLeadMinutes: 1440,
+    workDescription: 'Replace DT-14 HT bushings and LT kiosk',
+  }, SEED_ACTOR), 'Gurukul outage').outage;
+  must(await repo.replaceDraftSteps(gurukul.id, [
+    step('isolate', 1, 'open', 'GU-A 11 kV feeder breaker', 'Gurukul S/s'),
+    step('isolate', 2, 'open', 'AB switch P-214', 'Pole 214, Gurukul Rd', 'C005'),
+    step('isolate', 3, 'earth_apply', 'DT-14 work site, both sides', 'DT-14', 'C005'),
+    step('restore', 1, 'earth_remove', 'DT-14 work site, both sides', 'DT-14', 'C005'),
+    step('restore', 2, 'close', 'AB switch P-214', 'Pole 214, Gurukul Rd', 'C005'),
+    step('restore', 3, 'close', 'GU-A 11 kV feeder breaker', 'Gurukul S/s'),
+  ], SEED_ACTOR), 'Gurukul plan');
+  must(await repo.approvePlan(gurukul.id, SEED_ACTOR), 'Gurukul approval');
+
+  const kankhal = must(await repo.createPlannedOutage({
+    zone: 'Kankhal-2', substation: '33/11 kV KANKHAL- 2 S/s', feeder: 'UPCL-KK-B', customers: 85, severity: 'low',
+    deenergisation: 'partial', affectedSection: 'LT network of the Krishna Nagar DT only', windowStart: at(26), windowEnd: at(29),
+    noticeLeadMinutes: 1440, workDescription: 'Tree trimming near the Krishna Nagar DT',
+  }, SEED_ACTOR), 'Kankhal-2 outage').outage;
+  must(await repo.replaceDraftSteps(kankhal.id, [
+    step('isolate', 1, 'open', 'Krishna Nagar DT LT fuse unit', 'Krishna Nagar DT', 'C004'),
+    step('isolate', 2, 'earth_apply', 'Krishna Nagar DT LT side', 'Krishna Nagar DT', 'C004'),
+    step('restore', 1, 'earth_remove', 'Krishna Nagar DT LT side', 'Krishna Nagar DT', 'C004'),
+    step('restore', 2, 'close', 'Krishna Nagar DT LT fuse unit', 'Krishna Nagar DT', 'C004'),
+  ], SEED_ACTOR), 'Kankhal-2 plan');
+  must(await repo.approvePlan(kankhal.id, SEED_ACTOR), 'Kankhal-2 approval');
+  // Recorded as a skipped notice with a plain reason: nothing was sent.
+  must(await repo.markNotified(kankhal.id, SEED_ACTOR, { skip: true, reason: 'Demo data from seed: no customer message was sent' }), 'Kankhal-2 notice');
+  return 2;
 }
 
 // allow `npm run seed`

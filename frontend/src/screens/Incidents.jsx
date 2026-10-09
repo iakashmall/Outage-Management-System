@@ -4,7 +4,9 @@ import { Icon, SevBadge, StatusBadge, timeAgo, hhmm, useLiveRefresh, toast } fro
 import { Drawer, DrawerContent } from '../components/ui/drawer.jsx';
 
 const SEVS = ['all', 'critical', 'high', 'medium', 'low'];
-const STATS = ['all', 'open', 'dispatched', 'in_progress', 'pending', 'resolved'];
+// 'planned' is a type filter, not a status: planned outages (OMS-01) move
+// through their own states (notified, isolating, restoring ...).
+const STATS = ['all', 'open', 'dispatched', 'in_progress', 'pending', 'resolved', 'planned'];
 
 export default function Incidents({ openId, focusIncidentId, clearFocus } = {}) {
   const [inc, setInc] = useState([]);
@@ -37,7 +39,8 @@ export default function Incidents({ openId, focusIncidentId, clearFocus } = {}) 
     api.incident(focusIncidentId).then(setSel).finally(() => clearFocus && clearFocus());
   }, [focusIncidentId]); // eslint-disable-line
 
-  const rows = inc.filter((i) => (sev === 'all' || i.severity === sev) && (st === 'all' || i.status === st));
+  const rows = inc.filter((i) => (sev === 'all' || i.severity === sev)
+    && (st === 'all' || (st === 'planned' ? i.type === 'Scheduled' : i.status === st)));
 
   const open = (i) => api.incident(i.id).then(setSel);
 
@@ -52,7 +55,7 @@ export default function Incidents({ openId, focusIncidentId, clearFocus } = {}) 
       <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
         {SEVS.map((s) => <button key={s} className={`pill ${sev === s ? 'on' : ''}`} onClick={() => setSev(s)}>{s === 'all' ? 'All severities' : s}</button>)}
         <span style={{ width: 1, background: 'var(--line)', margin: '0 4px' }} />
-        {STATS.map((s) => <button key={s} className={`pill ${st === s ? 'on' : ''}`} onClick={() => setSt(s)}>{s === 'all' ? 'All statuses' : s.replace('_', ' ')}</button>)}
+        {STATS.map((s) => <button key={s} className={`pill ${st === s ? 'on' : ''}`} onClick={() => setSt(s)}>{s === 'all' ? 'All statuses' : s === 'planned' ? 'Planned outages' : s.replace('_', ' ')}</button>)}
       </div>
 
       <div className="card">
@@ -175,7 +178,9 @@ function IncidentDrawer({ inc, onClose, onChange }) {
                 {s === 'cancelled' ? 'Cancel' : (inc.status === 'pending' && s === 'resolved') ? 'Accept - verified restored' : (inc.status === 'pending' && s === 'in_progress') ? 'Deny - send crew back' : `-> ${(inc.stateLabels?.[s] || s)}`}
               </button>
             ))}
-            {!inc.nextStates?.length && <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>Terminal state - no further transitions.</span>}
+            {!inc.nextStates?.length && <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>{inc.plannedOutageId
+              ? 'Planned outage - its status follows the switching plan and work permits. Manage it in Planned outages.'
+              : 'Terminal state - no further transitions.'}</span>}
           </div>
 
           {!inc.crew_id && ['open', 'dispatched'].includes(inc.status) && (
@@ -238,7 +243,7 @@ function NewIncident({ onClose, onCreated }) {
   {['Mayapur', 'Bhoopatwala', 'Industrial Area', 'Jwalapur-I', 'Kankhal-2', 'Dehradun Central', 'Clement Town, Dehradun', 'Ballupur, Dehradun', 'Jwalapur, Haridwar'].map((z) => <option key={z} value={z}>{z}</option>)}
 </select>)}
           {field('Severity', <select style={inp} value={f.severity} onChange={set('severity')}>{['critical', 'high', 'medium', 'low'].map((s) => <option key={s}>{s}</option>)}</select>)}
-          {field('Type', <select style={inp} value={f.type} onChange={set('type')}>{['Power Outage', 'Partial Power', 'Scheduled'].map((s) => <option key={s}>{s}</option>)}</select>)}
+          {field('Type', <select style={inp} value={f.type} onChange={set('type')}>{['Power Outage', 'Partial Power'].map((s) => <option key={s}>{s}</option>)}</select>)}
           {field('Feeder', <input style={inp} value={f.feeder} onChange={set('feeder')} placeholder="FDR-SE01-F02" />)}
           {field('Customers affected', <input style={inp} type="number" value={f.customers} onChange={set('customers')} />)}
           {field('Cause', <input style={inp} value={f.cause} onChange={set('cause')} />)}

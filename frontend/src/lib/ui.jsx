@@ -26,7 +26,7 @@ export const Icon = ({ name, size = 20 }) => {
 
 export const SevBadge = ({ sev }) => <span className={`badge-sev sev-${sev}`}>{sev}</span>;
 export const StatusBadge = ({ status }) => {
-  const label = { in_progress: 'In Progress', pending: 'Pending Verification' }[status] ||
+  const label = { in_progress: 'In Progress', pending: 'Pending Verification', notified: 'Customers notified' }[status] ||
     status.charAt(0).toUpperCase() + status.slice(1);
   return <span className={`badge-st st-${status}`}>{label}</span>;
 };

@@ -13,6 +13,8 @@ import { repo } from './infra/repo.js';
 import { requireAuth } from './routes/auth.js';
 import { bus, initBus } from './domain/bus.js';
 import { connectRedis } from './infra/redis.js';
+import { startPlannedNotices } from './realtime/plannedNotices.js';
+import { publicOutages } from './domain/publicStatus.js';
 import { startSimulator } from './realtime/simulator.js';
 import { startScadaConsumer } from './realtime/scada.js';
 import { startRestorationPublisher } from './realtime/restoration.js';
@@ -59,17 +61,10 @@ app.get('/api/health/ready', async (req, res) => {
 app.get('/api/public/outage-status', async (req, res) => {
   try {
     const { ref, zone } = req.query;
-    let list = await repo.incidents();
-    // only show incidents that are still active (not closed/resolved)
-    const active = list.filter((i) => !['resolved', 'restored', 'closed'].includes((i.status || '').toLowerCase()));
-    let match = active;
-    if (ref) match = active.filter((i) => i.id.toLowerCase() === String(ref).toLowerCase());
-    else if (zone) match = active.filter((i) => (i.zone || '').toLowerCase().includes(String(zone).toLowerCase()));
-    // expose only safe, public fields
-    const safe = match.map((i) => ({
-      ref: i.id, zone: i.zone, status: i.status,
-      customersAffected: i.customers, estimatedRestoration: i.ert, since: i.opened_at,
-    }));
+    // only active incidents, only safe public fields (domain/publicStatus.js);
+    // planned outages (OMS-01) are labelled as planned, with their window
+    const planned = new Map((await repo.plannedOutages()).map((p) => [p.incident_id, p]));
+    const safe = publicOutages(await repo.incidents(), planned, { ref, zone });
     res.json({ count: safe.length, outages: safe });
   } catch (e) {
     res.status(500).json({ error: 'lookup failed' });
@@ -113,4 +108,5 @@ http.listen(PORT, () => {
     startSimulator();
   }
   startNotifier();
+  startPlannedNotices(); // OMS-01 advance notices, after the notifier is listening
 });
