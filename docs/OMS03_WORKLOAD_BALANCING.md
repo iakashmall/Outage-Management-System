@@ -188,15 +188,22 @@ The crew APK is the Expo app at the repo root (see `LEGACY.md` and
   to this crew appears within that time, and a job moved away disappears,
   even when it was the crew's last job.
 - If the open job screen shows a job that is no longer this crew's, it
-  closes with the notice "This job was reassigned".
+  closes with the notice "This job was reassigned". Only a list the server
+  returned counts: offline, the app keeps showing the last cached list and
+  never closes a job.
+- Notices stack until dismissed and are also shown on the job screen.
 - Status updates carry `crewId`. A live update refused with `NOT_YOUR_JOB`
   is not queued: the status is put back, a notice is shown and the list is
   read again.
 - The offline queue drops updates the server refuses (4xx other than 401,
   408 and 429) instead of retrying them forever, and says which ones were
-  dropped and why. Network errors and 5xx are still retried.
+  dropped and why. Network errors and 5xx are still retried. Only one flush
+  runs at a time, and a flush removes only the items it sent or dropped, so
+  an update queued meanwhile is kept.
 - Job cards and the job screen show priority and estimated duration when
-  set.
+  set. The priority is the effective one dispatch plans with
+  (`effectivePriority` / `medical` on `GET /mobile/crews/:id/jobs`), e.g.
+  "Critical (Medical)" for a job with a Medical call.
 
 **These app changes need a new EAS build**
 (`eas build --profile test --platform android`). Until then, installed
@@ -216,9 +223,6 @@ username) the server cannot refuse their stale updates.
   unchanged: backend `db.js`, `auth.js`, `index.js` (4000), Kafka, Redis,
   map proxy; `frontend/vite.config.js` and `frontend/src/lib/auth.js`; crew
   app `src/config.js` (LAN IP default, 4000 / 18080, http). OMS-03 adds none.
-- **Crew app offline queue.** A flush reads and rewrites the whole queue.
-  An update queued while a flush is still running can be lost (pre-existing;
-  the shorter poll makes this a bit more likely).
 
 ## FAT demo steps
 

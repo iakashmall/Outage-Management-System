@@ -24,7 +24,7 @@ import { substationForFeeder } from '../domain/prediction.js';
 import { plannedOutageRoutes } from './plannedOutages.js';
 import { plannedComplaintDecision } from '../domain/plannedComplaints.js';
 import { dispatchRoutes } from './dispatch.js';
-import { PRIORITY_CLASSES, isActive, isMovable } from '../domain/rebalance.js';
+import { PRIORITY_CLASSES, isActive, isMovable, priorityInfo } from '../domain/rebalance.js';
 import { isOperator } from '../domain/plannedOutage.js';
 
 export const api = Router();
@@ -687,7 +687,12 @@ api.get('/mobile/crews/:id/jobs', async (req, res) => {
   // NOTE: was a sync `.map()` with a repo lookup inside - under async repo
   // calls that returns an array of unresolved Promises. Use Promise.all instead.
   const rawJobs = await repo.jobsForCrew(req.params.id);
-  const jobs = await Promise.all(rawJobs.map(async (j) => ({ ...j, incident: await repo.incident(j.incident_id) })));
+  // OMS-03: the phone shows the priority dispatch planned with, not just the
+  // job's own column (a Medical call on the incident makes it Critical).
+  const jobs = await Promise.all(rawJobs.map(async (j) => {
+    const { priority: effectivePriority, medical } = priorityInfo(j);
+    return { ...j, effectivePriority, medical, incident: await repo.incident(j.incident_id) };
+  }));
   res.json(jobs);
 });
 

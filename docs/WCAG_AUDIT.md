@@ -18,9 +18,10 @@ baseline sweep, not a certification.
 ## What was tested
 
 - **Target**: `frontend/` (the real React app served by Vite at
-  `localhost:5173`), not the legacy prototype at the repo root (`src/`,
-  `index.js`) -- that tree is marked superseded in `LEGACY.md` and was
-  intentionally excluded.
+  `localhost:5173`), the control-room frontend. The repo root was
+  intentionally excluded: neither the Expo crew app (`index.js` ->
+  `src/NativeApp.jsx`, see `LEGACY.md`) nor the root web prototype
+  (`index.html` / `src/main.jsx`) was audited.
 - **Method**: [axe-core](https://github.com/dequelabs/axe-core) 4.10.2,
   injected live into the running app via Chrome DevTools automation
   (`window.axe.run()`), logged in as a real `oms_operator` user through

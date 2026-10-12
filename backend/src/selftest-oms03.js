@@ -229,6 +229,9 @@ const server = app.listen(0, async () => {
       && ras.find((x) => x.job_id === 'JOB-103')?.to_crew === null && /Fuse/.test(ras.find((x) => x.job_id === 'JOB-103')?.reason || ''));
     const c3jobs = (await call('c3', 'GET', '/mobile/crews/C003/jobs')).body;
     check('GET /mobile/crews/C003/jobs shows the reassigned JOB-102', c3jobs.some((j) => j.id === 'JOB-102' && j.incident));
+    const app102 = c3jobs.find((j) => j.id === 'JOB-102');
+    check('crew app gets the effective priority (Medical call -> Critical), not the raw column',
+      app102?.effectivePriority === 'Critical' && app102?.medical === true && app102?.priority !== 'Critical', JSON.stringify(app102 && { p: app102.priority, e: app102.effectivePriority, m: app102.medical }));
     const c4jobs = (await call('c4', 'GET', '/mobile/crews/C004/jobs')).body.map((j) => j.id);
     check('C004 keeps only its En Route job', c4jobs.length === 1 && c4jobs[0] === 'JOB-105', JSON.stringify(c4jobs));
     check('C004 job_id still its En Route incident, status off_shift',

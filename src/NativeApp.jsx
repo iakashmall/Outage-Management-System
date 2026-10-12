@@ -30,7 +30,7 @@ import {
 import { biometricUnlock } from './lib/biometric';
 import { getLockoutStatus, recordFailedAttempt, resetAttempts as resetLoginAttempts, MAX_ATTEMPTS, LOCKOUT_MS } from './lib/lockout';
 import { API_PORT, CLIENT_ID, KEYCLOAK_PORT, JOB_POLL_INTERVAL_MS } from './config';
-import { reportTrackingState, getCurrentCrew, getMyJobs, updateJobStatus, getJobsLastSyncedAt, getJobMessages, getJobPhotos, getCrewMessages, saveAssetScan, getAssetScans, isNotYourJob } from './lib/api.js';
+import { reportTrackingState, getCurrentCrew, fetchMyJobs, clearJobCache, updateJobStatus, getJobsLastSyncedAt, getJobMessages, getJobPhotos, getCrewMessages, saveAssetScan, getAssetScans, isNotYourJob } from './lib/api.js';
 import { getLocation, getLastKnownLocation } from './lib/location';
 import { uploadCapturedPhoto } from './lib/photos';
 import { navigateTo } from './lib/navigate';
@@ -85,7 +85,7 @@ const canUseMapServer = () => isAuthenticated() || usingMapTestServer;
 // OMS-03 planning info from dispatch: priority and estimated duration.
 function jobPlanLine(job) {
   const parts = [];
-  if (job.priority) parts.push(`Priority: ${job.priority}`);
+  if (job.priority) parts.push(`Priority: ${job.priority}${job.medical ? ' (Medical)' : ''}`);
   if (job.estimatedDurationMin) parts.push(`Est. ${job.estimatedDurationMin} min`);
   return parts.join(' · ');
 }
@@ -95,6 +95,23 @@ function droppedUpdateNotice(item) {
   return isNotYourJob(item)
     ? `${item.id} → ${item.status} was not sent: this job was reassigned to another crew.`
     : `${item.id} → ${item.status} was refused by the server: ${item.message || 'unknown reason'}`;
+}
+
+// Notices pile up (one per line) until the crew dismisses them, so a later
+// one doesn't hide an earlier one they haven't read yet.
+const appendNotice = (prev, msg) =>
+  !msg || prev.split('\n').includes(msg) ? prev : [prev, msg].filter(Boolean).join('\n');
+
+// Shown on the main screens and inside the job screen (a Modal covers the
+// main screen), so a refusal is seen wherever the crew is.
+function NoticeBanner({ notice, onDismiss }) {
+  if (!notice) return null;
+  return (
+    <Pressable style={styles.noticeBanner} onPress={onDismiss} accessibilityLabel="Dismiss notice">
+      <Text style={styles.noticeText}>{notice}</Text>
+      <Text style={styles.noticeDismiss}>Tap to dismiss</Text>
+    </Pressable>
+  );
 }
 
 function timeAgo(timestamp) {
@@ -173,8 +190,10 @@ function NativeAppScreen() {
   // Short notice for things done to the crew's work by someone else, e.g. a
   // job reassigned to another crew (OMS-03).
   const [notice, setNotice] = useState('');
-  // True once the job list came from getMyJobs, not the FALLBACK_JOBS
-  // placeholder, so a missing job really means it was taken away.
+  const addNotice = useCallback((msg) => setNotice((prev) => appendNotice(prev, msg)), []);
+  // True while the job list is the server's answer (not the FALLBACK_JOBS
+  // placeholder or the offline cache), so a missing job really means it was
+  // taken away rather than that the network is down.
   const jobsSyncedRef = useRef(false);
   const [backStack, setBackStack] = useState([]);
   const [forwardStack, setForwardStack] = useState([]);
@@ -343,18 +362,28 @@ function NativeAppScreen() {
     await setTrackingPausedByCrew(false);
     setTrackingOn(false);
     await authLogout();
+    await clearJobCache();
+    // Nothing of this crew's session may carry over to the next sign-in on
+    // the same phone (a stale notice, or an open job closed as "reassigned").
+    jobsSyncedRef.current = false;
+    pageRef.current = { ...pageRef.current, jobId: null };
+    setActiveJob(null);
+    setJobs(FALLBACK_JOBS);
+    setNotice('');
     setAuthenticated(false);
   }, []);
 
   const refresh = useCallback(() => {
     if (!authenticated) return;
     getCurrentCrew().then(setCrew).catch(() => {});
-    // An empty list is a real answer: the crew's last job may have been
-    // reassigned to another crew.
-    getMyJobs()
-      .then((items) => {
+    fetchMyJobs()
+      .then(({ jobs: items, fromServer }) => {
         if (!Array.isArray(items)) return;
-        jobsSyncedRef.current = true;
+        // From the server an empty list is a real answer: the crew's last job
+        // may have been reassigned. The offline fallback is only used when it
+        // has something to show, and never counts as a server answer.
+        if (!fromServer && !items.length) return;
+        jobsSyncedRef.current = fromServer;
         setJobs(items);
       })
       .catch(() => {});
@@ -375,7 +404,7 @@ function NativeAppScreen() {
     if (fresh && !movedAway) return;
     pageRef.current = { ...pageRef.current, jobId: null };
     setActiveJob(null);
-    setNotice(`This job was reassigned: ${activeJob.id} is no longer assigned to your crew.`);
+    addNotice(`This job was reassigned: ${activeJob.id} is no longer assigned to your crew.`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobs]);
 
@@ -420,7 +449,7 @@ function NativeAppScreen() {
       }
       flushQueue()
         .then((result) => {
-          if (result?.dropped?.length) setNotice(result.dropped.map(droppedUpdateNotice).join('\n'));
+          (result?.dropped ?? []).forEach((item) => addNotice(droppedUpdateNotice(item)));
           return getQueueItems();
         })
         .then((items) => {
@@ -433,7 +462,7 @@ function NativeAppScreen() {
     sync();
     const interval = setInterval(sync, JOB_POLL_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [authenticated, refresh]);
+  }, [authenticated, refresh, addNotice]);
 
   // Upload GPS fixes recorded while offline: immediately when the network
   // comes back, plus a periodic retry. The background task also flushes on
@@ -506,7 +535,7 @@ function NativeAppScreen() {
         // again. Undo the optimistic status and re-read the job list.
         setJobs((current) => current.map((j) => (j.id === job.id ? { ...j, status: job.status } : j)));
         setActiveJob((current) => current?.id === job.id ? { ...current, status: job.status } : current);
-        setNotice(droppedUpdateNotice({ id: job.id, status: nextStatus, code: err.code, message: err.message }));
+        addNotice(droppedUpdateNotice({ id: job.id, status: nextStatus, code: err.code, message: err.message }));
         refresh();
         return;
       }
@@ -517,7 +546,7 @@ function NativeAppScreen() {
       setPendingItems((current) => [...current, queued]);
       setPendingCount((n) => n + 1);
     }
-  }, [refresh]);
+  }, [refresh, addNotice]);
 
   if (checkingSession) {
     return (
@@ -625,12 +654,7 @@ function NativeAppScreen() {
         </View>
       </View>
       <ScrollView contentContainerStyle={[styles.content, { paddingBottom: 100 + insets.bottom }]}>
-        {notice ? (
-          <Pressable style={styles.noticeBanner} onPress={() => setNotice('')} accessibilityLabel="Dismiss notice">
-            <Text style={styles.noticeText}>{notice}</Text>
-            <Text style={styles.noticeDismiss}>Tap to dismiss</Text>
-          </Pressable>
-        ) : null}
+        <NoticeBanner notice={notice} onDismiss={() => setNotice('')} />
         {tab === 'Dashboard' ? (
           <>
             <Text style={styles.title}>Today&apos;s field work</Text>
@@ -723,6 +747,8 @@ function NativeAppScreen() {
             crew={crew}
             onClose={goBack}
             onAdvance={handleAdvance}
+            notice={notice}
+            onDismissNotice={() => setNotice('')}
             onNavigate={(job) => {
               setMapJobId(job.id);
               setNavJobId(job.id);
@@ -1066,7 +1092,7 @@ function PhotoCamera({ onCapture, onClose }) {
   );
 }
 
-function JobDetail({ job, crew, onClose, onAdvance, onNavigate }) {
+function JobDetail({ job, crew, onClose, onAdvance, onNavigate, notice, onDismissNotice }) {
   const [showSafety, setShowSafety] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
   const [showPhotoCamera, setShowPhotoCamera] = useState(false);
@@ -1230,6 +1256,7 @@ function JobDetail({ job, crew, onClose, onAdvance, onNavigate }) {
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
       >
+        <NoticeBanner notice={notice} onDismiss={onDismissNotice} />
         <Text style={[styles.jobTitle, { fontSize: 22 }]}>{job.title}</Text>
         <Text style={styles.address}>📍 {job.address}</Text>
         {jobPlanLine(job) ? <Text style={styles.planLine}>{jobPlanLine(job)}</Text> : null}

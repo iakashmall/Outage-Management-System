@@ -398,7 +398,11 @@ export const repo = {
 
   // ---- jobs (crew app)
   jobs: () => db.any('SELECT * FROM jobs ORDER BY updated_at DESC'),
-  jobsForCrew: (crewId) => db.any('SELECT * FROM jobs WHERE crew_id=$1 ORDER BY updated_at DESC', [crewId]),
+  // call_categories: for the OMS-03 effective priority (see JOB_INPUT_SQL).
+  jobsForCrew: (crewId) => db.any(`SELECT j.*,
+      COALESCE((SELECT array_agg(DISTINCT tc.category) FROM trouble_calls tc
+                 WHERE tc.linked_id = j.incident_id AND tc.category IS NOT NULL), '{}') AS call_categories
+    FROM jobs j WHERE j.crew_id=$1 ORDER BY j.updated_at DESC`, [crewId]),
   jobUpdates: (jobId) => db.any('SELECT * FROM job_updates WHERE job_id=$1 ORDER BY ts ASC', [jobId]),
   jobsForIncident: (incidentId) => db.any('SELECT * FROM jobs WHERE incident_id=$1 ORDER BY updated_at DESC', [incidentId]),
   photosForIncident: (incidentId) => db.any(

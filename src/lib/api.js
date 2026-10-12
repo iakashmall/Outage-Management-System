@@ -111,7 +111,10 @@ function normalizeOmsJob(job) {
     address: job.address ?? job.incident?.zone ?? job.location ?? "Location unavailable",
     feeder: job.feeder ?? job.incident?.feeder ?? job.feederId ?? "—",
     severity: job.severity ?? job.incident?.severity ?? "Medium",
-    priority: job.priority ?? "Urgent",
+    // OMS-03: the priority dispatch plans with (raised by Medical / Critical /
+    // VIP trouble calls on the incident), else the job's own.
+    priority: job.effectivePriority ?? job.priority ?? "Urgent",
+    medical: !!job.medical,
     // OMS-03: dispatch's planning estimate in minutes, when set.
     estimatedDurationMin: job.estimated_duration_min ?? job.estimatedDurationMin ?? null,
     customers: job.customers ?? job.incident?.customers ?? job.affectedCustomers ?? 0,
@@ -146,22 +149,29 @@ export async function getCurrentCrew() {
 }
 
 // GET /api/mobile/crews/:crewId/jobs — this crew's jobs + incidents.
-export async function getMyJobs() {
+// { jobs, fromServer }: fromServer is false for the demo set and the offline
+// fallback, so the app can tell "the server says this job is gone" from
+// "no network".
+export async function fetchMyJobs() {
   const { isAuthenticated, myCrewId } = await session();
-  if (!isAuthenticated()) return demoJobs;
+  if (!isAuthenticated()) return { jobs: demoJobs, fromServer: false };
   try {
     const jobs = await req("/mobile/crews/" + myCrewId() + "/jobs");
     const mapped = (jobs ?? []).map(normalizeOmsJob);
     await cacheJobs(mapped);
-    return mapped;
+    return { jobs: mapped, fromServer: true };
   } catch {
     // No connectivity / backend unreachable — show the last real synced
     // job list (offline-ready data) so the crew still sees their actual
     // last-known assignments. A signed-in crew never gets the demo set:
     // sample jobs would look like real work and hide the outage.
     const cached = await readCachedJobs();
-    return cached ?? [];
+    return { jobs: cached ?? [], fromServer: false };
   }
+}
+
+export async function getMyJobs() {
+  return (await fetchMyJobs()).jobs;
 }
 
 // PATCH /api/mobile/jobs/:id/status  { status, lat, lon, crewId }
@@ -224,9 +234,13 @@ export async function getAssetScans(jobId) {
   return req(`/mobile/jobs/${jobId}/assets/scans`);
 }
 
-export async function logout() {
-  // The cached job list belongs to the crew that is signing out.
+// The cached job list belongs to the crew that is signing out.
+export async function clearJobCache() {
   await AsyncStorage.multiRemove([JOBS_CACHE_KEY, JOBS_CACHE_SYNCED_AT_KEY]).catch(() => {});
+}
+
+export async function logout() {
+  await clearJobCache();
   const { logout: sessionLogout } = await session();
   await sessionLogout(); // on web this redirects through Keycloak's logout
 }
