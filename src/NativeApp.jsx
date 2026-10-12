@@ -29,15 +29,15 @@ import {
 } from './lib/auth';
 import { biometricUnlock } from './lib/biometric';
 import { getLockoutStatus, recordFailedAttempt, resetAttempts as resetLoginAttempts, MAX_ATTEMPTS, LOCKOUT_MS } from './lib/lockout';
-import { API_PORT, CLIENT_ID, KEYCLOAK_PORT } from './config';
-import { reportTrackingState, getCurrentCrew, getMyJobs, updateJobStatus, getJobsLastSyncedAt, getJobMessages, getJobPhotos, getCrewMessages, saveAssetScan, getAssetScans } from './lib/api.js';
+import { API_PORT, CLIENT_ID, KEYCLOAK_PORT, JOB_POLL_INTERVAL_MS } from './config';
+import { reportTrackingState, getCurrentCrew, getMyJobs, updateJobStatus, getJobsLastSyncedAt, getJobMessages, getJobPhotos, getCrewMessages, saveAssetScan, getAssetScans, isNotYourJob } from './lib/api.js';
 import { getLocation, getLastKnownLocation } from './lib/location';
 import { uploadCapturedPhoto } from './lib/photos';
 import { navigateTo } from './lib/navigate';
 import { isOnlineState, distanceAndDirection } from './lib/offlineNavigation';
 import { getRoadRoute, preloadRoadGraph, formatDistance, formatDuration } from './lib/roadRouting';
 import { openMultiJobRoute } from './lib/routing';
-import { queueUpdate, flushQueue, getQueueLength, getQueueItems } from './lib/offlineQueue';
+import { queueUpdate, flushQueue, getQueueLength, getQueueItems, isRefusal } from './lib/offlineQueue';
 import { startCrewTracking, stopCrewTracking, autoStartCrewTracking, setTrackingPausedByCrew } from './lib/backgroundLocation';
 import { flushLocations, getPendingLocationCount } from './lib/locationQueue';
 import { downloadPack, cancelPackDownload, getInstalledPack, getPackStatus, subscribePackStatus } from './lib/offlineMap/areaStore';
@@ -81,6 +81,21 @@ const MAX_JOB_PHOTOS = 25;
 // The offline map pack and GPS uploads need either a real login or the
 // no-auth map test server (MAP_TEST_SERVER in config.js).
 const canUseMapServer = () => isAuthenticated() || usingMapTestServer;
+
+// OMS-03 planning info from dispatch: priority and estimated duration.
+function jobPlanLine(job) {
+  const parts = [];
+  if (job.priority) parts.push(`Priority: ${job.priority}`);
+  if (job.estimatedDurationMin) parts.push(`Est. ${job.estimatedDurationMin} min`);
+  return parts.join(' · ');
+}
+
+// Why a status update was dropped instead of retried.
+function droppedUpdateNotice(item) {
+  return isNotYourJob(item)
+    ? `${item.id} → ${item.status} was not sent: this job was reassigned to another crew.`
+    : `${item.id} → ${item.status} was refused by the server: ${item.message || 'unknown reason'}`;
+}
 
 function timeAgo(timestamp) {
   const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
@@ -155,6 +170,12 @@ function NativeAppScreen() {
   const [pendingItems, setPendingItems] = useState([]);
   const [crewMessages, setCrewMessages] = useState([]);
   const [messagesVisible, setMessagesVisible] = useState(false);
+  // Short notice for things done to the crew's work by someone else, e.g. a
+  // job reassigned to another crew (OMS-03).
+  const [notice, setNotice] = useState('');
+  // True once the job list came from getMyJobs, not the FALLBACK_JOBS
+  // placeholder, so a missing job really means it was taken away.
+  const jobsSyncedRef = useRef(false);
   const [backStack, setBackStack] = useState([]);
   const [forwardStack, setForwardStack] = useState([]);
   const pageRef = useRef({ tab: 'Dashboard', jobId: null });
@@ -328,12 +349,35 @@ function NativeAppScreen() {
   const refresh = useCallback(() => {
     if (!authenticated) return;
     getCurrentCrew().then(setCrew).catch(() => {});
-    getMyJobs().then((items) => items?.length && setJobs(items)).catch(() => {});
+    // An empty list is a real answer: the crew's last job may have been
+    // reassigned to another crew.
+    getMyJobs()
+      .then((items) => {
+        if (!Array.isArray(items)) return;
+        jobsSyncedRef.current = true;
+        setJobs(items);
+      })
+      .catch(() => {});
   }, [authenticated]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // The open job screen is a snapshot. When a refresh shows the job is no
+  // longer this crew's (rebalanced or reassigned by dispatch), close it so
+  // the crew doesn't keep working on, or updating, another crew's job.
+  useEffect(() => {
+    if (!activeJob || !jobsSyncedRef.current) return;
+    const fresh = jobs.find((j) => j.id === activeJob.id);
+    const me = isAuthenticated() ? myCrewId() : null;
+    const movedAway = !!(fresh && me && fresh.assignedCrewId && fresh.assignedCrewId !== me);
+    if (fresh && !movedAway) return;
+    pageRef.current = { ...pageRef.current, jobId: null };
+    setActiveJob(null);
+    setNotice(`This job was reassigned: ${activeJob.id} is no longer assigned to your crew.`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobs]);
 
   // OMS messages are polled while the authenticated crew app is connected.
   useEffect(() => {
@@ -375,7 +419,10 @@ function NativeAppScreen() {
         return;
       }
       flushQueue()
-        .then(() => getQueueItems())
+        .then((result) => {
+          if (result?.dropped?.length) setNotice(result.dropped.map(droppedUpdateNotice).join('\n'));
+          return getQueueItems();
+        })
         .then((items) => {
           setPendingItems(items);
           setPendingCount(items.length);
@@ -384,7 +431,7 @@ function NativeAppScreen() {
         .catch(() => {});
     };
     sync();
-    const interval = setInterval(sync, 30000);
+    const interval = setInterval(sync, JOB_POLL_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [authenticated, refresh]);
 
@@ -427,7 +474,12 @@ function NativeAppScreen() {
     // was accepted. Never queued: the server would refuse a stale one, and it
     // would sit in Pending Sync forever. Throws so the job screen can say so.
     if (opts.onlineOnly) {
-      await updatePlannedJobStatus(job.id, nextStatus, location);
+      try {
+        await updatePlannedJobStatus(job.id, nextStatus, location);
+      } catch (err) {
+        if (isNotYourJob(err)) refresh(); // the job screen closes once the list drops it
+        throw err;
+      }
       setJobs((current) => current.map((j) => (j.id === job.id ? { ...j, status: nextStatus } : j)));
       setActiveJob((current) => current?.id === job.id ? { ...current, status: nextStatus } : current);
       return;
@@ -448,13 +500,24 @@ function NativeAppScreen() {
 
     try {
       await updateJobStatus(job.id, nextStatus, location);
-    } catch {
-      const queued = { id: job.id, status: nextStatus, location, queuedAt: Date.now() };
+    } catch (err) {
+      if (isRefusal(err)) {
+        // Refused (e.g. 409 NOT_YOUR_JOB): queueing would only be refused
+        // again. Undo the optimistic status and re-read the job list.
+        setJobs((current) => current.map((j) => (j.id === job.id ? { ...j, status: job.status } : j)));
+        setActiveJob((current) => current?.id === job.id ? { ...current, status: job.status } : current);
+        setNotice(droppedUpdateNotice({ id: job.id, status: nextStatus, code: err.code, message: err.message }));
+        refresh();
+        return;
+      }
+      // Network or server error: keep it and retry. The crew that made the
+      // update goes with it, so the server can refuse it if the job moves.
+      const queued = { id: job.id, status: nextStatus, location, crewId: myCrewId(), queuedAt: Date.now() };
       await queueUpdate(queued);
       setPendingItems((current) => [...current, queued]);
       setPendingCount((n) => n + 1);
     }
-  }, []);
+  }, [refresh]);
 
   if (checkingSession) {
     return (
@@ -562,6 +625,12 @@ function NativeAppScreen() {
         </View>
       </View>
       <ScrollView contentContainerStyle={[styles.content, { paddingBottom: 100 + insets.bottom }]}>
+        {notice ? (
+          <Pressable style={styles.noticeBanner} onPress={() => setNotice('')} accessibilityLabel="Dismiss notice">
+            <Text style={styles.noticeText}>{notice}</Text>
+            <Text style={styles.noticeDismiss}>Tap to dismiss</Text>
+          </Pressable>
+        ) : null}
         {tab === 'Dashboard' ? (
           <>
             <Text style={styles.title}>Today&apos;s field work</Text>
@@ -936,6 +1005,7 @@ function JobCard({ job, onPress }) {
         </View>
         <Text style={styles.jobTitle}>{job.title || 'Untitled job'}</Text>
         <Text style={styles.address}>{job.address || 'Location not available'}</Text>
+        {jobPlanLine(job) ? <Text style={styles.planLine}>{jobPlanLine(job)}</Text> : null}
         <View style={styles.row}>
           <Text style={styles.meta}>{job.distance || 'Distance unknown'}</Text>
           <Text style={styles.meta}>{job.customers ?? 0} customers</Text>
@@ -1162,6 +1232,7 @@ function JobDetail({ job, crew, onClose, onAdvance, onNavigate }) {
       >
         <Text style={[styles.jobTitle, { fontSize: 22 }]}>{job.title}</Text>
         <Text style={styles.address}>📍 {job.address}</Text>
+        {jobPlanLine(job) ? <Text style={styles.planLine}>{jobPlanLine(job)}</Text> : null}
         <View style={styles.detailStats}>
           <View>
             <Text style={styles.statLabel}>Feeder</Text>
@@ -1782,6 +1853,10 @@ const styles = StyleSheet.create({
   jobTitle: { color: '#0f1b2d', fontSize: 16, fontWeight: '800', marginTop: 10 },
   address: { color: '#7c8da3', fontSize: 13, marginTop: 4 },
   meta: { color: '#33465f', fontSize: 12, fontWeight: '600', marginTop: 13 },
+  planLine: { color: '#33465f', fontSize: 12, fontWeight: '700', marginTop: 6 },
+  noticeBanner: { backgroundColor: '#fdecea', borderRadius: 12, borderWidth: 1, borderColor: '#f3b8b2', padding: 14, marginBottom: 16, gap: 6 },
+  noticeText: { color: '#8f2219', fontSize: 13, fontWeight: '700' },
+  noticeDismiss: { color: '#b0554c', fontSize: 11, fontWeight: '600' },
   empty: { paddingTop: 40 },
   nav: { position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: '#fff', borderTopWidth: 1, borderTopColor: '#e6ecf3', flexDirection: 'row', paddingTop: 10, paddingBottom: 12 },
   navItem: { flex: 1, alignItems: 'center' },
