@@ -1,3 +1,4 @@
+import { pathToFileURL } from 'node:url';
 import { db, migrate, syncIdSequences } from './db.js';
 import { repo } from './repo.js';
 
@@ -187,8 +188,8 @@ async function seedPlannedOutages(now) {
   return 2;
 }
 
-// allow `npm run seed`
-if (import.meta.url === `file://${process.argv[1]}`) {
+// allow `npm run seed` (pathToFileURL so the check also matches on Windows)
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const r = await seed({ force: process.argv.includes('--force') });
   console.log('[seed]', r);
 }
