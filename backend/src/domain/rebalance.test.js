@@ -173,6 +173,26 @@ test('priority ordering in overload: equal weights, the higher priority job is p
   assert.equal(r.moves[0].priority, 'Critical');
 });
 
+test('overload with no single fix: heaviest job moves first, light Critical job stays', () => {
+  const crews = [crew('C1'), crew('C2', { capacity: 10 })];
+  const jobs = [
+    job('J1', 'C1', { estimated_duration_min: 10, call_categories: ['Critical'] }), // w 0.5
+    job('J2', 'C1', { estimated_duration_min: 180 }), // w 3
+    job('J3', 'C1', { estimated_duration_min: 180 }), // w 3
+    job('J4', 'C1', { estimated_duration_min: 150 }), // w 2.5
+  ];
+  // C1 at 9/4 = 225%: J2 first (heaviest), then J4 is the smallest single fix (6 - 2.5 = 3.5).
+  const r = proposeRebalance({ crews, jobs, settings: DEFAULT_WORKLOAD_SETTINGS });
+  assert.deepEqual(movedIds(r), ['J2', 'J4']);
+  assert.equal(loadOf(r.after, 'C1'), 0.875);
+});
+
+test('planned job on an off-shift crew is reported as planned, not in progress', () => {
+  const r = proposeRebalance({ crews: [crew('C1', { on_shift: false }), crew('C2')], jobs: [job('J1', 'C1', { planned: true })], settings: DEFAULT_WORKLOAD_SETTINGS });
+  assert.equal(r.stuck[0].reason, 'Acknowledged: planned-outage job, left with crew');
+  assert.ok(!/in progress/.test(r.warnings[0]));
+});
+
 test('AoR and skill filtering choose the only eligible crew', () => {
   const crews = [
     crew('C1', { on_shift: false, aor: ['Mayapur'] }),

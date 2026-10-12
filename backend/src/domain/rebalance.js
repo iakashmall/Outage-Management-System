@@ -142,6 +142,7 @@ export function proposeRebalance({ crews = [], jobs = [], settings, trigger = 'm
   const weightOf = new Map(crewList.map((c) => [c.id, 0]));
   const assigned = new Map(); // jobId -> crewId as planned so far
   for (const j of active) {
+    // Flagged (crew_id NULL) jobs are not re-offered here; they are placed via manual assign.
     if (j.crew_id == null) continue;
     if (!crewById.has(j.crew_id)) { warnings.push(`job ${j.id} is on unknown crew ${j.crew_id}; ignored`); continue; }
     assigned.set(j.id, j.crew_id);
@@ -184,8 +185,9 @@ export function proposeRebalance({ crews = [], jobs = [], settings, trigger = 'm
   const offIds = new Set(crewList.filter((c) => c.on_shift === false).map((c) => c.id));
   const offJobs = active.filter((j) => offIds.has(assigned.get(j.id)));
   for (const j of offJobs.filter((x) => !isMovable(x))) {
-    stuck.push({ jobId: j.id, crewId: j.crew_id, reason: `${j.status}: in progress, left with crew` });
-    warnings.push(`job ${j.id} (${j.status}) is in progress on off-shift crew ${j.crew_id}; left with crew`);
+    const why = j.planned ? 'planned-outage job' : 'in progress';
+    stuck.push({ jobId: j.id, crewId: j.crew_id, reason: `${j.status}: ${why}, left with crew` });
+    warnings.push(`job ${j.id} (${j.status}) is ${j.planned ? 'a planned-outage job' : 'in progress'} on off-shift crew ${j.crew_id}; left with crew`);
   }
   for (const j of offJobs.filter(isMovable).sort(placementOrder)) {
     const w = info.get(j.id).weight;
@@ -221,7 +223,8 @@ export function proposeRebalance({ crews = [], jobs = [], settings, trigger = 'm
       const cur = weightOf.get(crew.id);
       const single = cands.filter((x) => (cur - x.w) / cap <= T + EPS)
         .sort((a, b) => a.w - b.w || placementOrder(a.j, b.j));
-      const pick = single[0] ?? cands.sort((a, b) => placementOrder(a.j, b.j))[0];
+      // No single fix: move the heaviest job; priority only breaks weight ties.
+      const pick = single[0] ?? cands.sort((a, b) => b.w - a.w || placementOrder(a.j, b.j))[0];
       move(pick.j, crew.id, pickTarget(pick.targets, pick.j, pick.w), 'overload');
     }
     if (loadOf(crew.id) > T + EPS) {
