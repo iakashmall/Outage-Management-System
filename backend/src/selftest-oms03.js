@@ -60,6 +60,7 @@ const USERS = {
   noname: { username: undefined, roles: ['oms_operator'], crewId: null },
   c3: { username: 'crew03', roles: ['field_crew'], crewId: 'C003' },
   c4: { username: 'crew04', roles: ['field_crew'], crewId: 'C004' },
+  crewNoClaim: { username: 'crew.noclaim', roles: ['field_crew'], crewId: null },
 };
 const app = express();
 app.use(express.json());
@@ -160,6 +161,8 @@ const server = app.listen(0, async () => {
     check('old crew (token C004) updating a moved job -> 409 NOT_YOUR_JOB', r.status === 409 && r.body.code === 'NOT_YOUR_JOB');
     r = await call('op', 'PATCH', '/mobile/jobs/JOB-101/status', { status: 'En Route', crewId: 'C004' });
     check('demo login naming the old crew in the body -> 409 NOT_YOUR_JOB', r.status === 409 && r.body.code === 'NOT_YOUR_JOB');
+    r = await call('crewNoClaim', 'PATCH', '/mobile/jobs/JOB-101/status', { status: 'En Route' });
+    check('field_crew login naming no crew -> 403 NO_CREW_ID', r.status === 403 && r.body.code === 'NO_CREW_ID');
     check('the job is unchanged', (await job('JOB-101')).status === 'Acknowledged');
 
     console.log('-- (b) C004 off shift: automatic proposal, never applied by itself');
@@ -185,7 +188,22 @@ const server = app.listen(0, async () => {
     check('rejected proposal cannot be applied (409)', (await call('op', 'POST', `/dispatch/rebalance/proposals/${p.id}/apply`)).status === 409);
     check('rejecting moved nothing', (await crewOf('JOB-102')) === 'C004');
 
+    console.log('-- an open proposal whose reason went away cannot be applied');
     await call('op', 'PATCH', '/crews/C004', { on_shift: true });
+    const pOff = (await call('op', 'PATCH', '/crews/C004', { on_shift: false })).body.rebalance?.proposal;
+    r = await call('op', 'PATCH', '/crews/C004', { on_shift: true });
+    check('back on shift (balanced) supersedes the open off-shift proposal',
+      r.body.rebalance?.proposal === null && r.body.rebalance.superseded?.includes(pOff?.id) && (await repo.proposal(pOff.id)).status === 'superseded');
+    r = await call('op', 'POST', `/dispatch/rebalance/proposals/${pOff.id}/apply`);
+    check('superseded proposal -> 409, nothing moved', r.status === 409 && (await crewOf('JOB-102')) === 'C004' && (await crewOf('JOB-103')) === 'C004');
+    const pOff2 = (await call('op', 'PATCH', '/crews/C004', { on_shift: false })).body.rebalance?.proposal;
+    await db.none("UPDATE crews SET on_shift=true WHERE id='C004'"); // back on shift without a trigger
+    r = await call('op', 'POST', `/dispatch/rebalance/proposals/${pOff2.id}/apply`);
+    check('apply after the crew is back on shift -> 409 STALE_PROPOSAL', r.status === 409 && r.body.code === 'STALE_PROPOSAL'
+      && r.body.problems?.some((x) => /back on shift/.test(x)) && (await crewOf('JOB-102')) === 'C004', JSON.stringify(r.body.problems));
+    await db.none("UPDATE crews SET on_shift=false WHERE id='C004'");
+    await call('op', 'PATCH', '/crews/C004', { on_shift: true });
+
     r = await call('op', 'PATCH', '/crews/C004', { on_shift: false });
     p = r.body.rebalance?.proposal;
     const moves = p?.result.moves || [], un = p?.result.unassigned || [], stuck = p?.result.stuck || [];
@@ -219,6 +237,8 @@ const server = app.listen(0, async () => {
     check('old crew updating JOB-102 -> 409 NOT_YOUR_JOB', r.status === 409 && r.body.code === 'NOT_YOUR_JOB');
     r = await call('c4', 'PATCH', '/mobile/jobs/JOB-103/status', { status: 'En Route' });
     check('anyone updating the unassigned JOB-103 -> 409 NOT_YOUR_JOB', r.status === 409 && r.body.code === 'NOT_YOUR_JOB');
+    check('status write is conditional on the crew (a check-then-act race loses)',
+      (await repo.updateJobForCrew('JOB-102', 'C004', { status: 'En Route' })) === null && (await job('JOB-102')).status === 'Acknowledged');
     r = await call('c3', 'PATCH', '/mobile/jobs/JOB-102/status', { status: 'En Route', crewId: 'C003' });
     check('new crew can update it (200)', r.status === 200 && r.body.status === 'En Route');
 
@@ -242,6 +262,18 @@ const server = app.listen(0, async () => {
     const a3 = await call('op', 'POST', '/incidents/INC-2026-000006/assign', { crewId: 'C001', requiredSkill: 'HV' });
     check('A -> B -> A assign does not collide on the job id', a1.status === 200 && a2.status === 200 && a3.status === 200
       && a3.body.job.id === a1.body.job.id && a3.body.job.crew_id === 'C001' && a3.body.job.required_skill === 'HV', `${a1.status}/${a2.status}/${a3.status}`);
+    const activeFor = async (incId) => (await repo.jobsForIncident(incId)).filter((j) => !['Work Complete', 'Cancelled', 'Closed', 'Rejected'].includes(j.status));
+    check('A -> B moved the job (one active job, on B, logged)', a2.body.job.id === a1.body.job.id && a2.body.job.crew_id === 'C002'
+      && (await db.any("SELECT 1 FROM job_reassignments WHERE job_id=$1 AND reason='manual_assign' AND from_crew='C001' AND to_crew='C002' AND ts >= $2", [a1.body.job.id, runStart])).length === 1);
+    let act6 = await activeFor('INC-2026-000006');
+    check('after A -> B -> A exactly one active job, on A', act6.length === 1 && act6[0].crew_id === 'C001', JSON.stringify(act6.map((j) => [j.id, j.crew_id])));
+    await call('op', 'PATCH', `/mobile/jobs/${a1.body.job.id}/status`, { status: 'En Route', crewId: 'C001' });
+    r = await call('op', 'POST', '/incidents/INC-2026-000006/assign', { crewId: 'C002' });
+    check('assign elsewhere while the job is En Route -> 409 JOB_IN_PROGRESS', r.status === 409 && r.body.code === 'JOB_IN_PROGRESS' && (await crewOf(a1.body.job.id)) === 'C001');
+    r = await call('op', 'POST', '/incidents/INC-2026-000006/assign', { crewId: 'C001' });
+    check('repeat assign to the same crew leaves the started job alone', r.status === 200 && r.body.job.status === 'En Route' && (await job(a1.body.job.id)).status === 'En Route');
+    act6 = await activeFor('INC-2026-000006');
+    check('still exactly one active job', act6.length === 1);
 
     console.log('-- crews and settings');
     r = await call('op', 'POST', '/crews', { name: 'Crew Theta-1', lead: 'Kiran Bisht', aor: [MP], skills: ['MV', 'Fuse'], capacity: 4, lat: 29.94, lon: 78.15 });
@@ -253,6 +285,11 @@ const server = app.listen(0, async () => {
     r = await call('op', 'PATCH', '/crews/C005', { capacity: 2 });
     check('capacity change -> capacity_changed proposal', r.status === 200 && Number(r.body.crew.capacity) === 2
       && r.body.rebalance.proposal?.trigger === 'capacity_changed', JSON.stringify(r.body.rebalance).slice(0, 160));
+    const inc109 = (await job('JOB-109')).incident_id;
+    r = await call('op', 'PATCH', `/incidents/${inc109}/status`, { status: 'cancelled' });
+    wl = (await call('op', 'GET', '/dispatch/workload')).body;
+    check('a job whose incident is cancelled is no longer workload', r.status === 200
+      && !wl.crews.some((c) => c.jobs.some((j) => j.id === 'JOB-109')) && !wl.unassigned.some((j) => j.id === 'JOB-109'), `${r.status} ${JSON.stringify(r.body).slice(0, 120)}`);
     check('settings: threshold out of range -> 400', (await call('op', 'PUT', '/dispatch/settings', { ...st, overloadThreshold: 9 })).status === 400);
     check('settings: missing weight -> 400', (await call('op', 'PUT', '/dispatch/settings', { ...st, priorityWeights: { Critical: 3 } })).status === 400);
     r = await call('op', 'PUT', '/dispatch/settings', { ...st, overloadThreshold: 1.2 });

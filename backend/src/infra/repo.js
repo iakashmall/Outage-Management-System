@@ -2,7 +2,7 @@ import { db } from './db.js';
 import { nanoid } from 'nanoid';
 import { canTransition, LABELS } from '../domain/lifecycle.js';
 import * as rules from '../domain/plannedOutage.js';
-import { normalizeSettings, isMovable, INACTIVE_STATUSES, MOVABLE_STATUSES } from '../domain/rebalance.js';
+import { normalizeSettings, validateProposal, INACTIVE_STATUSES, MOVABLE_STATUSES } from '../domain/rebalance.js';
 
 // The only module that talks SQL. Every function is now async because the
 // pg driver is async (unlike node:sqlite/better-sqlite3, which were sync).
@@ -113,6 +113,11 @@ async function clientIdTaken(t, table, column, value, exceptId) {
 // (domain/rebalance.js documents the shapes; capacity is NUMERIC, so pg hands it back as a string.)
 const crewInput = (r) => ({ ...parseSkills(r), capacity: r.capacity == null ? null : Number(r.capacity) });
 const INACTIVE_SQL = INACTIVE_STATUSES.map((s) => `'${s}'`).join(',');
+// A job whose incident is restored, closed or cancelled is not workload, even
+// if its own status was never moved on (the control room closes incidents,
+// not jobs). Same terminal states in the fault and planned lifecycles.
+const DONE_INCIDENT_SQL = `'resolved','closed','cancelled'`;
+const OPEN_INCIDENT_SQL = `NOT EXISTS (SELECT 1 FROM incidents di WHERE di.id = jobs.incident_id AND di.status IN (${DONE_INCIDENT_SQL}))`;
 const JOB_INPUT_SQL = `
   SELECT j.id, j.crew_id, j.status, j.priority, j.estimated_duration_min, j.required_skill,
          j.flagged_reason, j.flagged_at, j.incident_id, j.address, j.updated_at,
@@ -133,11 +138,12 @@ async function syncCrewPointer(t, crewId) {
   const crew = await t.oneOrNone('SELECT id, status, on_shift, job_id FROM crews WHERE id=$1', [crewId]);
   if (!crew) return;
   const active = await t.any(`SELECT incident_id, status FROM jobs WHERE crew_id=$1 AND (status IS NULL OR status NOT IN (${INACTIVE_SQL}))
-    ORDER BY CASE WHEN status IN ($2:csv) THEN 1 ELSE 0 END, updated_at DESC NULLS LAST, id`, [crewId, MOVABLE_STATUSES]);
+    AND ${OPEN_INCIDENT_SQL} ORDER BY CASE WHEN status IN ($2:csv) THEN 1 ELSE 0 END, updated_at DESC NULLS LAST, id`, [crewId, MOVABLE_STATUSES]);
   const patch = {};
   if (!active.length) {
     if (crew.job_id) patch.job_id = null;
-    if (crew.on_shift && crew.status !== 'off_shift') patch.status = 'available';
+    // Only a job-derived status goes back to available; on_break/off_shift stay.
+    if (crew.on_shift && ['in_transit', 'in_service'].includes(crew.status)) patch.status = 'available';
   } else {
     if (!active.some((j) => j.incident_id === crew.job_id)) patch.job_id = active[0].incident_id;
     if (crew.status === 'available') patch.status = 'in_transit';
@@ -412,6 +418,11 @@ export const repo = {
     await db.none(`UPDATE jobs SET ${setClause(patch)} WHERE id=$/id/`, { ...patch, id });
     return repo.job(id);
   },
+  // Status write that only lands while the job is still on crewId: a
+  // rebalance committing between the ownership check and this write wins,
+  // and the caller gets null (NOT_YOUR_JOB) instead of moving another crew's job.
+  updateJobForCrew: (id, crewId, patch) =>
+    db.oneOrNone(`UPDATE jobs SET ${setClause(patch)} WHERE id=$/id/ AND crew_id=$/crewId/ RETURNING *`, { ...patch, id, crewId }),
   addJobUpdate: async (jobId, status, lat, lon, note) => {
     const u = { id: 'JU' + nanoid(8), job_id: jobId, status, lat, lon, note, ts: new Date().toISOString() };
     await db.none(`INSERT INTO job_updates (id,job_id,status,lat,lon,note,ts)
@@ -445,8 +456,9 @@ export const repo = {
     return repo.workloadSettings();
   },
   workloadCrews: async (t = db) => (await t.any('SELECT * FROM crews ORDER BY id')).map(crewInput),
-  // Active jobs only (anything not finished), in the engine's job shape.
-  workloadJobs: (t = db) => t.any(`${JOB_INPUT_SQL} WHERE j.status IS NULL OR j.status NOT IN (${INACTIVE_SQL}) ORDER BY j.id`),
+  // Active jobs only (job not finished, incident not finished), in the engine's job shape.
+  workloadJobs: (t = db) => t.any(`${JOB_INPUT_SQL} WHERE (j.status IS NULL OR j.status NOT IN (${INACTIVE_SQL}))
+    AND (i.id IS NULL OR i.status NOT IN (${DONE_INCIDENT_SQL})) ORDER BY j.id`),
   // A dispatcher-created crew. Without an id the next free Cnnn is used.
   createCrew: (c) => db.tx(async (t) => {
     let id = c.id;
@@ -461,7 +473,7 @@ export const repo = {
     return { crew: crewInput(await t.one('SELECT * FROM crews WHERE id=$1', [id])) };
   }),
   activeJobsForCrew: (crewId) => db.any(`SELECT * FROM jobs WHERE crew_id=$1 AND (status IS NULL OR status NOT IN (${INACTIVE_SQL}))
-    ORDER BY updated_at DESC NULLS LAST`, [crewId]),
+    AND ${OPEN_INCIDENT_SQL} ORDER BY updated_at DESC NULLS LAST`, [crewId]),
 
   // A proposal replaces any older open one (only the newest can be applied).
   saveProposal: ({ trigger, detail = null, actor, settings, result }) => db.tx(async (t) => {
@@ -471,6 +483,10 @@ export const repo = {
     return t.one(`INSERT INTO rebalance_proposals (id, trigger, trigger_detail, created_by, settings, result)
       VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb) RETURNING *`, [id, trigger, detail, actor, JSON.stringify(settings), JSON.stringify(result)]);
   }),
+  // A trigger that finds nothing to do closes any open proposal: it was made
+  // for a situation that no longer exists.
+  supersedeOpenProposals: (actor, note) => db.any(`UPDATE rebalance_proposals SET status='superseded', decided_at=now(), decided_by=$1,
+    decision_note=$2 WHERE status='proposed' RETURNING *`, [actor, note]),
   proposal: (id) => db.oneOrNone('SELECT * FROM rebalance_proposals WHERE id=$1', [id]),
   proposals: (status) => status
     ? db.any('SELECT * FROM rebalance_proposals WHERE status=$1 ORDER BY created_at DESC LIMIT 100', [status])
@@ -487,9 +503,10 @@ export const repo = {
     return { proposal };
   }),
 
-  // Applies a proposal in one transaction. Every move is checked against the
-  // current data first (job still on its from-crew and unstarted, target
-  // still on shift); if anything changed the proposal is marked stale and
+  // Applies a proposal in one transaction. Every entry is checked against
+  // the current data first (domain validateProposal: job still on its
+  // from-crew and unstarted, target on shift and eligible, the reason for the
+  // move still holds); if anything changed the proposal is marked stale and
   // nothing moves. Returns the touched ids so the route can publish events.
   applyProposal: (id, actor) => db.tx(async (t) => {
     const p = await t.oneOrNone('SELECT * FROM rebalance_proposals WHERE id=$1 FOR UPDATE', [id]);
@@ -498,22 +515,12 @@ export const repo = {
     const moves = p.result.moves || [];
     const unassigned = p.result.unassigned || [];
     const jobIds = [...moves.map((m) => m.jobId), ...unassigned.map((u) => u.jobId)];
-    const jobs = jobIds.length ? await t.any(`${JOB_INPUT_SQL} WHERE j.id IN ($1:csv) FOR UPDATE OF j`, [jobIds]) : [];
-    const jobById = new Map(jobs.map((j) => [j.id, j]));
-    const crews = new Map((await t.any('SELECT id, on_shift FROM crews FOR UPDATE')).map((c) => [c.id, c]));
-
-    const problems = [];
-    const check = (jobId, fromCrew) => {
-      const j = jobById.get(jobId);
-      if (!j) return problems.push(`job ${jobId} no longer exists`);
-      if (j.crew_id !== fromCrew) return problems.push(`job ${jobId} is now on ${j.crew_id ?? 'no crew'}, not ${fromCrew}`);
-      if (!isMovable(j)) problems.push(`job ${jobId} is ${j.status} and can no longer move`);
-    };
-    for (const m of moves) {
-      check(m.jobId, m.fromCrew);
-      if (!crews.get(m.toCrew)?.on_shift) problems.push(`crew ${m.toCrew} is no longer on shift`);
-    }
-    for (const u of unassigned) check(u.jobId, u.fromCrew);
+    if (jobIds.length) await t.any('SELECT id FROM jobs WHERE id IN ($1:csv) FOR UPDATE', [jobIds]);
+    const crews = (await t.any('SELECT * FROM crews ORDER BY id FOR UPDATE')).map(crewInput);
+    const active = await repo.workloadJobs(t);
+    const settings = normalizeSettings((await t.oneOrNone("SELECT value FROM oms_settings WHERE key='workload'"))?.value);
+    const jobById = new Map(active.map((j) => [j.id, j]));
+    const problems = validateProposal({ crews, jobs: active, settings, moves, unassigned });
     if (problems.length) {
       const proposal = await t.one(`UPDATE rebalance_proposals SET status='stale', decided_by=$2, decided_at=now(), decision_note=$3
         WHERE id=$1 RETURNING *`, [id, actor, problems.join('; ')]);
@@ -527,12 +534,16 @@ export const repo = {
     for (const m of moves) {
       const j = jobById.get(m.jobId);
       await t.none('UPDATE jobs SET crew_id=$2, updated_at=$3, flagged_reason=NULL, flagged_at=NULL WHERE id=$1', [j.id, m.toCrew, now]);
-      if (j.incident_id) await t.none('UPDATE incidents SET crew_id=$2 WHERE id=$1 AND (crew_id IS NULL OR crew_id=$3)', [j.incident_id, m.toCrew, m.fromCrew]);
-      const note = `Reassigned from ${m.fromCrew} to ${m.toCrew} (${m.reason})`;
+      if (j.incident_id) {
+        await t.none(`UPDATE incidents SET crew_id=$2, status=CASE WHEN status='open' THEN 'dispatched' ELSE status END
+          WHERE id=$1 AND (crew_id IS NULL OR crew_id=$3)`, [j.incident_id, m.toCrew, m.fromCrew]);
+      }
+      const note = `Reassigned from ${m.fromCrew ?? 'unassigned'} to ${m.toCrew} (${m.reason})`;
       await t.none('INSERT INTO job_updates (id,job_id,status,note,ts) VALUES ($1,$2,$3,$4,$5)', ['JU' + nanoid(8), j.id, j.status, note, now]);
       await event(j.incident_id, 'reassigned', `Job ${j.id}: ${note}`);
       await addReassignment(t, { proposalId: id, jobId: j.id, incidentId: j.incident_id, fromCrew: m.fromCrew, toCrew: m.toCrew, reason: m.reason, actor });
-      touchedCrews.add(m.fromCrew).add(m.toCrew);
+      if (m.fromCrew) touchedCrews.add(m.fromCrew);
+      touchedCrews.add(m.toCrew);
       if (j.incident_id) incidents.add(j.incident_id);
     }
     for (const u of unassigned) {

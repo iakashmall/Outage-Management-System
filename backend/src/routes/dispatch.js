@@ -58,11 +58,16 @@ const isErr = (v) => v && typeof v === 'object' && !Array.isArray(v) && 'error' 
 // ---------- proposals ----------
 
 // Runs the engine on current data. Persists a proposal only when it would
-// change something; otherwise reports "balanced" (with any warnings).
+// change something; otherwise reports "balanced" (with any warnings) and
+// supersedes any open proposal, which was made for a situation that has gone.
 async function propose(trigger, detail, actor) {
   const [crews, jobs, settings] = await Promise.all([repo.workloadCrews(), repo.workloadJobs(), repo.workloadSettings()]);
   const { settings: used, ...result } = proposeRebalance({ crews, jobs, settings, trigger });
-  if (!result.moves.length && !result.unassigned.length) return { proposal: null, reason: 'balanced', result };
+  if (!result.moves.length && !result.unassigned.length) {
+    const superseded = await repo.supersedeOpenProposals(actor, `situation changed (${trigger}): now balanced`);
+    for (const p of superseded) bus.publish(TOPICS.DISPATCH_REBALANCE, { event: 'superseded', proposalId: p.id, trigger: p.trigger });
+    return { proposal: null, reason: 'balanced', result, superseded: superseded.map((p) => p.id) };
+  }
   const proposal = await repo.saveProposal({ trigger, detail, actor, settings: used, result });
   await repo.audit(actor, 'dispatch.rebalance.propose', `${proposal.id}:${trigger}`);
   bus.publish(TOPICS.DISPATCH_REBALANCE, { event: 'proposed', proposalId: proposal.id, trigger });

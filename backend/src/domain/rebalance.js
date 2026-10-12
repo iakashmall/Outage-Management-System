@@ -78,6 +78,10 @@ export const isActive = (job) => !INACTIVE_STATUSES.includes(job?.status);
 export const isMovable = (job) =>
   !!job && job.crew_id != null && MOVABLE_STATUSES.includes(job.status) && !job.planned;
 
+// A job a rebalance left unassigned (crew_id NULL) that may be placed again.
+export const isFlaggedPlaceable = (job) =>
+  !!job && job.crew_id == null && MOVABLE_STATUSES.includes(job.status) && !job.planned;
+
 const capacityOf = (crew, s) => (posNum(crew?.capacity) ? Number(crew.capacity) : s.defaultCapacity);
 
 function crewSkills(crew) {
@@ -142,8 +146,7 @@ export function proposeRebalance({ crews = [], jobs = [], settings, trigger = 'm
   const weightOf = new Map(crewList.map((c) => [c.id, 0]));
   const assigned = new Map(); // jobId -> crewId as planned so far
   for (const j of active) {
-    // Flagged (crew_id NULL) jobs are not re-offered here; they are placed via manual assign.
-    if (j.crew_id == null) continue;
+    if (j.crew_id == null) continue; // flagged: no crew load; offered again below
     if (!crewById.has(j.crew_id)) { warnings.push(`job ${j.id} is on unknown crew ${j.crew_id}; ignored`); continue; }
     assigned.set(j.id, j.crew_id);
     weightOf.set(j.crew_id, weightOf.get(j.crew_id) + info.get(j.id).weight);
@@ -170,7 +173,7 @@ export function proposeRebalance({ crews = [], jobs = [], settings, trigger = 'm
 
   const move = (job, from, pick, reason) => {
     const { weight, priority, medical } = info.get(job.id);
-    weightOf.set(from, weightOf.get(from) - weight);
+    if (from != null) weightOf.set(from, weightOf.get(from) - weight);
     weightOf.set(pick.c.id, weightOf.get(pick.c.id) + weight);
     assigned.set(job.id, pick.c.id);
     moved.add(job.id);
@@ -202,6 +205,14 @@ export function proposeRebalance({ crews = [], jobs = [], settings, trigger = 'm
     }
     const fit = eligible.filter((c) => projected(c, w) <= T + EPS);
     move(j, j.crew_id, pickTarget(fit.length ? fit : eligible, j, w), 'crew_off_shift');
+  }
+
+  // Flagged jobs (left unassigned earlier) go to an eligible on-shift crew
+  // that stays within threshold, e.g. after a crew came back or gained the skill.
+  for (const j of active.filter(isFlaggedPlaceable).sort(placementOrder)) {
+    const w = info.get(j.id).weight;
+    const fit = onShift.filter((c) => isEligible(c, j) && projected(c, w) <= T + EPS);
+    if (fit.length) move(j, null, pickTarget(fit, j, w), 'flagged_reassign');
   }
 
   // Phase B: relieve overloaded on-shift crews with as few moves as possible.
@@ -236,4 +247,55 @@ export function proposeRebalance({ crews = [], jobs = [], settings, trigger = 'm
 
   const after = crewList.map((c) => loadRow(c, weightOf.get(c.id), s));
   return { trigger, settings: s, before, after, moves, unassigned, stuck, warnings };
+}
+
+// Re-checks a stored proposal against current data just before it is
+// applied: crews and active jobs as now loaded, settings as now saved.
+// Returns a list of problems; empty means every move still makes sense.
+export function validateProposal({ crews = [], jobs = [], settings, moves = [], unassigned = [] } = {}) {
+  const s = normalizeSettings(settings);
+  const T = s.overloadThreshold;
+  const crewById = new Map(crews.map((c) => [c.id, c]));
+  const jobById = new Map(jobs.filter(isActive).map((j) => [j.id, j]));
+  const weightOf = new Map(crews.map((c) => [c.id, 0]));
+  for (const j of jobById.values()) if (weightOf.has(j.crew_id)) weightOf.set(j.crew_id, weightOf.get(j.crew_id) + jobWeight(j, s));
+  const loadOf = (id) => (weightOf.has(id) ? weightOf.get(id) / capacityOf(crewById.get(id), s) : 0);
+  const shift = (id, w) => weightOf.has(id) && weightOf.set(id, weightOf.get(id) + w);
+  const problems = [];
+
+  const current = (jobId, fromCrew) => {
+    const j = jobById.get(jobId);
+    if (!j) { problems.push(`job ${jobId} is no longer active (finished, removed or its incident closed)`); return null; }
+    if ((j.crew_id ?? null) !== (fromCrew ?? null)) { problems.push(`job ${jobId} is now on ${j.crew_id ?? 'no crew'}, not ${fromCrew ?? 'no crew'}`); return null; }
+    if (!(fromCrew == null ? isFlaggedPlaceable(j) : isMovable(j))) { problems.push(`job ${jobId} is ${j.status} and can no longer move`); return null; }
+    return j;
+  };
+  const stillOff = (crewId, jobId) => {
+    if (crewById.get(crewId)?.on_shift !== false) problems.push(`crew ${crewId} is back on shift, so job ${jobId} need not move`);
+  };
+
+  // Unassigned entries come from crews that went off shift and nobody could cover.
+  for (const u of unassigned) {
+    const j = current(u.jobId, u.fromCrew);
+    if (!j) continue;
+    stillOff(u.fromCrew, j.id);
+    const cover = crews.find((c) => c.on_shift !== false && isEligible(c, j));
+    if (cover) problems.push(`crew ${cover.id} can now take job ${j.id}`);
+    shift(u.fromCrew, -jobWeight(j, s));
+  }
+  // Moves in proposal order, loads updated as they go (as the engine planned them).
+  for (const m of moves) {
+    const j = current(m.jobId, m.fromCrew);
+    const to = crewById.get(m.toCrew);
+    if (!to || to.on_shift === false) { problems.push(`crew ${m.toCrew} is no longer on shift`); continue; }
+    if (!j) continue;
+    if (!isEligible(to, j)) problems.push(`crew ${m.toCrew} no longer covers job ${j.id} (area or skill)`);
+    if (m.reason === 'crew_off_shift') stillOff(m.fromCrew, j.id);
+    if (m.reason === 'overload' && !(loadOf(m.fromCrew) > T + EPS)) problems.push(`crew ${m.fromCrew} is no longer over the threshold`);
+    const w = jobWeight(j, s);
+    if (m.fromCrew != null) shift(m.fromCrew, -w);
+    shift(m.toCrew, w);
+    if (m.reason !== 'crew_off_shift' && loadOf(m.toCrew) > T + EPS) problems.push(`moving job ${j.id} would put crew ${m.toCrew} over the threshold`);
+  }
+  return problems;
 }

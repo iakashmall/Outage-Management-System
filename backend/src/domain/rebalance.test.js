@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DEFAULT_WORKLOAD_SETTINGS, effectivePriority, priorityInfo, jobWeight, crewLoads, isMovable, proposeRebalance,
+  DEFAULT_WORKLOAD_SETTINGS, effectivePriority, priorityInfo, jobWeight, crewLoads, isMovable, proposeRebalance, validateProposal,
 } from './rebalance.js';
 
 const crew = (id, o = {}) => ({ id, name: id, on_shift: true, capacity: 4, aor: null, skills: [], lat: null, lon: null, ...o });
@@ -281,4 +281,49 @@ test('empty input and missing settings do not throw', () => {
   const r = proposeRebalance({ crews: [], jobs: [] });
   assert.deepEqual([r.before, r.after, r.moves, r.unassigned, r.stuck], [[], [], [], [], []]);
   assert.deepEqual(r.settings, { ...DEFAULT_WORKLOAD_SETTINGS, priorityWeights: { ...DEFAULT_WORKLOAD_SETTINGS.priorityWeights } });
+});
+
+test('flagged (unassigned) jobs are offered again to an eligible crew with room', () => {
+  const flagged = job('J1', null, { area: 'KK', required_skill: 'Fuse', estimated_duration_min: 60 });
+  const none = proposeRebalance({ crews: [crew('C1', { aor: ['KK'], skills: ['MV'] })], jobs: [flagged], settings: DEFAULT_WORKLOAD_SETTINGS });
+  assert.deepEqual([none.moves, none.unassigned], [[], []]);
+  const crews = [crew('C1', { aor: ['KK'], skills: ['MV'] }), crew('C2', { aor: ['KK'], skills: ['Fuse'] }), crew('C3', { aor: ['KK'], skills: ['Fuse'], capacity: 1 })];
+  const jobs = [flagged, job('J2', 'C3', { area: 'KK' }), job('J3', null, { planned: true }), job('J4', null, { status: 'Work Complete' })];
+  const r = proposeRebalance({ crews, jobs, settings: DEFAULT_WORKLOAD_SETTINGS });
+  // C3 has the skill but no room (100% already); planned and finished jobs stay put.
+  assert.deepEqual(r.moves.map((m) => [m.jobId, m.fromCrew, m.toCrew, m.reason]), [['J1', null, 'C2', 'flagged_reassign']]);
+  assert.equal(loadOf(r.after, 'C2'), 0.25);
+});
+
+test('validateProposal: a proposal whose reason no longer holds is stale', () => {
+  const s = DEFAULT_WORKLOAD_SETTINGS;
+  const crews = [crew('C1', { on_shift: false }), crew('C2'), crew('C3', { aor: ['X'] })];
+  const jobs = [job('J1', 'C1'), job('J2', 'C1', { area: 'X' })];
+  const p = proposeRebalance({ crews, jobs, settings: s });
+  assert.deepEqual(validateProposal({ crews, jobs, settings: s, ...p }), []);
+  // Crew back on shift: its jobs need not move.
+  const back = crews.map((c) => (c.id === 'C1' ? { ...c, on_shift: true } : c));
+  assert.ok(validateProposal({ crews: back, jobs, settings: s, ...p }).some((x) => /back on shift/.test(x)));
+  // Job started or gone.
+  assert.ok(validateProposal({ crews, jobs: [job('J1', 'C1', { status: 'En Route' }), jobs[1]], settings: s, ...p }).some((x) => /can no longer move/.test(x)));
+  assert.ok(validateProposal({ crews, jobs: [jobs[1]], settings: s, ...p }).some((x) => /no longer active/.test(x)));
+
+  // Overload: from-crew no longer over, or target would be pushed over.
+  const oc = [crew('C1'), crew('C2')];
+  const oj = [job('J1', 'C1', { estimated_duration_min: 180 }), job('J2', 'C1', { estimated_duration_min: 120 })];
+  const op = proposeRebalance({ crews: oc, jobs: oj, settings: s });
+  assert.equal(op.moves.length, 1);
+  assert.deepEqual(validateProposal({ crews: oc, jobs: oj, settings: s, ...op }), []);
+  const bigger = oc.map((c) => (c.id === 'C1' ? { ...c, capacity: 10 } : c));
+  assert.ok(validateProposal({ crews: bigger, jobs: oj, settings: s, ...op }).some((x) => /no longer over/.test(x)));
+  const busy = [...oj, job('J9', 'C2', { estimated_duration_min: 180 })];
+  assert.ok(validateProposal({ crews: oc, jobs: busy, settings: s, ...op }).some((x) => /over the threshold/.test(x)));
+
+  // Unassigned entry: another crew can now cover it.
+  const uc = [crew('C1', { on_shift: false }), crew('C2', { aor: ['Y'] })];
+  const uj = [job('J1', 'C1', { area: 'X' })];
+  const up = proposeRebalance({ crews: uc, jobs: uj, settings: s });
+  assert.equal(up.unassigned.length, 1);
+  const covered = [uc[0], { ...uc[1], aor: ['X', 'Y'] }];
+  assert.ok(validateProposal({ crews: covered, jobs: uj, settings: s, ...up }).some((x) => /can now take/.test(x)));
 });
