@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
 import { dispatchApi } from '../lib/dispatchApi.js';
 import { CrewDot, Icon, SevBadge, timeAgo, useLiveRefresh, toast } from '../lib/ui.jsx';
@@ -25,14 +25,24 @@ export default function Dispatch() {
   const [stale, setStale] = useState(null);    // last apply refused as STALE_PROPOSAL
   const [proposing, setProposing] = useState(false);
 
-  const load = () => {
-    api.incidents().then(setInc);
-    api.crews().then(setCrews);
-    dispatchApi.workload().then(setWl).catch((e) => toast(`Workload: ${e.message}`, 'err'));
-    dispatchApi.history().then(setHistory).catch(() => {});
-  };
-  useEffect(() => { load(); api.callAreas().then(setAreas).catch(() => setAreas([])); }, []);
-  useLiveRefresh(TOPICS, load);
+  const wlErr = useRef(null);
+  const refreshTimer = useRef(null);
+  // quiet: background refreshes only toast a workload error when it is a new one.
+  const loadWorkload = (quiet) => dispatchApi.workload()
+    .then((w) => { setWl(w); wlErr.current = null; })
+    .catch((e) => { if (!quiet || wlErr.current !== e.message) toast(`Workload: ${e.message}`, 'err'); wlErr.current = e.message; });
+  const loadHistory = () => dispatchApi.history().then(setHistory).catch(() => {});
+  const loadLive = (quiet) => { api.incidents().then(setInc); api.crews().then(setCrews); loadWorkload(quiet); };
+  const load = () => { loadLive(false); loadHistory(); };
+  // crew.updated fires on every GPS tick, so coalesce bursts into one refresh.
+  const refreshSoon = () => { clearTimeout(refreshTimer.current); refreshTimer.current = setTimeout(() => loadLive(true), 400); };
+  useEffect(() => {
+    load(); api.callAreas().then(setAreas).catch(() => setAreas([]));
+    return () => clearTimeout(refreshTimer.current);
+  }, []); // eslint-disable-line
+  useLiveRefresh(TOPICS, refreshSoon);
+  // History only changes when a proposal is applied or rejected.
+  useLiveRefresh(['oms.dispatch.rebalance'], loadHistory);
 
   const wlCrews = wl?.crews || [];
   const crewName = (id) => wlCrews.find((c) => c.id === id)?.name || crews.find((c) => c.id === id)?.name || id;
@@ -164,8 +174,9 @@ export default function Dispatch() {
                       <Field label="Required skill"><input style={inp} placeholder="any" value={o.skill} onChange={(e) => setOpt(i, 'skill', e.target.value)} /></Field>
                     </div>
                     <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                      <NearestCrewPicker incId={i.id} pick={pick} setPick={setPick} offShift={offShift} />
-                      <button className="btn primary sm" disabled={!pick[i.id]} onClick={() => assign(i)}>
+                      <NearestCrewPicker incId={i.id} area={i.substation} skill={o.skill} pick={pick} setPick={setPick}
+                        offShift={offShift} fallback={available} wlCrews={wlCrews} />
+                      <button className="btn primary sm" disabled={!pick[i.id] || offShift.has(pick[i.id])} onClick={() => assign(i)}>
                         <Icon name="arrow" size={14} /> Dispatch
                       </button>
                     </div>
@@ -209,20 +220,48 @@ export default function Dispatch() {
   );
 }
 
-function NearestCrewPicker({ incId, pick, setPick, offShift }) {
-  const [nearest, setNearest] = useState([]);
+// Why a crew does not fit the job (skill / AoR), as a hint only: dispatchers may still override.
+function misfit(crew, area, skill) {
+  if (!crew) return [];
+  const out = [];
+  const need = (skill || '').trim().toLowerCase();
+  if (need && need !== 'any' && !(crew.skills || []).some((s) => s.trim().toLowerCase() === need)) out.push(`no ${skill.trim()}`);
+  if (area && crew.aor?.length && !crew.aor.includes(area)) out.push('outside AoR');
+  return out;
+}
+
+function NearestCrewPicker({ incId, area, skill, pick, setPick, offShift, fallback, wlCrews }) {
+  const [nearest, setNearest] = useState(null); // null while loading
   useEffect(() => { api.nearestCrews(incId).then(setNearest).catch(() => setNearest([])); }, [incId]);
-  // Off-shift crews cannot take work (the server refuses), so they are listed but disabled.
-  const usable = nearest.filter((c) => !offShift.has(c.id));
-  useEffect(() => { if (!pick[incId] && usable.length) setPick((p) => ({ ...p, [incId]: usable[0].id })); }, [nearest, offShift.size]); // eslint-disable-line
+  // nearest-crews needs PostGIS and coordinates on both the incident and the crew;
+  // without a result, offer every available crew so the job can still be dispatched.
+  const list = nearest?.length ? nearest : nearest ? fallback : [];
+  const byId = new Map(wlCrews.map((c) => [c.id, c]));
+  const usable = list.filter((c) => !offShift.has(c.id));
+  const cur = pick[incId];
+  const listKey = list.map((c) => c.id).join();
+  const offKey = [...offShift].join();
+  // Auto-pick (best fitting crew first) when nothing is picked, or when the picked crew went off shift / left the list.
+  useEffect(() => {
+    if (nearest === null) return;
+    if (cur && !offShift.has(cur) && list.some((c) => c.id === cur)) return;
+    const best = usable.find((c) => !misfit(byId.get(c.id), area, skill).length) || usable[0];
+    const next = best?.id || '';
+    if (next !== (cur || '')) setPick((p) => ({ ...p, [incId]: next }));
+  }, [nearest, listKey, offKey]); // eslint-disable-line
+  const dist = (m) => (m == null ? '' : m < 1000 ? ` · ${Math.round(m)} m` : ` · ${(m / 1000).toFixed(1)} km`);
   return (
-    <select className="btn sm" style={{ flex: 1 }} aria-label="Select nearest crew to assign" value={pick[incId] || ''} onChange={(e) => setPick({ ...pick, [incId]: e.target.value })}>
-      <option value="">{usable.length ? 'Select crew…' : 'No crews available'}</option>
-      {nearest.map((c) => (
-        <option key={c.id} value={c.id} disabled={offShift.has(c.id)}>
-          {c.name} · {c.meters_away < 1000 ? `${Math.round(c.meters_away)} m` : `${(c.meters_away / 1000).toFixed(1)} km`}{offShift.has(c.id) ? ' (off shift)' : ''}
-        </option>
-      ))}
+    <select className="btn sm" style={{ flex: 1 }} aria-label="Select nearest crew to assign" value={cur || ''} onChange={(e) => setPick({ ...pick, [incId]: e.target.value })}>
+      <option value="">{nearest === null ? 'Loading crews…' : usable.length ? 'Select crew…' : 'No crews available'}</option>
+      {list.map((c) => {
+        const off = offShift.has(c.id);
+        const why = misfit(byId.get(c.id), area, skill);
+        return (
+          <option key={c.id} value={c.id} disabled={off}>
+            {c.name}{dist(c.meters_away)}{off ? ' (off shift)' : ''}{why.length ? ` (${why.join(', ')})` : ''}
+          </option>
+        );
+      })}
     </select>
   );
 }

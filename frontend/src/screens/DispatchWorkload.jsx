@@ -186,7 +186,13 @@ export function AddCrewForm({ areas, defaultCapacity, onDone }) {
     const body = { name: f.name.trim(), lead: f.lead.trim() || undefined, skills: f.skills, aor: f.aor.length ? f.aor : null };
     if (f.id.trim()) body.id = f.id.trim();
     if (f.capacity !== '') body.capacity = Number(f.capacity);
-    if (f.lat !== '' || f.lon !== '') { body.lat = Number(f.lat); body.lon = Number(f.lon); }
+    // Both or neither: a lone coordinate would otherwise be stored with 0 for the other.
+    if ((f.lat === '') !== (f.lon === '')) { toast('Enter both base latitude and longitude, or neither', 'err'); return; }
+    if (f.lat !== '') {
+      const lat = Number(f.lat), lon = Number(f.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) { toast('Base latitude/longitude are not valid', 'err'); return; }
+      body.lat = lat; body.lon = lon;
+    }
     setBusy(true);
     try {
       const out = await dispatchApi.addCrew(body);
