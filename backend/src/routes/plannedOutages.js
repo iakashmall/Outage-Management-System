@@ -108,7 +108,10 @@ r.patch('/mobile/jobs/:id/status', async (req, res, next) => {
   const { lat, lon, note } = req.body || {};
   const updated = await repo.updateJob(job.id, { status, updated_at: new Date().toISOString() });
   await repo.addJobUpdate(job.id, status, lat ?? null, lon ?? null, note ?? null);
-  if (CREW_STATUS[status]) bus.publish(TOPICS.CREW_UPDATED, await repo.updateCrew(job.crew_id, { status: CREW_STATUS[status] }));
+  // OMS-03: an off-shift crew keeps status off_shift.
+  if (CREW_STATUS[status] && (await repo.crew(job.crew_id))?.on_shift !== false) {
+    bus.publish(TOPICS.CREW_UPDATED, await repo.updateCrew(job.crew_id, { status: CREW_STATUS[status] }));
+  }
   await repo.addIncidentEvent(job.incident_id, who.username || 'Crew', 'field', `Crew job ${job.id}: ${status}`);
   bus.publish(TOPICS.JOB_UPDATED, updated);
   res.json(updated);

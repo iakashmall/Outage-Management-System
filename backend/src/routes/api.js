@@ -23,6 +23,9 @@ import { nanoid } from 'nanoid';
 import { substationForFeeder } from '../domain/prediction.js';
 import { plannedOutageRoutes } from './plannedOutages.js';
 import { plannedComplaintDecision } from '../domain/plannedComplaints.js';
+import { dispatchRoutes } from './dispatch.js';
+import { PRIORITY_CLASSES, isActive } from '../domain/rebalance.js';
+import { isOperator } from '../domain/plannedOutage.js';
 
 export const api = Router();
 
@@ -44,6 +47,8 @@ for (const method of ['get', 'post', 'patch', 'put', 'delete']) {
 // GET /incidents/:id, PATCH /incidents/:id/status and PATCH
 // /mobile/jobs/:id/status, and passes every other request on unchanged.
 api.use(plannedOutageRoutes);
+// OMS-03 workload balancing (/dispatch/*, POST /crews, PATCH /crews/:id).
+api.use(dispatchRoutes);
 
 const actor = (req) => req.header('x-user') || 'operator';
 // ---------- network topology (real Haridwar GIS, loaded once - unchanged, no DB) ----------
@@ -216,14 +221,37 @@ api.post('/incidents/:id/assign', requireRole('oms_operator', 'system_admin'), a
   const inc = await repo.incident(req.params.id);
   const crew = await repo.crew(req.body?.crewId);
   if (!inc || !crew) return res.status(404).json({ error: 'incident or crew not found' });
+  // OMS-03 optional fields: priority class, estimated duration, required skill ('any'/blank = none).
+  const b = req.body || {};
+  const priority = b.priority ?? 'Normal';
+  if (!PRIORITY_CLASSES.includes(priority)) return res.status(400).json({ error: `priority must be one of ${PRIORITY_CLASSES.join(', ')}` });
+  const dur = b.estimatedDurationMin;
+  if (dur != null && !(Number.isInteger(dur) && dur > 0 && dur <= 7 * 24 * 60)) return res.status(400).json({ error: 'estimatedDurationMin must be a whole number of minutes' });
+  if (b.requiredSkill != null && typeof b.requiredSkill !== 'string') return res.status(400).json({ error: 'requiredSkill must be a string' });
+  const skill = b.requiredSkill?.trim();
+  const required_skill = skill && skill.toLowerCase() !== 'any' ? skill : null;
+  if (crew.on_shift === false) return res.status(409).json({ code: 'CREW_OFF_SHIFT', error: `${crew.id} is off shift` });
+
   await repo.updateIncident(inc.id, { crew_id: crew.id, status: inc.status === 'open' ? 'dispatched' : inc.status });
   await repo.updateCrew(crew.id, { status: 'in_transit', job_id: inc.id, location: inc.zone });
-  const job = await repo.createJob({
-    id: 'JOB-' + inc.id.slice(-3) + '-' + crew.id, incident_id: inc.id, crew_id: crew.id,
-    priority: req.body?.priority || 'Normal', status: 'Acknowledged', address: inc.zone,
-    updated_at: new Date().toISOString(),
-  });
-  await repo.addJobUpdate(job.id, 'Acknowledged', null, null, null);
+  const fields = { priority, status: 'Acknowledged', estimated_duration_min: dur ?? null, required_skill };
+  // Reuse a job left unassigned by a rebalance, or this incident's row the id
+  // already names (A -> B -> A, or a job moved away by a rebalance):
+  // inserting it again would collide on the primary key. An id taken by a
+  // different incident (same last 3 digits) gets a suffix instead.
+  const baseId = 'JOB-' + inc.id.slice(-3) + '-' + crew.id;
+  const flagged = (await repo.jobsForIncident(inc.id)).find((j) => j.crew_id == null && isActive(j));
+  const sameId = await repo.job(baseId);
+  const existing = flagged || (sameId?.incident_id === inc.id ? sameId : null);
+  let job, fromCrew = null;
+  if (existing) {
+    ({ job, fromCrew } = await repo.reassignJob(existing.id, crew.id, fields, req.user?.username || actor(req)));
+  } else {
+    job = await repo.createJob({ id: sameId ? `${baseId}-${nanoid(4)}` : baseId, incident_id: inc.id, crew_id: crew.id,
+      address: inc.zone, updated_at: new Date().toISOString(), ...fields });
+  }
+  await repo.addJobUpdate(job.id, 'Acknowledged', null, null, existing ? `Assigned to ${crew.id}` : null);
+  if (fromCrew && fromCrew !== crew.id) bus.publish(TOPICS.CREW_UPDATED, await repo.crew(fromCrew));
   await repo.addIncidentEvent(inc.id, actor(req), 'assigned', `${crew.name} assigned`);
   await repo.audit(actor(req), 'dispatch.assign', `${inc.id}-${crew.id}`);
   const updated = await repo.incident(inc.id);
@@ -907,13 +935,25 @@ api.get('/mobile/photos/:photoId', async (req, res) => {
 api.patch('/mobile/jobs/:id/status', async (req, res) => {
   const job = await repo.job(req.params.id);
   if (!job) return res.status(404).json({ error: 'not found' });
+  // OMS-03: a job can be reassigned while a phone is offline. Refuse an
+  // update from a crew that no longer holds the job (or for a job left
+  // unassigned) instead of letting it move another crew's work. The crew is
+  // the token's crew_id claim, else the crewId the app sends (demo logins
+  // such as test.scada have no crew role or claim, so roles are not gated
+  // here); the control room may update on a crew's behalf.
+  const who = req.user || {};
+  const namedCrew = (!isOperator(who) && who.crewId) || (typeof req.body?.crewId === 'string' ? req.body.crewId : null);
+  if (job.crew_id == null || (namedCrew && namedCrew !== job.crew_id)) {
+    return res.status(409).json({ code: 'NOT_YOUR_JOB', message: 'this job was reassigned to another crew' });
+  }
   const { lat, lon, note } = req.body || {};
   const status = req.body?.status === 'Work Finished' ? 'Work Complete' : req.body?.status;
   await repo.updateJob(job.id, { status, updated_at: new Date().toISOString() });
   await repo.addJobUpdate(job.id, status, lat ?? null, lon ?? null, note ?? null);
-  // reflect crew status + incident progress back to control room
+  // reflect crew status + incident progress back to control room (an
+  // off-shift crew stays off_shift: availability is the dispatcher's call)
   const map = { 'En Route': 'in_transit', 'On Site': 'in_service', 'Work Started': 'in_service', 'Work Complete': 'available' };
-  if (map[status]) await repo.updateCrew(job.crew_id, { status: map[status] });
+  if (map[status] && (await repo.crew(job.crew_id))?.on_shift !== false) await repo.updateCrew(job.crew_id, { status: map[status] });
   if (status === 'On Site' && job.incident_id) await repo.updateIncident(job.incident_id, { status: 'in_progress' });
   if (job.incident_id) { await repo.addIncidentEvent(job.incident_id, 'Crew', 'field', 'Status: ' + status); }
   if (status === 'Work Complete' && job.incident_id) {

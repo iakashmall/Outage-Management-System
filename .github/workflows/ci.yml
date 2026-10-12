@@ -97,6 +97,20 @@ jobs:
           KAFKA_BROKERS: localhost:9092
         run: node src/selftest-oms01.js
 
+      # OMS-03 workload balancing: engine unit tests, then the API flow
+      # (propose/apply, off-shift redistribution, NOT_YOUR_JOB, append-only log).
+      - name: Run OMS-03 engine unit tests
+        working-directory: backend
+        run: node --test src/domain/rebalance.test.js
+
+      - name: Run OMS-03 self-test
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://oms:oms@localhost:5432/oms
+          REDIS_URL: redis://localhost:6379
+          KAFKA_BROKERS: localhost:9092
+        run: node src/selftest-oms03.js
+
       # Map forwarder: /api/map allowlist, traversal, export rules, header
       # hygiene, map server down. Uses a fake map server; no real one needed.
       - name: Run map forwarder self-test

@@ -426,6 +426,74 @@ export async function migrate() {
       FOR EACH STATEMENT EXECUTE FUNCTION prevent_safety_log_change();
   `);
 
+  // OMS-03 crew workload balancing (docs/OMS03_WORKLOAD_BALANCING.md).
+  // on_shift is separate from crews.status because job events overwrite
+  // status. aor = substation names (the incidents.substation strings); NULL
+  // or empty means unrestricted. Proposals and reassignments use nanoid ids,
+  // so there is no new sequence to keep in step with seeded rows.
+  await db.none(`
+    ALTER TABLE crews ADD COLUMN IF NOT EXISTS capacity NUMERIC NOT NULL DEFAULT 4,
+      ADD COLUMN IF NOT EXISTS on_shift BOOLEAN NOT NULL DEFAULT true,
+      ADD COLUMN IF NOT EXISTS aor TEXT[];
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS estimated_duration_min INTEGER,
+      ADD COLUMN IF NOT EXISTS required_skill TEXT,
+      ADD COLUMN IF NOT EXISTS flagged_reason TEXT,
+      ADD COLUMN IF NOT EXISTS flagged_at TIMESTAMPTZ;
+
+    CREATE TABLE IF NOT EXISTS oms_settings (
+      key        TEXT PRIMARY KEY,
+      value      JSONB NOT NULL,
+      updated_by TEXT,
+      updated_at TIMESTAMPTZ DEFAULT now()
+    );
+    INSERT INTO oms_settings (key, value, updated_by) VALUES ('workload',
+      '{"priorityWeights":{"Critical":3,"VIP":2.5,"Urgent":2,"Normal":1},"defaultDurationMin":60,"defaultCapacity":4,"overloadThreshold":1.0}'::jsonb,
+      'migrate') ON CONFLICT (key) DO NOTHING;
+
+    CREATE TABLE IF NOT EXISTS rebalance_proposals (
+      id             TEXT PRIMARY KEY,
+      trigger        TEXT NOT NULL,
+      trigger_detail TEXT,
+      status         TEXT NOT NULL DEFAULT 'proposed'
+                     CHECK (status IN ('proposed', 'applied', 'rejected', 'superseded', 'stale')),
+      created_by     TEXT,
+      created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+      decided_by     TEXT,
+      decided_at     TIMESTAMPTZ,
+      decision_note  TEXT,
+      settings       JSONB NOT NULL,
+      result         JSONB NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS rebalance_proposals_status_idx ON rebalance_proposals(status, created_at DESC);
+
+    -- Who moved which job from which crew to which, and why. to_crew NULL =
+    -- left unassigned (flagged). No FKs, so it outlives the jobs it names;
+    -- append-only like safety_log, so seed --force leaves it alone.
+    CREATE TABLE IF NOT EXISTS job_reassignments (
+      id          TEXT PRIMARY KEY,
+      proposal_id TEXT,
+      job_id      TEXT NOT NULL,
+      incident_id TEXT,
+      from_crew   TEXT,
+      to_crew     TEXT,
+      reason      TEXT NOT NULL,
+      actor       TEXT NOT NULL,
+      ts          TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS job_reassignments_ts_idx ON job_reassignments(ts DESC);
+    CREATE OR REPLACE FUNCTION prevent_job_reassignments_change() RETURNS trigger AS $$
+    BEGIN
+      RAISE EXCEPTION 'job_reassignments records are permanent and cannot be modified or deleted';
+    END;
+    $$ LANGUAGE plpgsql;
+    DROP TRIGGER IF EXISTS trg_job_reassignments_immutable ON job_reassignments;
+    CREATE TRIGGER trg_job_reassignments_immutable BEFORE UPDATE OR DELETE ON job_reassignments
+      FOR EACH ROW EXECUTE FUNCTION prevent_job_reassignments_change();
+    DROP TRIGGER IF EXISTS trg_job_reassignments_no_truncate ON job_reassignments;
+    CREATE TRIGGER trg_job_reassignments_no_truncate BEFORE TRUNCATE ON job_reassignments
+      FOR EACH STATEMENT EXECUTE FUNCTION prevent_job_reassignments_change();
+  `);
+
   // ID sequences for incidents.id / complaints.qid. These replace the old
   // SELECT COUNT(*) minting in repo.js, which raced under concurrency and
   // crashed the process on the resulting duplicate-key error (P8.6).

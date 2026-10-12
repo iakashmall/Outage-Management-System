@@ -2,6 +2,7 @@ import { db } from './db.js';
 import { nanoid } from 'nanoid';
 import { canTransition, LABELS } from '../domain/lifecycle.js';
 import * as rules from '../domain/plannedOutage.js';
+import { normalizeSettings, isMovable, INACTIVE_STATUSES, MOVABLE_STATUSES } from '../domain/rebalance.js';
 
 // The only module that talks SQL. Every function is now async because the
 // pg driver is async (unlike node:sqlite/better-sqlite3, which were sync).
@@ -106,6 +107,42 @@ async function withOutage(plannedOutageId, actor, fn) {
 // constraint would turn it into a 500.
 async function clientIdTaken(t, table, column, value, exceptId) {
   return !!(await t.oneOrNone(`SELECT 1 FROM ${table} WHERE ${column}=$1 AND id<>$2`, [value, exceptId || '']));
+}
+
+// ---- OMS-03 workload balancing: loaders in the engine's input shape ----
+// (domain/rebalance.js documents the shapes; capacity is NUMERIC, so pg hands it back as a string.)
+const crewInput = (r) => ({ ...parseSkills(r), capacity: r.capacity == null ? null : Number(r.capacity) });
+const INACTIVE_SQL = INACTIVE_STATUSES.map((s) => `'${s}'`).join(',');
+const JOB_INPUT_SQL = `
+  SELECT j.id, j.crew_id, j.status, j.priority, j.estimated_duration_min, j.required_skill,
+         j.flagged_reason, j.flagged_at, j.incident_id, j.address, j.updated_at,
+         i.substation AS area, i.lat, i.lon,
+         EXISTS (SELECT 1 FROM planned_outages po WHERE po.incident_id = j.incident_id) AS planned,
+         COALESCE((SELECT array_agg(DISTINCT tc.category) FROM trouble_calls tc
+                    WHERE tc.linked_id = j.incident_id AND tc.category IS NOT NULL), '{}') AS call_categories
+  FROM jobs j LEFT JOIN incidents i ON i.id = j.incident_id`;
+
+async function addReassignment(t, { proposalId = null, jobId, incidentId, fromCrew, toCrew, reason, actor }) {
+  await t.none(`INSERT INTO job_reassignments (id, proposal_id, job_id, incident_id, from_crew, to_crew, reason, actor)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, ['RAS-' + nanoid(10), proposalId, jobId, incidentId, fromCrew, toCrew, reason, actor]);
+}
+
+// Keeps crews.job_id (an incident id) pointing at one of the crew's active
+// jobs, started work first, after jobs moved on or off it.
+async function syncCrewPointer(t, crewId) {
+  const crew = await t.oneOrNone('SELECT id, status, on_shift, job_id FROM crews WHERE id=$1', [crewId]);
+  if (!crew) return;
+  const active = await t.any(`SELECT incident_id, status FROM jobs WHERE crew_id=$1 AND (status IS NULL OR status NOT IN (${INACTIVE_SQL}))
+    ORDER BY CASE WHEN status IN ($2:csv) THEN 1 ELSE 0 END, updated_at DESC NULLS LAST, id`, [crewId, MOVABLE_STATUSES]);
+  const patch = {};
+  if (!active.length) {
+    if (crew.job_id) patch.job_id = null;
+    if (crew.on_shift && crew.status !== 'off_shift') patch.status = 'available';
+  } else {
+    if (!active.some((j) => j.incident_id === crew.job_id)) patch.job_id = active[0].incident_id;
+    if (crew.status === 'available') patch.status = 'in_transit';
+  }
+  if (Object.keys(patch).length) await t.none(`UPDATE crews SET ${setClause(patch)} WHERE id=$/id/`, { ...patch, id: crewId });
 }
 
 export const repo = {
@@ -366,8 +403,9 @@ export const repo = {
   ),
   job: (id) => db.oneOrNone('SELECT * FROM jobs WHERE id=$1', [id]),
   createJob: async (j) => {
-    await db.none(`INSERT INTO jobs (id,incident_id,crew_id,priority,status,address,updated_at)
-      VALUES ($/id/,$/incident_id/,$/crew_id/,$/priority/,$/status/,$/address/,$/updated_at/)`, j);
+    await db.none(`INSERT INTO jobs (id,incident_id,crew_id,priority,status,address,updated_at,estimated_duration_min,required_skill)
+      VALUES ($/id/,$/incident_id/,$/crew_id/,$/priority/,$/status/,$/address/,$/updated_at/,$/estimated_duration_min/,$/required_skill/)`,
+      { estimated_duration_min: null, required_skill: null, ...j });
     return repo.job(j.id);
   },
   updateJob: async (id, patch) => {
@@ -397,6 +435,142 @@ export const repo = {
        RETURNING id, crew_id, lat, lon, recorded_at`,
       [crewId, lat, lon]
     ),
+
+  // ---- OMS-03 workload balancing
+  workloadSettings: async () =>
+    normalizeSettings((await db.oneOrNone("SELECT value FROM oms_settings WHERE key='workload'"))?.value),
+  saveWorkloadSettings: async (value, username) => {
+    await db.none(`INSERT INTO oms_settings (key, value, updated_by, updated_at) VALUES ('workload', $1::jsonb, $2, now())
+      ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_by=EXCLUDED.updated_by, updated_at=now()`, [JSON.stringify(value), username]);
+    return repo.workloadSettings();
+  },
+  workloadCrews: async (t = db) => (await t.any('SELECT * FROM crews ORDER BY id')).map(crewInput),
+  // Active jobs only (anything not finished), in the engine's job shape.
+  workloadJobs: (t = db) => t.any(`${JOB_INPUT_SQL} WHERE j.status IS NULL OR j.status NOT IN (${INACTIVE_SQL}) ORDER BY j.id`),
+  // A dispatcher-created crew. Without an id the next free Cnnn is used.
+  createCrew: (c) => db.tx(async (t) => {
+    let id = c.id;
+    if (!id) {
+      const { n } = await t.one(`SELECT COALESCE(MAX((substring(id from '^C([0-9]+)$'))::int), 0) + 1 n FROM crews WHERE id ~ '^C[0-9]+$'`);
+      id = 'C' + String(n).padStart(3, '0');
+    }
+    if (await t.oneOrNone('SELECT 1 FROM crews WHERE id=$1', [id])) return { error: { code: 'CREW_EXISTS', message: `crew ${id} already exists`, status: 409 } };
+    await t.none(`INSERT INTO crews (id, name, lead, status, location, job_id, lat, lon, skills, capacity, on_shift, aor)
+      VALUES ($/id/, $/name/, $/lead/, 'available', $/location/, NULL, $/lat/, $/lon/, $/skills/, $/capacity/, true, $/aor/)`,
+      { lead: null, location: null, lat: null, lon: null, skills: null, aor: null, ...c, id });
+    return { crew: crewInput(await t.one('SELECT * FROM crews WHERE id=$1', [id])) };
+  }),
+  activeJobsForCrew: (crewId) => db.any(`SELECT * FROM jobs WHERE crew_id=$1 AND (status IS NULL OR status NOT IN (${INACTIVE_SQL}))
+    ORDER BY updated_at DESC NULLS LAST`, [crewId]),
+
+  // A proposal replaces any older open one (only the newest can be applied).
+  saveProposal: ({ trigger, detail = null, actor, settings, result }) => db.tx(async (t) => {
+    await t.none(`UPDATE rebalance_proposals SET status='superseded', decided_at=now(), decided_by=$1, decision_note='replaced by a newer proposal'
+      WHERE status='proposed'`, [actor]);
+    const id = 'RBP-' + nanoid(10);
+    return t.one(`INSERT INTO rebalance_proposals (id, trigger, trigger_detail, created_by, settings, result)
+      VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb) RETURNING *`, [id, trigger, detail, actor, JSON.stringify(settings), JSON.stringify(result)]);
+  }),
+  proposal: (id) => db.oneOrNone('SELECT * FROM rebalance_proposals WHERE id=$1', [id]),
+  proposals: (status) => status
+    ? db.any('SELECT * FROM rebalance_proposals WHERE status=$1 ORDER BY created_at DESC LIMIT 100', [status])
+    : db.any('SELECT * FROM rebalance_proposals ORDER BY created_at DESC LIMIT 100'),
+  openProposal: () => db.oneOrNone("SELECT * FROM rebalance_proposals WHERE status='proposed' ORDER BY created_at DESC LIMIT 1"),
+  rejectProposal: (id, actor, note) => db.tx(async (t) => {
+    const p = await t.oneOrNone('SELECT * FROM rebalance_proposals WHERE id=$1 FOR UPDATE', [id]);
+    if (!p) return notFound('proposal');
+    if (p.status !== 'proposed') return { error: { code: 'NOT_OPEN', message: `proposal is ${p.status}`, status: 409 } };
+    const proposal = await t.one(`UPDATE rebalance_proposals SET status='rejected', decided_by=$2, decided_at=now(), decision_note=$3
+      WHERE id=$1 RETURNING *`, [id, actor, note || null]);
+    await t.none('INSERT INTO audit_log (id,ts,actor,action,target) VALUES ($1,$2,$3,$4,$5)',
+      ['AU' + nanoid(8), new Date().toISOString(), actor, 'dispatch.rebalance.reject', id]);
+    return { proposal };
+  }),
+
+  // Applies a proposal in one transaction. Every move is checked against the
+  // current data first (job still on its from-crew and unstarted, target
+  // still on shift); if anything changed the proposal is marked stale and
+  // nothing moves. Returns the touched ids so the route can publish events.
+  applyProposal: (id, actor) => db.tx(async (t) => {
+    const p = await t.oneOrNone('SELECT * FROM rebalance_proposals WHERE id=$1 FOR UPDATE', [id]);
+    if (!p) return notFound('proposal');
+    if (p.status !== 'proposed') return { error: { code: 'NOT_OPEN', message: `proposal is ${p.status}`, status: 409 } };
+    const moves = p.result.moves || [];
+    const unassigned = p.result.unassigned || [];
+    const jobIds = [...moves.map((m) => m.jobId), ...unassigned.map((u) => u.jobId)];
+    const jobs = jobIds.length ? await t.any(`${JOB_INPUT_SQL} WHERE j.id IN ($1:csv) FOR UPDATE OF j`, [jobIds]) : [];
+    const jobById = new Map(jobs.map((j) => [j.id, j]));
+    const crews = new Map((await t.any('SELECT id, on_shift FROM crews FOR UPDATE')).map((c) => [c.id, c]));
+
+    const problems = [];
+    const check = (jobId, fromCrew) => {
+      const j = jobById.get(jobId);
+      if (!j) return problems.push(`job ${jobId} no longer exists`);
+      if (j.crew_id !== fromCrew) return problems.push(`job ${jobId} is now on ${j.crew_id ?? 'no crew'}, not ${fromCrew}`);
+      if (!isMovable(j)) problems.push(`job ${jobId} is ${j.status} and can no longer move`);
+    };
+    for (const m of moves) {
+      check(m.jobId, m.fromCrew);
+      if (!crews.get(m.toCrew)?.on_shift) problems.push(`crew ${m.toCrew} is no longer on shift`);
+    }
+    for (const u of unassigned) check(u.jobId, u.fromCrew);
+    if (problems.length) {
+      const proposal = await t.one(`UPDATE rebalance_proposals SET status='stale', decided_by=$2, decided_at=now(), decision_note=$3
+        WHERE id=$1 RETURNING *`, [id, actor, problems.join('; ')]);
+      return { error: { code: 'STALE_PROPOSAL', message: 'the situation changed since this proposal was made; propose again', status: 409, problems }, proposal };
+    }
+
+    const now = new Date().toISOString();
+    const touchedCrews = new Set();
+    const incidents = new Set();
+    const event = (incidentId, kind, note) => incidentId && addEvent(t, incidentId, actor, kind, note);
+    for (const m of moves) {
+      const j = jobById.get(m.jobId);
+      await t.none('UPDATE jobs SET crew_id=$2, updated_at=$3, flagged_reason=NULL, flagged_at=NULL WHERE id=$1', [j.id, m.toCrew, now]);
+      if (j.incident_id) await t.none('UPDATE incidents SET crew_id=$2 WHERE id=$1 AND (crew_id IS NULL OR crew_id=$3)', [j.incident_id, m.toCrew, m.fromCrew]);
+      const note = `Reassigned from ${m.fromCrew} to ${m.toCrew} (${m.reason})`;
+      await t.none('INSERT INTO job_updates (id,job_id,status,note,ts) VALUES ($1,$2,$3,$4,$5)', ['JU' + nanoid(8), j.id, j.status, note, now]);
+      await event(j.incident_id, 'reassigned', `Job ${j.id}: ${note}`);
+      await addReassignment(t, { proposalId: id, jobId: j.id, incidentId: j.incident_id, fromCrew: m.fromCrew, toCrew: m.toCrew, reason: m.reason, actor });
+      touchedCrews.add(m.fromCrew).add(m.toCrew);
+      if (j.incident_id) incidents.add(j.incident_id);
+    }
+    for (const u of unassigned) {
+      const j = jobById.get(u.jobId);
+      await t.none('UPDATE jobs SET crew_id=NULL, updated_at=$2, flagged_reason=$3, flagged_at=$2 WHERE id=$1', [j.id, now, u.reason]);
+      if (j.incident_id) {
+        await t.none(`UPDATE incidents SET crew_id=NULL, status=CASE WHEN status='dispatched' THEN 'open' ELSE status END
+          WHERE id=$1 AND crew_id=$2`, [j.incident_id, u.fromCrew]);
+      }
+      const note = `Unassigned from ${u.fromCrew}: ${u.reason}`;
+      await t.none('INSERT INTO job_updates (id,job_id,status,note,ts) VALUES ($1,$2,$3,$4,$5)', ['JU' + nanoid(8), j.id, j.status, note, now]);
+      await event(j.incident_id, 'unassigned', `Job ${j.id}: ${note}`);
+      await addReassignment(t, { proposalId: id, jobId: j.id, incidentId: j.incident_id, fromCrew: u.fromCrew, toCrew: null, reason: u.reason, actor });
+      touchedCrews.add(u.fromCrew);
+      if (j.incident_id) incidents.add(j.incident_id);
+    }
+    for (const c of touchedCrews) await syncCrewPointer(t, c);
+    const proposal = await t.one(`UPDATE rebalance_proposals SET status='applied', decided_by=$2, decided_at=now() WHERE id=$1 RETURNING *`, [id, actor]);
+    await t.none('INSERT INTO audit_log (id,ts,actor,action,target) VALUES ($1,$2,$3,$4,$5)',
+      ['AU' + nanoid(8), now, actor, 'dispatch.rebalance.apply', id]);
+    return { proposal, jobIds, crewIds: [...touchedCrews], incidentIds: [...incidents] };
+  }),
+
+  // Manual assign onto an existing job row (a flagged job, or the job id
+  // assign would mint already exists): moves it instead of inserting a duplicate.
+  reassignJob: (jobId, toCrew, patch, actor) => db.tx(async (t) => {
+    const j = await t.one('SELECT * FROM jobs WHERE id=$1 FOR UPDATE', [jobId]);
+    const set = { ...patch, crew_id: toCrew, flagged_reason: null, flagged_at: null, updated_at: new Date().toISOString() };
+    await t.none(`UPDATE jobs SET ${setClause(set)} WHERE id=$/id/`, { ...set, id: jobId });
+    if (j.crew_id !== toCrew) {
+      await addReassignment(t, { jobId, incidentId: j.incident_id, fromCrew: j.crew_id, toCrew, reason: 'manual_assign', actor });
+      if (j.crew_id) await syncCrewPointer(t, j.crew_id);
+    }
+    return { job: await t.one('SELECT * FROM jobs WHERE id=$1', [jobId]), fromCrew: j.crew_id };
+  }),
+  reassignments: (limit = 200) => db.any('SELECT * FROM job_reassignments ORDER BY ts DESC, id LIMIT $1', [limit]),
+  decidedProposals: (limit = 200) => db.any(`SELECT * FROM rebalance_proposals WHERE status IN ('applied','rejected','stale')
+    ORDER BY COALESCE(decided_at, created_at) DESC LIMIT $1`, [limit]),
 
   // ---- admin / audit
   audit: async (actor, action, target) => {

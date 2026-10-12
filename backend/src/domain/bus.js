@@ -32,6 +32,8 @@ export const TOPICS = {
   MESSAGE_POSTED: 'oms.message.posted',
     ERT_CHANGED: 'oms.incident.ert_changed',
   CREW_TRACKING_CHANGED: 'crew.tracking.changed',
+  // OMS-03 workload balancing: { event: proposed|applied|rejected|stale, proposalId, trigger }
+  DISPATCH_REBALANCE: 'oms.dispatch.rebalance',
 };
 const ALL_TOPICS = Object.values(TOPICS);
 
