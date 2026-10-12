@@ -37,7 +37,8 @@ export const api = {
   incident: (id) => req('GET', `/incidents/${id}`),
   createIncident: (b) => req('POST', '/incidents', b),
   setStatus: (id, status, note) => req('PATCH', `/incidents/${id}/status`, { status, note }),
-  assign: (id, crewId, priority) => req('POST', `/incidents/${id}/assign`, { crewId, priority }),
+  // extra (OMS-03, optional): { requiredSkill, estimatedDurationMin }
+  assign: (id, crewId, priority, extra = {}) => req('POST', `/incidents/${id}/assign`, { crewId, priority, ...extra }),
   messages: (id) => req('GET', `/incidents/${id}/messages`),
   photos: (id) => req('GET', `/incidents/${id}/photos`),
   photoDetail: (photoId) => req('GET', `/mobile/photos/${photoId}`),
