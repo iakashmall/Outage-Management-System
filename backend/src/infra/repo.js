@@ -146,7 +146,7 @@ async function syncCrewPointer(t, crewId) {
     if (crew.on_shift && ['in_transit', 'in_service'].includes(crew.status)) patch.status = 'available';
   } else {
     if (!active.some((j) => j.incident_id === crew.job_id)) patch.job_id = active[0].incident_id;
-    if (crew.status === 'available') patch.status = 'in_transit';
+    if (crew.status === 'available') patch.status = ['On Site', 'Work Started'].includes(active[0].status) ? 'in_service' : 'in_transit';
   }
   if (Object.keys(patch).length) await t.none(`UPDATE crews SET ${setClause(patch)} WHERE id=$/id/`, { ...patch, id: crewId });
 }
@@ -583,7 +583,13 @@ export const repo = {
     }
     return { job: await t.one('SELECT * FROM jobs WHERE id=$1', [jobId]), fromCrew: j.crew_id };
   }),
-  reassignments: (limit = 200) => db.any('SELECT * FROM job_reassignments ORDER BY ts DESC, id LIMIT $1', [limit]),
+  // Re-derives crews.job_id/status from the crew's active jobs (after one finishes).
+  syncCrew: (crewId) => db.tx((t) => syncCrewPointer(t, crewId)),
+  // job_reassignments outlives a reseed (append-only) but proposals do not:
+  // rows of a deleted proposal belong to an earlier seed run, so hide them.
+  reassignments: (limit = 200) => db.any(`SELECT * FROM job_reassignments r
+    WHERE r.proposal_id IS NULL OR EXISTS (SELECT 1 FROM rebalance_proposals p WHERE p.id = r.proposal_id)
+    ORDER BY r.ts DESC, r.id LIMIT $1`, [limit]),
   decidedProposals: (limit = 200) => db.any(`SELECT * FROM rebalance_proposals WHERE status IN ('applied','rejected','stale')
     ORDER BY COALESCE(decided_at, created_at) DESC LIMIT $1`, [limit]),
 

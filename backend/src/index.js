@@ -1,6 +1,16 @@
 import 'dotenv/config'; // loads .env into process.env
 // Log which database we use, but never the password inside the URL.
-console.log('DATABASE_URL loaded as:', (process.env.DATABASE_URL || '(unset)').replace(/\/\/([^:@/]*):[^/]*@/, '//$1:***@'));
+function redactUrl(raw) {
+  if (!raw) return '(unset)';
+  try {
+    const u = new URL(raw);
+    if (u.password) u.password = '***';
+    return u.toString();
+  } catch {
+    return '(unparseable)';
+  }
+}
+console.log('DATABASE_URL loaded as:', redactUrl(process.env.DATABASE_URL));
 import express from 'express';
 import cors from 'cors';
 import path from 'node:path';

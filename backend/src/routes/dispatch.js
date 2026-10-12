@@ -34,7 +34,17 @@ const bad = (res, message) => res.status(400).json({ code: 'INVALID', message })
 const fail = (res, out) => res.status(out.error.status || 409).json({ code: out.error.code, message: out.error.message, ...(out.error.problems ? { problems: out.error.problems } : {}) });
 
 const KNOWN_AREAS = new Set(netSubstations.map((s) => s.name));
-const posNum = (v) => typeof v === 'number' && Number.isFinite(v) && v > 0;
+// Bounds keep loads finite (a weight of 1e308 or a capacity of 1e-300 would overflow to Infinity/NaN).
+const inRange = (v, lo, hi) => typeof v === 'number' && Number.isFinite(v) && v >= lo && v <= hi;
+const LIMITS = { weight: [0.1, 100], durationMin: [1, 10080], capacity: [0.1, 100], lat: [-90, 90], lon: [-180, 180] };
+const MAX_TEXT = 100;
+// Optional free text: undefined/blank -> null, too long -> { error }.
+function parseText(v, field) {
+  if (typeof v !== 'string') return null;
+  const t = v.trim();
+  if (t.length > MAX_TEXT) return { error: `${field} must be at most ${MAX_TEXT} characters` };
+  return t || null;
+}
 
 // Body field parsers: undefined = not given, { error } = invalid.
 function parseAor(v) {
@@ -149,11 +159,11 @@ r.get('/dispatch/settings', async (req, res) => res.json(await repo.workloadSett
 r.put('/dispatch/settings', ...write, async (req, res) => {
   const b = req.body || {};
   const w = b.priorityWeights;
-  if (!w || typeof w !== 'object' || !PRIORITY_CLASSES.every((c) => posNum(w[c]))) {
-    return bad(res, `priorityWeights needs a positive number for each of ${PRIORITY_CLASSES.join(', ')}`);
+  if (!w || typeof w !== 'object' || !PRIORITY_CLASSES.every((c) => inRange(w[c], ...LIMITS.weight))) {
+    return bad(res, `priorityWeights needs a number from ${LIMITS.weight.join(' to ')} for each of ${PRIORITY_CLASSES.join(', ')}`);
   }
-  if (!posNum(b.defaultDurationMin)) return bad(res, 'defaultDurationMin must be a positive number');
-  if (!posNum(b.defaultCapacity)) return bad(res, 'defaultCapacity must be a positive number');
+  if (!inRange(b.defaultDurationMin, ...LIMITS.durationMin)) return bad(res, `defaultDurationMin must be ${LIMITS.durationMin.join(' to ')} minutes`);
+  if (!inRange(b.defaultCapacity, ...LIMITS.capacity)) return bad(res, `defaultCapacity must be ${LIMITS.capacity.join(' to ')}`);
   if (!(typeof b.overloadThreshold === 'number' && b.overloadThreshold >= 0.1 && b.overloadThreshold <= 5)) {
     return bad(res, 'overloadThreshold must be between 0.1 and 5 (1.0 = 100%)');
   }
@@ -171,18 +181,21 @@ r.put('/dispatch/settings', ...write, async (req, res) => {
 
 r.post('/crews', ...write, async (req, res) => {
   const b = req.body || {};
-  const name = typeof b.name === 'string' ? b.name.trim() : '';
+  const name = parseText(b.name, 'name');
+  if (isErr(name)) return bad(res, name.error);
   if (!name) return bad(res, 'name is required');
+  const lead = parseText(b.lead, 'lead'), location = parseText(b.location, 'location');
+  if (isErr(lead)) return bad(res, lead.error);
+  if (isErr(location)) return bad(res, location.error);
   if (b.id !== undefined && !(typeof b.id === 'string' && /^[A-Za-z0-9_-]{1,20}$/.test(b.id))) return bad(res, 'id must be 1-20 letters, digits, _ or -');
   const aor = parseAor(b.aor);
   if (isErr(aor)) return bad(res, aor.error);
   const skills = parseSkills(b.skills);
   if (isErr(skills)) return bad(res, skills.error);
-  if (b.capacity !== undefined && !posNum(b.capacity)) return bad(res, 'capacity must be a positive number');
-  for (const k of ['lat', 'lon']) if (b[k] != null && !(typeof b[k] === 'number' && Number.isFinite(b[k]))) return bad(res, `${k} must be a number`);
+  if (b.capacity !== undefined && !inRange(b.capacity, ...LIMITS.capacity)) return bad(res, `capacity must be ${LIMITS.capacity.join(' to ')}`);
+  for (const k of ['lat', 'lon']) if (b[k] != null && !inRange(b[k], ...LIMITS[k])) return bad(res, `${k} must be a number from ${LIMITS[k].join(' to ')}`);
   const out = await repo.createCrew({
-    id: b.id, name, lead: typeof b.lead === 'string' ? b.lead.trim() || null : null,
-    location: typeof b.location === 'string' ? b.location.trim() || null : null,
+    id: b.id, name, lead, location,
     skills: skills ?? null, aor: aor ?? null, capacity: b.capacity ?? (await repo.workloadSettings()).defaultCapacity,
     lat: b.lat ?? null, lon: b.lon ?? null,
   });
@@ -206,7 +219,7 @@ r.patch('/crews/:id', ...write, async (req, res) => {
     patch.on_shift = b.on_shift;
   }
   if (b.capacity !== undefined) {
-    if (!posNum(b.capacity)) return bad(res, 'capacity must be a positive number');
+    if (!inRange(b.capacity, ...LIMITS.capacity)) return bad(res, `capacity must be ${LIMITS.capacity.join(' to ')}`);
     patch.capacity = b.capacity;
   }
   const aor = parseAor(b.aor);

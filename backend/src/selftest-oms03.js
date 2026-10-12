@@ -72,9 +72,9 @@ bus.subscribe(TOPICS.DISPATCH_REBALANCE, (e) => events.push(e));
 
 const server = app.listen(0, async () => {
   const { port } = server.address();
-  const call = async (as, method, path, body) => {
+  const call = async (as, method, path, body, headers = {}) => {
     const r = await fetch(`http://127.0.0.1:${port}/api${path}`, {
-      method, headers: { 'content-type': 'application/json', 'x-test-as': as },
+      method, headers: { 'content-type': 'application/json', 'x-test-as': as, ...headers },
       body: body ? JSON.stringify(body) : undefined,
     });
     return { status: r.status, body: await r.json().catch(() => ({})) };
@@ -163,6 +163,10 @@ const server = app.listen(0, async () => {
     check('demo login naming the old crew in the body -> 409 NOT_YOUR_JOB', r.status === 409 && r.body.code === 'NOT_YOUR_JOB');
     r = await call('crewNoClaim', 'PATCH', '/mobile/jobs/JOB-101/status', { status: 'En Route' });
     check('field_crew login naming no crew -> 403 NO_CREW_ID', r.status === 403 && r.body.code === 'NO_CREW_ID');
+    r = await call('crewNoClaim', 'PATCH', '/mobile/jobs/JOB-101/status', { status: 'En Route', crewId: 'C005' });
+    check('field_crew login without a claim cannot borrow the job crew from the body (403)', r.status === 403 && r.body.code === 'NO_CREW_ID');
+    r = await call('coord', 'PATCH', '/mobile/jobs/JOB-101/status', { status: 'En Route' });
+    check('a login that is neither crew nor operator -> 403 FORBIDDEN', r.status === 403 && r.body.code === 'FORBIDDEN');
     check('the job is unchanged', (await job('JOB-101')).status === 'Acknowledged');
 
     console.log('-- (b) C004 off shift: automatic proposal, never applied by itself');
@@ -244,6 +248,14 @@ const server = app.listen(0, async () => {
       (await repo.updateJobForCrew('JOB-102', 'C004', { status: 'En Route' })) === null && (await job('JOB-102')).status === 'Acknowledged');
     r = await call('c3', 'PATCH', '/mobile/jobs/JOB-102/status', { status: 'En Route', crewId: 'C003' });
     check('new crew can update it (200)', r.status === 200 && r.body.status === 'En Route');
+    const inc102 = (await job('JOB-102')).incident_id;
+    await db.none('UPDATE crews SET job_id=$1 WHERE id=$2', [inc102, 'C003']);
+    r = await call('c3', 'PATCH', '/mobile/jobs/JOB-102/status', { status: 'Work Finished' });
+    const c3after = await repo.crew('C003');
+    const c3active = (await repo.activeJobsForCrew('C003')).map((j) => j.incident_id);
+    check('Work Complete with jobs left: crew points at the next one and is not available',
+      r.status === 200 && c3active.length > 0 && c3active.includes(c3after.job_id) && c3after.job_id !== inc102 && c3after.status === 'in_transit',
+      JSON.stringify({ status: c3after.status, job_id: c3after.job_id, left: c3active.length }));
 
     wl = (await call('op', 'GET', '/dispatch/workload')).body;
     check('workload lists JOB-103 as unassigned with its reason', wl.unassigned.some((j) => j.id === 'JOB-103' && /Fuse/.test(j.flagged_reason)) && wl.openProposal === null);
@@ -255,9 +267,13 @@ const server = app.listen(0, async () => {
     console.log('-- manual assign');
     check('assign to an off-shift crew -> 409', (await call('op', 'POST', `/incidents/${inc103.id}/assign`, { crewId: 'C004' })).status === 409);
     check('bad priority -> 400', (await call('op', 'POST', `/incidents/${inc103.id}/assign`, { crewId: 'C005', priority: 'Whenever' })).status === 400);
-    r = await call('op', 'POST', `/incidents/${inc103.id}/assign`, { crewId: 'C005', requiredSkill: 'any', estimatedDurationMin: 45, priority: 'Urgent' });
+    check('assign with a token without a username -> 401', (await call('noname', 'POST', `/incidents/${inc103.id}/assign`, { crewId: 'C005' })).status === 401);
+    r = await call('op', 'POST', `/incidents/${inc103.id}/assign`, { crewId: 'C005', requiredSkill: 'any', estimatedDurationMin: 45, priority: 'Urgent' }, { 'x-user': 'mallory' });
     check('assigning the flagged job reuses it (no duplicate)', r.status === 200 && r.body.job.id === 'JOB-103' && r.body.job.crew_id === 'C005'
       && r.body.job.flagged_reason === null && r.body.job.required_skill === null && r.body.job.estimated_duration_min === 45 && r.body.job.priority === 'Urgent');
+    check('assign event and audit row name the token user, not the x-user header',
+      (await repo.incidentEvents(inc103.id)).some((e) => e.kind === 'assigned' && e.actor === 'op.sharma')
+      && !(await db.oneOrNone("SELECT 1 FROM audit_log WHERE action='dispatch.assign' AND actor='mallory'")));
     check('manual_assign row in job_reassignments',
       (await db.any("SELECT 1 FROM job_reassignments WHERE job_id='JOB-103' AND reason='manual_assign' AND from_crew IS NULL AND to_crew='C005' AND actor='op.sharma' AND ts >= $1", [runStart])).length === 1);
     const a1 = await call('op', 'POST', '/incidents/INC-2026-000006/assign', { crewId: 'C001' });
@@ -284,6 +300,9 @@ const server = app.listen(0, async () => {
       && r.body.crew.status === 'available' && r.body.crew.skills.join() === 'MV,Fuse' && r.body.crew.aor[0] === MP && 'rebalance' in r.body, JSON.stringify(r.body).slice(0, 200));
     check('POST /crews with an unknown area -> 400', (await call('op', 'POST', '/crews', { name: 'X', aor: ['Atlantis'] })).status === 400);
     check('POST /crews duplicate id -> 409', (await call('op', 'POST', '/crews', { id: 'C001', name: 'Dup' })).status === 409);
+    check('POST /crews with a 101-character name -> 400', (await call('op', 'POST', '/crews', { name: 'N'.repeat(101) })).status === 400);
+    check('POST /crews with lat 999 -> 400', (await call('op', 'POST', '/crews', { name: 'Z', lat: 999, lon: 78 })).status === 400);
+    check('POST /crews with capacity 1e-300 -> 400', (await call('op', 'POST', '/crews', { name: 'Z', capacity: 1e-300 })).status === 400);
     check('coordinator cannot add a crew (403)', (await call('coord', 'POST', '/crews', { name: 'Y' })).status === 403);
     r = await call('op', 'PATCH', '/crews/C005', { capacity: 2 });
     check('capacity change -> capacity_changed proposal', r.status === 200 && Number(r.body.crew.capacity) === 2
@@ -294,6 +313,8 @@ const server = app.listen(0, async () => {
     check('a job whose incident is cancelled is no longer workload', r.status === 200
       && !wl.crews.some((c) => c.jobs.some((j) => j.id === 'JOB-109')) && !wl.unassigned.some((j) => j.id === 'JOB-109'), `${r.status} ${JSON.stringify(r.body).slice(0, 120)}`);
     check('settings: threshold out of range -> 400', (await call('op', 'PUT', '/dispatch/settings', { ...st, overloadThreshold: 9 })).status === 400);
+    check('settings: weight 1e308 -> 400', (await call('op', 'PUT', '/dispatch/settings', { ...st, priorityWeights: { ...st.priorityWeights, Normal: 1e308 } })).status === 400);
+    check('settings: defaultCapacity 1e-300 -> 400', (await call('op', 'PUT', '/dispatch/settings', { ...st, defaultCapacity: 1e-300 })).status === 400);
     check('settings: missing weight -> 400', (await call('op', 'PUT', '/dispatch/settings', { ...st, priorityWeights: { Critical: 3 } })).status === 400);
     r = await call('op', 'PUT', '/dispatch/settings', { ...st, overloadThreshold: 1.2 });
     check('settings saved and read back', r.status === 200 && (await call('op', 'GET', '/dispatch/settings')).body.overloadThreshold === 1.2);
@@ -308,6 +329,9 @@ const server = app.listen(0, async () => {
     const reseed = await seed({ force: true }).catch((e) => ({ error: e.message }));
     check('seed --force still works and keeps the log', reseed.seeded === true && Number((await db.one('SELECT count(*) n FROM job_reassignments')).n) === nLog, reseed.error || '');
     check('seed --force clears proposals', Number((await db.one('SELECT count(*) n FROM rebalance_proposals')).n) === 0);
+    const histAfter = (await call('op', 'GET', '/dispatch/rebalance/history')).body.reassignments;
+    check('history hides reassignments of proposals the reseed deleted (manual ones stay)',
+      histAfter.length > 0 && histAfter.every((x) => x.proposal_id === null), String(histAfter.length));
   } catch (e) {
     fails++;
     console.log('  [FAIL] unexpected error', e.stack);

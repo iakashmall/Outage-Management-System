@@ -166,7 +166,7 @@ function CrewEditor({ crew, areas, onDone }) {
   };
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: 10, marginTop: 12, paddingTop: 12, borderTop: '1px dashed var(--line)' }}>
-      <Field label="Capacity (h)"><input style={inp} type="number" min="0.5" step="0.5" value={f.capacity} onChange={(e) => setF({ ...f, capacity: e.target.value })} /></Field>
+      <Field label="Capacity (h)"><input style={inp} type="number" min="0.5" max="100" step="0.5" value={f.capacity} onChange={(e) => setF({ ...f, capacity: e.target.value })} /></Field>
       <Field label="Skills (comma separated)"><input style={inp} value={f.skills} onChange={(e) => setF({ ...f, skills: e.target.value })} placeholder="e.g. HT, LT, Cable" /></Field>
       <Field label="Area of responsibility (none ticked = unrestricted)" span><AreaPicker areas={areas} value={f.aor} onChange={(aor) => setF({ ...f, aor })} /></Field>
       <div style={{ gridColumn: '1 / -1', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
@@ -203,13 +203,13 @@ export function AddCrewForm({ areas, defaultCapacity, onDone }) {
   };
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
-      <Field label="Name *"><input style={inp} value={f.name} onChange={set('name')} placeholder="e.g. Line Crew Golf" /></Field>
-      <Field label="Lead"><input style={inp} value={f.lead} onChange={set('lead')} /></Field>
+      <Field label="Name *"><input style={inp} maxLength={100} value={f.name} onChange={set('name')} placeholder="e.g. Line Crew Golf" /></Field>
+      <Field label="Lead"><input style={inp} maxLength={100} value={f.lead} onChange={set('lead')} /></Field>
       <Field label="Id (optional)"><input style={inp} value={f.id} onChange={set('id')} placeholder="next Cnnn" /></Field>
-      <Field label="Capacity (h)"><input style={inp} type="number" min="0.5" step="0.5" value={f.capacity} onChange={set('capacity')} /></Field>
+      <Field label="Capacity (h)"><input style={inp} type="number" min="0.5" max="100" step="0.5" value={f.capacity} onChange={set('capacity')} /></Field>
       <div style={{ gridColumn: 'span 2' }}><Field label="Skills (comma separated)"><input style={inp} value={f.skills} onChange={set('skills')} placeholder="e.g. HT, LT, Cable" /></Field></div>
-      <Field label="Base latitude"><input style={inp} type="number" step="any" value={f.lat} onChange={set('lat')} /></Field>
-      <Field label="Base longitude"><input style={inp} type="number" step="any" value={f.lon} onChange={set('lon')} /></Field>
+      <Field label="Base latitude"><input style={inp} type="number" min="-90" max="90" step="any" value={f.lat} onChange={set('lat')} /></Field>
+      <Field label="Base longitude"><input style={inp} type="number" min="-180" max="180" step="any" value={f.lon} onChange={set('lon')} /></Field>
       <Field label="Area of responsibility (none ticked = unrestricted)" span><AreaPicker areas={areas} value={f.aor} onChange={(aor) => setF({ ...f, aor })} /></Field>
       <div style={{ gridColumn: '1 / -1', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
         <button className="btn sm" onClick={onDone} disabled={busy}>Cancel</button>
@@ -243,11 +243,11 @@ export function SettingsEditor({ settings, onDone }) {
     <div style={{ display: 'grid', gap: 12 }}>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
         {PRIORITIES.map((p) => (
-          <Field key={p} label={`${p} weight`}><input style={inp} type="number" min="0.1" step="0.1" value={f[p]} onChange={set(p)} /></Field>
+          <Field key={p} label={`${p} weight`}><input style={inp} type="number" min="0.1" max="100" step="0.1" value={f[p]} onChange={set(p)} /></Field>
         ))}
         <Field label="Overload threshold (%)"><input style={inp} type="number" min="10" max="500" step="5" value={f.threshold} onChange={set('threshold')} /></Field>
-        <Field label="Default job duration (min)"><input style={inp} type="number" min="1" value={f.duration} onChange={set('duration')} /></Field>
-        <Field label="Default crew capacity (h)"><input style={inp} type="number" min="0.5" step="0.5" value={f.capacity} onChange={set('capacity')} /></Field>
+        <Field label="Default job duration (min)"><input style={inp} type="number" min="1" max="10080" value={f.duration} onChange={set('duration')} /></Field>
+        <Field label="Default crew capacity (h)"><input style={inp} type="number" min="0.5" max="100" step="0.5" value={f.capacity} onChange={set('capacity')} /></Field>
       </div>
       <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'center' }}>
         <span style={{ fontSize: 12, color: 'var(--muted)' }}>Job weight = priority weight × duration (h). Saving does not rebalance by itself.</span>

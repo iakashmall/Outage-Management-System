@@ -218,6 +218,9 @@ api.post('/notify/opt-in', async (req, res) => {
 
 // ---------- dispatch ----------
 api.post('/incidents/:id/assign', requireRole('oms_operator', 'system_admin'), async (req, res) => {
+  // Event, audit and reassignment rows name the verified token user, not a client header.
+  const who = req.user?.username;
+  if (!who) return res.status(401).json({ code: 'NO_IDENTITY', message: 'token has no username' });
   const inc = await repo.incident(req.params.id);
   const crew = await repo.crew(req.body?.crewId);
   if (!inc || !crew) return res.status(404).json({ error: 'incident or crew not found' });
@@ -253,7 +256,7 @@ api.post('/incidents/:id/assign', requireRole('oms_operator', 'system_admin'), a
   let job, fromCrew = null;
   if (existing) {
     // Keeps its id and (unstarted) status; writes the manual_assign log row when the crew changes.
-    ({ job, fromCrew } = await repo.reassignJob(existing.id, crew.id, fields, req.user?.username || actor(req)));
+    ({ job, fromCrew } = await repo.reassignJob(existing.id, crew.id, fields, who));
   } else {
     // An id already taken (an earlier, finished job of this incident, or another
     // incident with the same last 3 digits) gets a suffix instead of colliding.
@@ -264,8 +267,8 @@ api.post('/incidents/:id/assign', requireRole('oms_operator', 'system_admin'), a
   }
   await repo.addJobUpdate(job.id, job.status, null, null, existing ? `Assigned to ${crew.id}` : null);
   if (fromCrew && fromCrew !== crew.id) bus.publish(TOPICS.CREW_UPDATED, await repo.crew(fromCrew));
-  await repo.addIncidentEvent(inc.id, actor(req), 'assigned', `${crew.name} assigned`);
-  await repo.audit(actor(req), 'dispatch.assign', `${inc.id}-${crew.id}`);
+  await repo.addIncidentEvent(inc.id, who, 'assigned', `${crew.name} assigned`);
+  await repo.audit(who, 'dispatch.assign', `${inc.id}-${crew.id}`);
   const updated = await repo.incident(inc.id);
   const updatedCrew = await repo.crew(crew.id);
   bus.publish(TOPICS.INCIDENT_UPDATED, updated);
@@ -954,17 +957,18 @@ api.patch('/mobile/jobs/:id/status', async (req, res) => {
   if (!job) return res.status(404).json({ error: 'not found' });
   // OMS-03: a job can be reassigned while a phone is offline. Refuse an
   // update from a crew that no longer holds the job (or for a job left
-  // unassigned) instead of letting it move another crew's work. The crew is
-  // the token's crew_id claim, else the crewId the app sends; the control
-  // room may update on a crew's behalf. A field_crew login that names no
-  // crew is refused. Known gap: other logins (demo logins such as test.scada
-  // have no crew role or claim) are only checked when the app sends crewId,
-  // which the installed APK does not do until it is rebuilt.
+  // unassigned) instead of letting it move another crew's work. Same rules
+  // as plannedOutages.js: a crew is the verified crew_id claim of a
+  // field_crew token (never the request body); other logins get 403. The
+  // control room may update on a crew's behalf, and its crewId (sent by the
+  // crew app's demo login) is still checked so a stale queue item is refused.
   const who = req.user || {};
-  const namedCrew = (!isOperator(who) && who.crewId) || (typeof req.body?.crewId === 'string' ? req.body.crewId : null);
-  if (!namedCrew && !isOperator(who) && who.roles?.includes('field_crew')) {
-    return res.status(403).json({ code: 'NO_CREW_ID', message: 'this login has no crew id; sign in with a crew account' });
+  const operator = isOperator(who);
+  if (!operator) {
+    if (!who.roles?.includes('field_crew')) return res.status(403).json({ code: 'FORBIDDEN', message: 'only the assigned crew or the control room can update a job' });
+    if (!who.crewId) return res.status(403).json({ code: 'NO_CREW_ID', message: 'this login has no crew id; sign in with a crew account' });
   }
+  const namedCrew = operator ? (typeof req.body?.crewId === 'string' ? req.body.crewId : null) : who.crewId;
   const notYours = () => res.status(409).json({ code: 'NOT_YOUR_JOB', message: 'this job was reassigned to another crew' });
   if (job.crew_id == null || (namedCrew && namedCrew !== job.crew_id)) return notYours();
   const { lat, lon, note } = req.body || {};
@@ -977,6 +981,9 @@ api.patch('/mobile/jobs/:id/status', async (req, res) => {
   // off-shift crew stays off_shift: availability is the dispatcher's call)
   const map = { 'En Route': 'in_transit', 'On Site': 'in_service', 'Work Started': 'in_service', 'Work Complete': 'available' };
   if (map[status] && (await repo.crew(written.crew_id))?.on_shift !== false) await repo.updateCrew(written.crew_id, { status: map[status] });
+  // A finished job: point the crew at its next active job (a rebalance can
+  // leave several), back to in_transit if one remains.
+  if (!isActive({ status })) await repo.syncCrew(written.crew_id);
   if (status === 'On Site' && job.incident_id) await repo.updateIncident(job.incident_id, { status: 'in_progress' });
   if (job.incident_id) { await repo.addIncidentEvent(job.incident_id, 'Crew', 'field', 'Status: ' + status); }
   if (status === 'Work Complete' && job.incident_id) {

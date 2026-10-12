@@ -79,9 +79,9 @@ inserted by `migrate()` and never overwrites an existing one.
 
 | Setting | Default | Rule on save |
 |---|---|---|
-| `priorityWeights` | Critical 3, VIP 2.5, Urgent 2, Normal 1 | All four present, each > 0 |
-| `defaultDurationMin` | 60 | > 0 |
-| `defaultCapacity` | 4 (also the capacity of a new crew if none is given) | > 0 |
+| `priorityWeights` | Critical 3, VIP 2.5, Urgent 2, Normal 1 | All four present, each 0.1 to 100 |
+| `defaultDurationMin` | 60 | 1 to 10080 (one week) |
+| `defaultCapacity` | 4 (also the capacity of a new crew if none is given) | 0.1 to 100 |
 | `overloadThreshold` | 1.0 (100%) | 0.1 to 5 |
 
 Change them in the Dispatch tab's settings editor, or with
@@ -127,14 +127,14 @@ no dispatch rights.
 |---|---|
 | `GET /dispatch/workload` | Settings, crews with load / weight / over and their jobs (effective priority, Medical marker, weight, movable, area, skill), the flagged unassigned jobs, and the open proposal |
 | `GET /dispatch/settings` / `PUT /dispatch/settings` | Read / save the settings (`400 INVALID` on a bad value) |
-| `POST /crews` | Add a crew `{ id?, name, lead, skills, aor, capacity, lat, lon }`. Starts on shift and `available`. Triggers `crew_added` |
-| `PATCH /crews/:id` | `{ on_shift?, capacity?, aor?, skills? }`. AoR entries must be known substations |
+| `POST /crews` | Add a crew `{ id?, name, lead, location?, skills, aor, capacity, lat, lon }`. Starts on shift and `available`. Triggers `crew_added`. `name` / `lead` / `location` at most 100 characters, capacity 0.1 to 100, lat -90 to 90, lon -180 to 180 |
+| `PATCH /crews/:id` | `{ on_shift?, capacity?, aor?, skills? }`. AoR entries must be known substations, capacity 0.1 to 100 |
 | `POST /dispatch/rebalance/propose` | Manual proposal `{ note? }` |
 | `GET /dispatch/rebalance/proposals?status=` | List proposals |
 | `GET /dispatch/rebalance/proposals/:id` | One proposal |
 | `POST /dispatch/rebalance/proposals/:id/apply` | Apply. Answers `409 STALE_PROPOSAL` (with `problems`) when anything changed since the proposal was made |
 | `POST /dispatch/rebalance/proposals/:id/reject` | Reject `{ note? }` |
-| `GET /dispatch/rebalance/history` | Applied, rejected and stale proposals, and reassignment rows, newest first (200 max each) |
+| `GET /dispatch/rebalance/history` | Applied, rejected and stale proposals, and reassignment rows, newest first (200 max each). Rows of proposals deleted by a reseed are hidden |
 
 **Apply** runs in one transaction. Every move is checked again: the job is
 still on its source crew and unstarted, and the target is still on shift and
@@ -155,12 +155,22 @@ are published, plus `oms.dispatch.rebalance`
 (`proposed` / `applied` / `rejected` / `stale` / `superseded`), which the
 Dispatch tab listens to.
 
-**Field status guard.** `PATCH /api/mobile/jobs/:id/status` answers
-`409 NOT_YOUR_JOB` when the crew sending the update (the token's `crew_id`
-claim, else `crewId` in the body) no longer holds the job, or the job has no
-crew. The write is conditional on the crew, so a rebalance that commits at
-the same moment wins. A `field_crew` login without a crew id gets
-`403 NO_CREW_ID`.
+**Field status guard.** `PATCH /api/mobile/jobs/:id/status` follows the
+planned-outage rules. A crew is identified only by the `crew_id` claim of a
+`field_crew` token, never by the request body. It gets `409 NOT_YOUR_JOB`
+when it no longer holds the job, or the job has no crew. A `field_crew`
+login without a `crew_id` claim gets `403 NO_CREW_ID`, and a login that is
+neither `field_crew` nor an operator (`oms_operator` / `system_admin`) gets
+`403 FORBIDDEN`. Operators may update on a crew's behalf; when they send
+`crewId` (the crew app's demo login does), it is checked the same way. The
+write is conditional on the crew, so a rebalance that commits at the same
+moment wins. When a job reaches `Work Complete`, the crew's `job_id` moves
+to its next active job and its status stays `in_transit` if one is left
+(`available` only when none is), unless the crew is off shift.
+
+Manual assign (`POST /incidents/:id/assign`) writes its incident event,
+`dispatch.assign` audit row and `manual_assign` reassignment row under the
+token's username (`401 NO_IDENTITY` without one).
 
 ## Audit log
 
@@ -171,7 +181,10 @@ Every move is recorded twice:
   (`overload`, `crew_off_shift`, the unassignable reason, or
   `manual_assign`), `actor` (the dispatcher's username), `proposal_id`, `ts`.
   The table is append-only: a trigger created in `migrate()` refuses
-  UPDATE, DELETE and TRUNCATE. The seed does not clear it either.
+  UPDATE, DELETE and TRUNCATE. The seed does not clear it either, and
+  `seed:oms03` reuses the job ids JOB-101..JOB-109, so after a reseed only
+  read rows newer than the seed time. The history endpoint hides rows whose
+  proposal the reseed deleted, but earlier `manual_assign` rows stay.
 - **`audit_log`**: `dispatch.rebalance.propose`, `dispatch.rebalance.apply`,
   `dispatch.rebalance.reject`, `dispatch.settings`, `crew.create`,
   `crew.update` and `dispatch.assign`, each with the actor.
@@ -208,8 +221,11 @@ The crew APK is the Expo app at the repo root (see `LEGACY.md` and
 **These app changes need a new EAS build**
 (`eas build --profile test --platform android`). Until then, installed
 phones keep the 30 s poll and the stale-job behaviour. They also do not send
-`crewId`, so for logins without a `crew_id` claim (demo accounts mapped by
-username) the server cannot refuse their stale updates.
+`crewId`, so updates from the operator demo login (`test.operator`, mapped
+to C003 by username) are not checked against the job's crew. Logins with no
+operator or `field_crew` role (for example `test.scada`) can no longer
+update unplanned jobs from the app: give crew accounts the `field_crew`
+role and a `crew_id` claim in the realm (open item).
 
 ## Known issues
 

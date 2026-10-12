@@ -27,22 +27,25 @@ export default function Dispatch() {
 
   const wlErr = useRef(null);
   const refreshTimer = useRef(null);
+  const historyTimer = useRef(null);
   // quiet: background refreshes only toast a workload error when it is a new one.
   const loadWorkload = (quiet) => dispatchApi.workload()
     .then((w) => { setWl(w); wlErr.current = null; })
     .catch((e) => { if (!quiet || wlErr.current !== e.message) toast(`Workload: ${e.message}`, 'err'); wlErr.current = e.message; });
   const loadHistory = () => dispatchApi.history().then(setHistory).catch(() => {});
+  const historySoon = () => { clearTimeout(historyTimer.current); historyTimer.current = setTimeout(loadHistory, 400); };
   const loadLive = (quiet) => { api.incidents().then(setInc); api.crews().then(setCrews); loadWorkload(quiet); };
   const load = () => { loadLive(false); loadHistory(); };
   // crew.updated fires on every GPS tick, so coalesce bursts into one refresh.
   const refreshSoon = () => { clearTimeout(refreshTimer.current); refreshTimer.current = setTimeout(() => loadLive(true), 400); };
   useEffect(() => {
     load(); api.callAreas().then(setAreas).catch(() => setAreas([]));
-    return () => clearTimeout(refreshTimer.current);
+    return () => { clearTimeout(refreshTimer.current); clearTimeout(historyTimer.current); };
   }, []); // eslint-disable-line
   useLiveRefresh(TOPICS, refreshSoon);
-  // History only changes when a proposal is applied or rejected.
-  useLiveRefresh(['oms.dispatch.rebalance'], loadHistory);
+  // History changes when a proposal is decided, or when a manual assign moves
+  // a job (logged as manual_assign; that only publishes job/crew events).
+  useLiveRefresh(['oms.dispatch.rebalance', 'crew.job.updated'], historySoon);
 
   const wlCrews = wl?.crews || [];
   const crewName = (id) => wlCrews.find((c) => c.id === id)?.name || crews.find((c) => c.id === id)?.name || id;
