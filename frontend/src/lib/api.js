@@ -47,6 +47,10 @@ export const api = {
   messages: (id) => req('GET', `/incidents/${id}/messages`),
   photos: (id) => req('GET', `/incidents/${id}/photos`),
   assetScans: (id) => req('GET', `/incidents/${id}/asset-scans`),
+  // OMS-03 crew job workflow: each crew job's lock state, completion form and
+  // the photos/scans that reached it after it was locked.
+  fieldReport: (id) => req('GET', `/incidents/${id}/field-report`),
+  returnForCorrection: (id, reason) => req('POST', `/incidents/${id}/return-for-correction`, { reason }),
   photoDetail: (photoId) => req('GET', `/mobile/photos/${photoId}`),
   postMessage: (id, body) => req('POST', `/incidents/${id}/messages`, { body }),
   setErt: (id, ert) => req('PATCH', `/incidents/${id}/ert`, { ert }),
