@@ -26,6 +26,7 @@ import { plannedComplaintDecision } from '../domain/plannedComplaints.js';
 import { dispatchRoutes } from './dispatch.js';
 import { PRIORITY_CLASSES, isActive, isMovable, priorityInfo } from '../domain/rebalance.js';
 import { isOperator } from '../domain/plannedOutage.js';
+import { normalizeStatus, isCrewStatus, decideStatus, undoOpenUntil, isLocked, RESTORED } from '../domain/jobWorkflow.js';
 
 export const api = Router();
 
@@ -51,6 +52,71 @@ api.use(plannedOutageRoutes);
 api.use(dispatchRoutes);
 
 const actor = (req) => req.header('x-user') || 'operator';
+
+// ---------- crew ownership (OMS-03) ----------
+// A token with a crew_id may only read or write its own crew and that crew's
+// jobs; a field_crew token without a crew_id gets nothing. The control room
+// (oms_operator/system_admin) and the other dashboard logins are unaffected.
+const NO_CREW_ID = { code: 'NO_CREW_ID', message: 'this login has no crew id; sign in with a crew account' };
+function crewAllowed(req, res, crewId) {
+  const who = req.user || {};
+  if (isOperator(who)) return true;
+  if (who.crewId) {
+    if (who.crewId === crewId) return true;
+    res.status(403).json({ code: 'NOT_YOUR_CREW', message: 'a crew can only see and report for itself' });
+    return false;
+  }
+  if (who.roles?.includes('field_crew')) {
+    res.status(403).json(NO_CREW_ID);
+    return false;
+  }
+  return true;
+}
+// Loads the job and applies the same rule to the job's crew. Sends the 404/403
+// itself and returns null when the request must stop.
+async function jobFor(req, res) {
+  const job = await repo.job(req.params.id);
+  if (!job) {
+    res.status(404).json({ error: 'not found' });
+    return null;
+  }
+  const who = req.user || {};
+  if (isOperator(who)) return job;
+  if (who.crewId) {
+    if (job.crew_id === who.crewId) return job;
+    res.status(403).json({ code: 'NOT_YOUR_JOB', message: 'this job belongs to another crew' });
+    return null;
+  }
+  if (who.roles?.includes('field_crew')) {
+    res.status(403).json(NO_CREW_ID);
+    return null;
+  }
+  return job;
+}
+
+// ---------- finished fault jobs: undo window and lock (OMS-03) ----------
+// Planned-outage jobs are never locked here (their own rules apply).
+async function lockInfo(job) {
+  if (job.incident_id && (await repo.isPlannedIncident(job.incident_id))) return { planned: true, locked: false, undoUntil: null };
+  const status = job.incident_id ? (await repo.incident(job.incident_id))?.status : null;
+  return { planned: false, locked: isLocked(job, status), undoUntil: undoOpenUntil(job, status) };
+}
+// A crew write that is not applied: 200 { applied:false, reason } so the
+// phone's pending-sync queue drops it, plus ONE timeline event per (job,
+// what, status, client time) so the dispatcher sees it however often the
+// phone resends. rawTs is the time exactly as the phone sent it (the same on
+// every resend); clientTs is that time corrected for the phone's clock.
+async function notApplied(res, job, { kind, status = '', clientTs, rawTs, reason, detail }) {
+  const at = clientTs || new Date().toISOString();
+  const key = Number.isFinite(Date.parse(rawTs)) ? new Date(rawTs).toISOString() : at;
+  if ((await repo.recordLateUpdate(job.id, kind, status, key, reason)) && job.incident_id) {
+    const what = detail || `${kind}${status ? ' ' + status : ''}`;
+    await repo.addIncidentEvent(job.incident_id, 'Crew', 'field', `late update from crew not applied: ${reason} (job ${job.id}, ${what}, made ${at})`);
+    bus.publish(TOPICS.INCIDENT_UPDATED, await repo.incident(job.incident_id));
+  }
+  const current = await repo.job(job.id);
+  return res.json({ ...current, applied: false, reason, job: current, ...(await lockInfo(current)) });
+}
 // ---------- network topology (real Haridwar GIS, loaded once - unchanged, no DB) ----------
 const _dir = dirname(fileURLToPath(import.meta.url));
 let NETWORK = null;
@@ -116,19 +182,22 @@ api.get('/incidents/:id/asset-scans', async (req, res) => res.json(await repo.as
 // just resolving job/crew -> incident_id and delegating to the existing
 // repo.messages()/repo.addMessage() functions above.
 api.get('/mobile/jobs/:id/messages', async (req, res) => {
-  const job = await repo.job(req.params.id);
-  if (!job) return res.status(404).json({ error: 'not found' });
+  const job = await jobFor(req, res);
+  if (!job) return;
   if (!job.incident_id) return res.json([]);
   res.json(await repo.messages(job.incident_id));
 });
 
 api.post('/mobile/jobs/:id/messages', async (req, res) => {
-  const job = await repo.job(req.params.id);
-  if (!job) return res.status(404).json({ error: 'not found' });
+  const job = await jobFor(req, res);
+  if (!job) return;
   if (!job.incident_id) return res.status(400).json({ error: 'job has no linked incident' });
   const { body } = req.body || {};
   if (!body || !String(body).trim()) {
     return res.status(400).json({ error: 'body required' });
+  }
+  if ((await lockInfo(job)).locked) {
+    return notApplied(res, job, { kind: 'message', reason: 'job locked', detail: `message "${String(body).trim().slice(0, 200)}"` });
   }
   const sender = req.user?.username || 'crew';
   const msg = await repo.addMessage(job.incident_id, sender, 'field_crew_coordinator', String(body).trim());
@@ -140,6 +209,7 @@ api.post('/mobile/jobs/:id/messages', async (req, res) => {
 // to them, newest last. Simple default: there's no single ongoing crew
 // thread, so this unions each active job's incident thread instead.
 api.get('/mobile/crews/:id/messages', async (req, res) => {
+  if (!crewAllowed(req, res, req.params.id)) return;
   const jobs = await repo.jobsForCrew(req.params.id);
   const incidentIds = [...new Set(jobs.map((j) => j.incident_id).filter(Boolean))];
   const threads = await Promise.all(incidentIds.map((id) => repo.messages(id)));
@@ -147,7 +217,7 @@ api.get('/mobile/crews/:id/messages', async (req, res) => {
   res.json(all);
 });
 
-api.post('/incidents', async (req, res) => {
+api.post('/incidents', requireRole('oms_operator', 'system_admin'), async (req, res) => {
   const b = req.body || {};
   if (!b.zone || !b.severity) return res.status(400).json({ error: 'zone and severity are required (FR-OMS-002)' });
   const id = await repo.nextIncidentId();
@@ -268,7 +338,7 @@ api.post('/incidents/:id/assign', requireRole('oms_operator', 'system_admin'), a
     job = await repo.createJob({ id, incident_id: inc.id, crew_id: crew.id, status: 'Acknowledged',
       address: inc.zone, updated_at: new Date().toISOString(), ...fields });
   }
-  await repo.addJobUpdate(job.id, job.status, null, null, existing ? `Assigned to ${crew.id}` : null);
+  await repo.addJobUpdate(job.id, job.status, null, null, existing ? `Assigned to ${crew.id}` : null, null, 'dispatch');
   if (fromCrew && fromCrew !== crew.id) bus.publish(TOPICS.CREW_UPDATED, await repo.crew(fromCrew));
   await repo.addIncidentEvent(inc.id, who, 'assigned', `${crew.name} assigned`);
   await repo.audit(who, 'dispatch.assign', `${inc.id}-${crew.id}`);
@@ -690,6 +760,7 @@ api.get('/analytics/outage-frequency', async (req, res) => {
 });
 // ---------- crew app (mobile) ----------
 api.get('/mobile/crews/:id/jobs', async (req, res) => {
+  if (!crewAllowed(req, res, req.params.id)) return;
   // NOTE: was a sync `.map()` with a repo lookup inside - under async repo
   // calls that returns an array of unresolved Promises. Use Promise.all instead.
   const rawJobs = await repo.jobsForCrew(req.params.id);
@@ -697,12 +768,14 @@ api.get('/mobile/crews/:id/jobs', async (req, res) => {
   // job's own column (a Medical call on the incident makes it Critical).
   const jobs = await Promise.all(rawJobs.map(async (j) => {
     const { priority: effectivePriority, medical } = priorityInfo(j);
-    return { ...j, effectivePriority, medical, incident: await repo.incident(j.incident_id) };
+    // OMS-03: locked / undoUntil let the app show a finished job read-only or offer Reopen.
+    return { ...j, effectivePriority, medical, incident: await repo.incident(j.incident_id), ...(await lockInfo(j)) };
   }));
   res.json(jobs);
 });
 
 api.get('/mobile/crews/:id', async (req, res) => {
+  if (!crewAllowed(req, res, req.params.id)) return;
   const crew = await repo.crew(req.params.id);
   if (!crew) return res.status(404).json({ error: 'not found' });
   res.json(crew);
@@ -718,6 +791,7 @@ api.post('/mobile/crews/:id/location', async (req, res) => {
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
     return res.status(400).json({ error: 'lat/lon required' });
   }
+  if (!crewAllowed(req, res, req.params.id)) return;
   const crew = await repo.crew(req.params.id);
   if (!crew) return res.status(404).json({ error: 'not found' });
   const updated = await repo.updateCrew(req.params.id, { lat, lon, location_updated_at: new Date().toISOString() });
@@ -756,6 +830,7 @@ function clientTime(ts, sentAt) {
 api.post('/mobile/crews/:id/locations', async (req, res) => {
   const crewId = req.params.id;
   if (!ownsCrew(req, crewId)) return res.status(403).json({ error: 'cannot report location for another crew' });
+  if (!crewAllowed(req, res, crewId)) return;
   const input = req.body?.points;
   if (!Array.isArray(input) || !input.length) return res.status(400).json({ error: 'points[] required' });
   if (input.length > MAX_LOCATION_BATCH) return res.status(413).json({ error: `max ${MAX_LOCATION_BATCH} points per batch` });
@@ -789,6 +864,7 @@ const TRACKING_OFF_REASONS = {
 api.post('/mobile/crews/:id/tracking', async (req, res) => {
   const crewId = req.params.id;
   if (!ownsCrew(req, crewId)) return res.status(403).json({ error: 'cannot report tracking for another crew' });
+  if (!crewAllowed(req, res, crewId)) return;
   const { state, reason } = req.body || {};
   if (state !== 'on' && state !== 'off') return res.status(400).json({ error: 'state must be "on" or "off"' });
   if (state === 'off' && !TRACKING_OFF_REASONS[reason]) {
@@ -818,6 +894,7 @@ api.post('/mobile/crews/:id/tracking', async (req, res) => {
 
 // Breadcrumb trail for dispatch, e.g. /mobile/crews/C003/track?from=...&to=...
 api.get('/mobile/crews/:id/track', async (req, res) => {
+  if (!crewAllowed(req, res, req.params.id)) return;
   const to = req.query.to ? new Date(req.query.to) : new Date();
   const from = req.query.from ? new Date(req.query.from) : new Date(to.getTime() - 12 * 3600 * 1000);
   if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return res.status(400).json({ error: 'invalid from/to' });
@@ -905,11 +982,14 @@ api.get('/mobile/jobs/:id/messages', async (req, res) => {
   res.json(job.incident_id ? await repo.messages(job.incident_id) : []);
 });
 
-api.get('/mobile/jobs/:id/history', async (req, res) => res.json(await repo.jobUpdates(req.params.id)));
+api.get('/mobile/jobs/:id/history', async (req, res) => {
+  if (!(await jobFor(req, res))) return;
+  res.json(await repo.jobUpdates(req.params.id));
+});
 
 api.post('/mobile/jobs/:id/assets/scans', async (req, res) => {
-  const job = await repo.job(req.params.id);
-  if (!job) return res.status(404).json({ error: 'job not found' });
+  const job = await jobFor(req, res);
+  if (!job) return;
   const { rawValue, assetId, assetDetails, lat, lon, crewId, scannedAt, sentAt } = req.body || {};
   if (!rawValue || typeof rawValue !== 'string') {
     return res.status(400).json({ error: 'rawValue is required' });
@@ -917,31 +997,38 @@ api.post('/mobile/jobs/:id/assets/scans', async (req, res) => {
   if (!Number.isFinite(Number(lat)) || !Number.isFinite(Number(lon))) {
     return res.status(400).json({ error: 'latitude and longitude are required' });
   }
+  // A crew is the token's crew; only the control room may name one in the body.
+  const scanCrew = req.user?.crewId || (isOperator(req.user) && typeof crewId === 'string' ? crewId : null) || job.crew_id || null;
+  const scannedTs = clientTime(scannedAt, sentAt);
+  // A scan that reaches a locked job is kept but marked and hidden from the crew.
+  const locked = (await lockInfo(job)).locked;
   const scan = await repo.addAssetScan({
     id: `AS${Date.now()}${Math.random().toString(36).slice(2, 8)}`,
     job_id: job.id,
-    crew_id: crewId || job.crew_id || null,
+    crew_id: scanCrew,
     asset_id: assetId || rawValue,
     raw_value: rawValue,
     asset_details: assetDetails && typeof assetDetails === 'object' ? assetDetails : {},
     lat: Number(lat),
     lon: Number(lon),
-    scanned_at: clientTime(scannedAt, sentAt),
+    scanned_at: scannedTs,
+    not_applied_reason: locked ? 'job locked' : null,
   });
   bus.publish(TOPICS.JOB_UPDATED, job); // dashboard's asset-scan panel refreshes
-  res.status(201).json(scan);
+  if (locked) return notApplied(res, job, { kind: 'scan', clientTs: scannedTs, rawTs: scannedAt, reason: 'job locked', detail: `QR scan ${scan.asset_id} (kept, id ${scan.id})` });
+  res.status(201).json({ ...scan, applied: true });
 });
 
 api.get('/mobile/jobs/:id/assets/scans', async (req, res) => {
-  const job = await repo.job(req.params.id);
-  if (!job) return res.status(404).json({ error: 'job not found' });
-  res.json(await repo.assetScansForJob(job.id));
+  const job = await jobFor(req, res);
+  if (!job) return;
+  res.json(await repo.assetScansForJob(job.id, isOperator(req.user)));
 });
 
 // Compress every incoming photo before PostgreSQL storage.
 api.post('/mobile/jobs/:id/photos', async (req, res) => {
-  const job = await repo.job(req.params.id);
-  if (!job) return res.status(404).json({ error: 'not found' });
+  const job = await jobFor(req, res);
+  if (!job) return;
   const { dataUrl, lat, lon, note, technicianId, metadata, capturedAt, sentAt } = req.body || {};
   if (!dataUrl || typeof dataUrl !== 'string') {
     return res.status(400).json({ error: 'dataUrl required' });
@@ -953,21 +1040,28 @@ api.post('/mobile/jobs/:id/photos', async (req, res) => {
   } catch (e) {
     return res.status(400).json({ error: `invalid image: ${e.message}` });
   }
+  const capturedTs = clientTime(capturedAt, sentAt);
+  // A photo that reaches a locked job is kept but marked and hidden from the crew.
+  const locked = (await lockInfo(job)).locked;
   const photo = await repo.addJobPhoto(req.params.id, {
     image, originalContentType: original.contentType, originalBytes: original.buffer.length,
-  }, lat, lon, note, technicianId, metadata, clientTime(capturedAt, sentAt));
-  res.status(201).json(photo);
+  }, lat, lon, note, technicianId, metadata, capturedTs, locked ? 'job locked' : null);
+  if (locked) return notApplied(res, job, { kind: 'photo', clientTs: capturedTs, rawTs: capturedAt, reason: 'job locked', detail: `photo (kept, id ${photo.id})` });
+  res.status(201).json({ ...photo, applied: true });
 });
 
 // List photo metadata for a job
 api.get('/mobile/jobs/:id/photos', async (req, res) => {
-  res.json(await repo.jobPhotos(req.params.id));
+  if (!(await jobFor(req, res))) return;
+  res.json(await repo.jobPhotos(req.params.id, isOperator(req.user)));
 });
 
 // Fetch one full photo (data URL) by id
 api.get('/mobile/photos/:photoId', async (req, res) => {
   const row = await repo.jobPhotoById(req.params.photoId);
   if (!row) return res.status(404).json({ error: 'not found' });
+  req.params.id = row.job_id;
+  if (!(await jobFor(req, res))) return;
   const { image_data, ...photo } = row;
   // Compressed rows keep only the bytes; rebuild the data URL the dashboard expects.
   if (image_data) photo.data_url = `data:${row.content_type};base64,${image_data.toString('base64')}`;
@@ -994,34 +1088,57 @@ api.patch('/mobile/jobs/:id/status', async (req, res) => {
   const notYours = () => res.status(409).json({ code: 'NOT_YOUR_JOB', message: 'this job was reassigned to another crew' });
   if (job.crew_id == null || (namedCrew && namedCrew !== job.crew_id)) return notYours();
   const { lat, lon, note } = req.body || {};
-  const status = req.body?.status === 'Work Finished' ? 'Work Complete' : req.body?.status;
+  // OMS-03: the server decides (domain/jobWorkflow.js). An unknown status is
+  // malformed (400); a late, backward, identical or locked one is answered
+  // 200 { applied:false, reason } so the phone's queue drops it.
+  const status = normalizeStatus(req.body?.status);
+  if (!isCrewStatus(status)) return res.status(400).json({ code: 'BAD_STATUS', message: 'status must be one of: Acknowledged, En Route, On Site, Work Started, Work Complete (or Work Finished)' });
   // When the crew made the change, which is earlier than now if the phone
   // was offline and this comes from its pending-sync queue.
   const ts = clientTime(req.body?.ts, req.body?.sentAt);
-  // An update older than the job's current one (queued offline, synced after
-  // a newer one) goes into the history but must not roll the status back.
-  const isLatest = !job.updated_at || new Date(ts) >= new Date(job.updated_at);
-  let written = job;
-  if (isLatest) {
-    // Conditional on the crew just checked, so a rebalance committing in between wins.
-    written = await repo.updateJobForCrew(job.id, job.crew_id, { status, updated_at: ts });
-    if (!written) return notYours();
+  const source = operator ? 'dispatch' : 'crew';
+  if ((await lockInfo(job)).locked) return notApplied(res, job, { kind: 'status', status, clientTs: ts, rawTs: req.body?.ts, reason: 'job locked' });
+
+  // Decided on the job as it is now; the write only lands if the job is still
+  // on this crew and at that status, else it is decided again on the new state.
+  let current = job, decision, written;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    decision = decideStatus({ current: current.status, next: status, ts, latestCrewTs: await repo.latestCrewUpdateTs(job.id) });
+    if (!decision.applied) break;
+    const patch = { status, updated_at: new Date(Math.max(Date.parse(ts), Date.parse(current.updated_at || 0) || 0)).toISOString() };
+    if (status === 'Work Complete') patch.completed_at = new Date().toISOString(); // server time: starts the undo window
+    written = await repo.updateJobIf(job.id, current.crew_id, current.status, patch);
+    if (written) break;
+    current = await repo.job(job.id);
+    if (!current || current.crew_id !== job.crew_id) return notYours();
   }
-  await repo.addJobUpdate(job.id, status, lat ?? null, lon ?? null, note ?? null, ts);
-  if (job.incident_id) await repo.addIncidentEvent(job.incident_id, 'Crew', 'field', 'Status: ' + status, ts);
-  if (isLatest) {
-    // reflect crew status + incident progress back to control room (an
-    // off-shift crew stays off_shift: availability is the dispatcher's call)
-    const map = { 'En Route': 'in_transit', 'On Site': 'in_service', 'Work Started': 'in_service', 'Work Complete': 'available' };
-    if (map[status] && (await repo.crew(written.crew_id))?.on_shift !== false) await repo.updateCrew(written.crew_id, { status: map[status] });
-    // A finished job: point the crew at its next active job (a rebalance can
-    // leave several), back to in_transit if one remains.
-    if (!isActive({ status })) await repo.syncCrew(written.crew_id);
-    if (status === 'On Site' && job.incident_id) await repo.updateIncident(job.incident_id, { status: 'in_progress' });
-    if (status === 'Work Complete' && job.incident_id) {
-      await repo.updateIncident(job.incident_id, { status: 'pending' });
-      await repo.addIncidentEvent(job.incident_id, 'Crew', 'field', 'Work complete - awaiting verification', ts);
+  if (!decision.applied) {
+    if (!decision.notify) {
+      const now = await repo.job(job.id);
+      return res.json({ ...now, applied: false, reason: decision.reason, job: now, ...(await lockInfo(now)) });
     }
+    return notApplied(res, job, { kind: 'status', status, clientTs: ts, rawTs: req.body?.ts, reason: decision.reason });
+  }
+  if (!written) return res.status(503).json({ code: 'BUSY', message: 'the job kept changing; try again' });
+
+  const skipped = decision.skipped.length ? ` (skipped ${decision.skipped.join(', ')})` : '';
+  await repo.addJobUpdate(job.id, status, lat ?? null, lon ?? null, [note, skipped.trim()].filter(Boolean).join(' ') || null, ts, source);
+  if (job.incident_id) await repo.addIncidentEvent(job.incident_id, operator ? (who.username || 'Control room') : 'Crew', 'field', 'Status: ' + status + skipped, ts);
+  // reflect crew status + incident progress back to control room (an
+  // off-shift crew stays off_shift: availability is the dispatcher's call)
+  const map = { 'En Route': 'in_transit', 'On Site': 'in_service', 'Work Started': 'in_service', 'Work Complete': 'available' };
+  if (map[status] && (await repo.crew(written.crew_id))?.on_shift !== false) await repo.updateCrew(written.crew_id, { status: map[status] });
+  // A finished job: point the crew at its next active job (a rebalance can
+  // leave several), back to in_transit if one remains.
+  if (!isActive({ status })) await repo.syncCrew(written.crew_id);
+  // A skipped On Site still means the crew got there.
+  if ((status === 'On Site' || status === 'Work Started') && job.incident_id) {
+    const inc = await repo.incident(job.incident_id);
+    if (inc && ['open', 'dispatched'].includes(inc.status)) await repo.updateIncident(job.incident_id, { status: 'in_progress' });
+  }
+  if (status === 'Work Complete' && job.incident_id) {
+    await repo.updateIncident(job.incident_id, { status: 'pending' });
+    await repo.addIncidentEvent(job.incident_id, 'Crew', 'field', 'Work complete - awaiting verification', ts);
   }
   if (job.incident_id) await cacheDel('indicators');
   const updated = await repo.job(job.id);
@@ -1029,7 +1146,132 @@ api.patch('/mobile/jobs/:id/status', async (req, res) => {
   bus.publish(TOPICS.JOB_UPDATED, updated);
   bus.publish(TOPICS.CREW_UPDATED, updatedCrew);
   if (job.incident_id) bus.publish(TOPICS.INCIDENT_UPDATED, await repo.incident(job.incident_id));
-  res.json(updated);
+  // The job's fields stay at the top level for app versions that read them there.
+  res.json({ ...updated, applied: true, skipped: decision.skipped, job: updated, ...(await lockInfo(updated)) });
+});
+
+// ---------- OMS-03: completion form, undo, return for correction ----------
+// Fault jobs only; planned-outage jobs have their own close-out (permits).
+const notAFaultJob = (res) => res.status(409).json({ code: 'NOT_A_FAULT_JOB', message: 'planned-outage jobs are closed out through their permit' });
+const isObj = (v) => v != null && typeof v === 'object' && !Array.isArray(v);
+
+// The crew's completion form (diagnosis, parts used, restored, sign-off).
+// Optional for now: a job reaches Work Complete without it. Idempotent: the
+// same clientRequestId (or, without one, the same job + submittedAt) returns
+// the stored row instead of adding another.
+api.post('/mobile/jobs/:id/completion', async (req, res) => {
+  const job = await jobFor(req, res);
+  if (!job) return;
+  const info = await lockInfo(job);
+  if (info.planned) return notAFaultJob(res);
+  const b = req.body || {};
+  if (b.diagnosis != null && !isObj(b.diagnosis)) return res.status(400).json({ code: 'BAD_REQUEST', message: 'diagnosis must be an object' });
+  if (b.partsUsed != null && !Array.isArray(b.partsUsed)) return res.status(400).json({ code: 'BAD_REQUEST', message: 'partsUsed must be a list' });
+  if (b.signOff != null && !isObj(b.signOff)) return res.status(400).json({ code: 'BAD_REQUEST', message: 'signOff must be an object' });
+  if (b.restored != null && !RESTORED.includes(b.restored)) return res.status(400).json({ code: 'BAD_REQUEST', message: 'restored must be yes, partial or no' });
+  const submittedAt = clientTime(b.submittedAt, b.sentAt);
+  const clientRequestId = typeof b.clientRequestId === 'string' && b.clientRequestId ? b.clientRequestId : `${job.id}@${submittedAt}`;
+  if (info.locked) return notApplied(res, job, { kind: 'completion', clientTs: submittedAt, rawTs: b.submittedAt, reason: 'job locked' });
+  if (!['Work Started', 'Work Complete'].includes(job.status)) {
+    return notApplied(res, job, { kind: 'completion', clientTs: submittedAt, rawTs: b.submittedAt, reason: `job is ${job.status}, not started` });
+  }
+  const { row, created } = await repo.addJobCompletion({
+    job_id: job.id, incident_id: job.incident_id, crew_id: job.crew_id, client_request_id: clientRequestId,
+    diagnosis: b.diagnosis ?? null, parts_used: b.partsUsed ?? null, restored: b.restored ?? null, sign_off: b.signOff ?? null,
+    submitted_at: submittedAt, submitted_by: req.user?.username || null,
+  });
+  if (created && job.incident_id) {
+    const restored = row.restored ? `, supply restored: ${row.restored}` : '';
+    await repo.addIncidentEvent(job.incident_id, req.user?.username || 'Crew', 'field', `Field completion report submitted for job ${job.id}${restored}`, submittedAt);
+    bus.publish(TOPICS.INCIDENT_UPDATED, await repo.incident(job.incident_id));
+  }
+  bus.publish(TOPICS.JOB_UPDATED, await repo.job(job.id));
+  res.status(created ? 201 : 200).json({ applied: true, duplicate: !created, completion: row });
+});
+
+api.get('/mobile/jobs/:id/completion', async (req, res) => {
+  const job = await jobFor(req, res);
+  if (!job) return;
+  res.json(await repo.jobCompletions(job.id));
+});
+
+// Undo: the crew reopens its own finished job while the window is open
+// (JOB_UNDO_WINDOW_MIN, default 10) and the incident is still pending.
+api.post('/mobile/jobs/:id/reopen', async (req, res) => {
+  const job = await jobFor(req, res);
+  if (!job) return;
+  const info = await lockInfo(job);
+  if (info.planned) return notAFaultJob(res);
+  const who = req.user || {};
+  const now = new Date().toISOString();
+  if (job.status !== 'Work Complete') return notApplied(res, job, { kind: 'reopen', clientTs: now, reason: `job is ${job.status}, not completed` });
+  if (!info.undoUntil) return notApplied(res, job, { kind: 'reopen', clientTs: now, reason: 'job locked' });
+  const written = await repo.updateJobIf(job.id, job.crew_id, 'Work Complete', { status: 'Work Started', completed_at: null, updated_at: now });
+  if (!written) return notApplied(res, job, { kind: 'reopen', clientTs: now, reason: 'job changed meanwhile' });
+  const by = who.username || 'Crew';
+  await repo.addJobUpdate(job.id, 'Work Started', null, null, `Reopened by ${by} (undo of Work Complete)`, now, isOperator(who) ? 'dispatch' : 'crew');
+  if ((await repo.crew(job.crew_id))?.on_shift !== false) await repo.updateCrew(job.crew_id, { status: 'in_service' });
+  await repo.syncCrew(job.crew_id);
+  if (job.incident_id) {
+    await repo.updateIncident(job.incident_id, { status: 'in_progress' });
+    await repo.addIncidentEvent(job.incident_id, by, 'field', `Crew reopened job ${job.id} (undo of Work Complete); back to In Progress`, now);
+    await cacheDel('indicators');
+  }
+  await repo.audit(by, 'job.reopen', job.id);
+  const updated = await repo.job(job.id);
+  bus.publish(TOPICS.JOB_UPDATED, updated);
+  bus.publish(TOPICS.CREW_UPDATED, await repo.crew(job.crew_id));
+  if (job.incident_id) bus.publish(TOPICS.INCIDENT_UPDATED, await repo.incident(job.incident_id));
+  res.json({ ...updated, applied: true, job: updated, ...(await lockInfo(updated)) });
+});
+
+// The dispatcher sends a Pending Verification fault incident back to its
+// crew: incident -> in_progress, the completed job -> Requires Revisit (the
+// crew starts again), crew -> in_service. Reason required.
+api.post('/incidents/:id/return-for-correction', requireRole('oms_operator', 'system_admin'), async (req, res) => {
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+  if (!reason) return res.status(400).json({ code: 'REASON_REQUIRED', message: 'say what needs correcting' });
+  const inc = await repo.incident(req.params.id);
+  if (!inc) return res.status(404).json({ error: 'not found' });
+  if (await repo.isPlannedIncident(inc.id)) return notAFaultJob(res);
+  if (inc.status !== 'pending') return res.status(409).json({ code: 'NOT_PENDING', message: 'only a Pending Verification incident can be returned for correction' });
+  const job = (await repo.jobsForIncident(inc.id)).find((j) => j.status === 'Work Complete' && j.crew_id);
+  if (!job) return res.status(409).json({ code: 'NO_COMPLETED_JOB', message: 'this incident has no completed crew job to return' });
+  const by = req.user?.username || actor(req);
+  const now = new Date().toISOString();
+  const written = await repo.updateJobIf(job.id, job.crew_id, 'Work Complete', { status: 'Requires Revisit', completed_at: null, updated_at: now });
+  if (!written) return res.status(409).json({ code: 'JOB_CHANGED', message: 'the job changed meanwhile; reload and try again' });
+  await repo.addJobUpdate(job.id, 'Requires Revisit', null, null, `Returned for correction by ${by}: ${reason}`, now, 'dispatch');
+  if ((await repo.crew(job.crew_id))?.on_shift !== false) await repo.updateCrew(job.crew_id, { status: 'in_service' });
+  await repo.syncCrew(job.crew_id);
+  await repo.updateIncident(inc.id, { status: 'in_progress' });
+  await repo.addIncidentEvent(inc.id, by, 'status', `Returned for correction (job ${job.id}): ${reason}`, now);
+  await repo.audit(by, 'incident.return_for_correction', inc.id);
+  await cacheDel('indicators');
+  const updated = await repo.incident(inc.id);
+  const updatedJob = await repo.job(job.id);
+  bus.publish(TOPICS.JOB_UPDATED, updatedJob);
+  bus.publish(TOPICS.CREW_UPDATED, await repo.crew(job.crew_id));
+  bus.publish(TOPICS.INCIDENT_UPDATED, updated);
+  res.json({ incident: updated, job: updatedJob });
+});
+
+// The dashboard's "Field completion report": every crew job of the incident
+// with its lock state, newest completion form, and the photos/scans that
+// reached it after it was locked (kept, not applied).
+api.get('/incidents/:id/field-report', async (req, res) => {
+  const inc = await repo.incident(req.params.id);
+  if (!inc) return res.status(404).json({ error: 'not found' });
+  const jobs = await repo.jobsForIncident(inc.id);
+  res.json(await Promise.all(jobs.map(async (j) => ({
+    job: j,
+    ...(await lockInfo(j)),
+    completions: await repo.jobCompletions(j.id),
+    notApplied: {
+      photos: (await repo.jobPhotos(j.id, true)).filter((p) => p.not_applied_reason),
+      scans: (await repo.assetScansForJob(j.id, true)).filter((x) => x.not_applied_reason),
+    },
+  }))));
 });
 
 // ---------- admin ----------

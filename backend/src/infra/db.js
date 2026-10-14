@@ -494,6 +494,59 @@ export async function migrate() {
       FOR EACH STATEMENT EXECUTE FUNCTION prevent_job_reassignments_change();
   `);
 
+  // OMS-03 crew job workflow (domain/jobWorkflow.js). job_updates.source says
+  // who wrote a history row ('crew' or 'dispatch'), so only the crew's own
+  // updates decide whether a queued one arrived late. Rows written before
+  // this column existed are backfilled best effort: the rebalancer's
+  // "Reassigned from"/"Unassigned from" notes and assignment rows are
+  // 'dispatch', everything else is taken as 'crew'.
+  await db.none(`
+    ALTER TABLE job_updates ADD COLUMN IF NOT EXISTS source TEXT;
+    UPDATE job_updates SET source = CASE
+      WHEN note LIKE 'Reassigned from %' OR note LIKE 'Unassigned from %' OR note LIKE 'Assigned to %' THEN 'dispatch'
+      ELSE 'crew' END
+    WHERE source IS NULL;
+    CREATE INDEX IF NOT EXISTS job_updates_job_source_idx ON job_updates(job_id, source, ts DESC);
+
+    -- Server time the job reached Work Complete: starts the crew's undo window.
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+
+    -- A photo or QR scan that reached a locked job is kept (not deleted) but
+    -- marked, hidden from the crew's lists and shown to the control room.
+    ALTER TABLE job_photos ADD COLUMN IF NOT EXISTS not_applied_reason TEXT;
+    ALTER TABLE asset_scans ADD COLUMN IF NOT EXISTS not_applied_reason TEXT;
+
+    -- The crew's completion form. Append-only: a job reopened and finished
+    -- again keeps both forms; the newest is the current one.
+    CREATE TABLE IF NOT EXISTS job_completions (
+      id                TEXT PRIMARY KEY,
+      job_id            TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      incident_id       TEXT,
+      crew_id           TEXT,
+      client_request_id TEXT UNIQUE,
+      diagnosis         JSONB,
+      parts_used        JSONB,
+      restored          TEXT CHECK (restored IN ('yes', 'partial', 'no')),
+      sign_off          JSONB,
+      submitted_at      TIMESTAMPTZ NOT NULL,
+      received_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+      submitted_by      TEXT
+    );
+    CREATE INDEX IF NOT EXISTS job_completions_job_idx ON job_completions(job_id, received_at DESC);
+
+    -- One "late update from crew not applied" timeline event per (job, what,
+    -- status, client time), however often a phone resends it.
+    CREATE TABLE IF NOT EXISTS job_late_updates (
+      job_id    TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      kind      TEXT NOT NULL,
+      status    TEXT NOT NULL DEFAULT '',
+      client_ts TIMESTAMPTZ NOT NULL,
+      reason    TEXT,
+      ts        TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (job_id, kind, status, client_ts)
+    );
+  `);
+
   // ID sequences for incidents.id / complaints.qid. These replace the old
   // SELECT COUNT(*) minting in repo.js, which raced under concurrency and
   // crashed the process on the resulting duplicate-key error (P8.6).
