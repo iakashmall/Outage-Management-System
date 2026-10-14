@@ -1,0 +1,119 @@
+# Full OMS stack for a server: database, cache, backend and web app, all in Docker.
+# Web app on http://<server>:8080  (set OMS_WEB_PORT to change).
+#   docker compose -f docker-compose.deploy.yml up -d --build
+#   docker compose -f docker-compose.deploy.yml run --rm oms-backend node src/infra/seed.js   # first time only
+name: oms
+services:
+  postgres:
+    image: timescale/timescaledb-ha:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: oms
+      POSTGRES_USER: oms
+      POSTGRES_PASSWORD: ${OMS_DB_PASSWORD:-oms}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oms"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+
+  # Login server. The browser talks to it directly, so it is published on 18080 and the web app is built with
+  # VITE_KEYCLOAK_URL=http://${OMS_HOST}:18080 (OMS_HOST = the address users type; replace-old-oms.sh sets it).
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    restart: unless-stopped
+    command: ["start-dev", "--http-port=8080", "--import-realm"]
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: ${OMS_KC_ADMIN_PASSWORD:-admin}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: oms
+      KC_DB_PASSWORD: ${OMS_DB_PASSWORD:-oms}
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded   # login pages are reached through Caddy (https)
+    ports:
+      - "18080:8080"
+    volumes:
+      - ./infra/keycloak-realm.deploy.json:/opt/keycloak/data/import/realm.json:ro
+      - ./infra/keycloak-theme/gridq:/opt/keycloak/themes/gridq:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  # In-house map server: it listens on 127.0.0.1:8095 of this server, so the OMS reaches it the way any other device
+  # does, through the tunnel-only SSH login (mapdev). Needs a key: see deploy/ubuntu/DEPLOY.md, "Map server".
+  map-tunnel:
+    build: ./deploy/map-tunnel
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./deploy/map-tunnel/keys:/keys:ro
+
+  oms-backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      keycloak: { condition: service_started }
+    environment:
+      PORT: "4000"
+      DATABASE_URL: postgres://oms:${OMS_DB_PASSWORD:-oms}@postgres:5432/oms
+      REDIS_URL: redis://redis:6379
+      KEYCLOAK_JWKS_URI: http://keycloak:8080/realms/oms-upcl/protocol/openid-connect/certs
+      EVENT_BUS_DRIVER: memory
+      CORS_ORIGIN: "*"
+      CUSTOMERS_SERVED: "18500"
+      ENABLE_SCADA_SIMULATION: "false"
+      MAP_SERVER_URL: http://map-tunnel:8095
+      OMS_PUBLIC_URL: https://${OMS_HOST:-localhost}:8443
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # lets the backend reach a map server running on the server itself
+    env_file:
+      - path: ./backend/.env.deploy   # optional extras: MAP_*, BREVO_*, NOTIFY_*, REPORT_*
+        required: false
+
+  oms-web:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_BASEMAP_FALLBACK: osm
+        VITE_KEYCLOAK_URL: https://${OMS_HOST:-localhost}:8443
+    restart: unless-stopped
+    depends_on:
+      - oms-backend
+    ports:
+      - "${OMS_WEB_PORT:-8080}:80"
+
+  # HTTPS on :8443 (self-signed). Needed because browsers only allow the login library on https or localhost.
+  oms-caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      OMS_HOST: ${OMS_HOST:-localhost}
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+    depends_on:
+      - oms-web
+      - keycloak
+
+volumes:
+  caddydata:
+  pgdata:
+  redisdata:

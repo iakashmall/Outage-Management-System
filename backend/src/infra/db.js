@@ -478,4 +478,6 @@ export async function migrate() {
     CREATE INDEX IF NOT EXISTS idx_crews_geog ON crews USING GIST (geog);
     CREATE INDEX IF NOT EXISTS idx_complaints_geog ON complaints USING GIST (geog);
   `);
+  const { migrateFeederKpi } = await import('./feederKpiSchema.js');
+  await migrateFeederKpi();
 }

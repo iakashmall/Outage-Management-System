@@ -35,3 +35,6 @@ backend/map-test-server/*.apk
 
 # Crew photos exported from the DB (npm run photos:export)
 photo-export/
+
+# SSH key for the map tunnel (never commit)
+deploy/map-tunnel/keys/

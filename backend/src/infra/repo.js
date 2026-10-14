@@ -2,7 +2,7 @@ import { db } from './db.js';
 import { nanoid } from 'nanoid';
 import { canTransition, LABELS } from '../domain/lifecycle.js';
 import * as rules from '../domain/plannedOutage.js';
-
+import { feederKpiRepo } from './feederKpiRepo.js';
 // The only module that talks SQL. Every function is now async because the
 // pg driver is async (unlike node:sqlite/better-sqlite3, which were sync).
 // Named params use pg-promise's $/name/ syntax instead of the old bare @name.
@@ -109,6 +109,7 @@ async function clientIdTaken(t, table, column, value, exceptId) {
 }
 
 export const repo = {
+  ...feederKpiRepo,
   // ---- incidents
   incidents: () => db.any('SELECT * FROM incidents ORDER BY opened_at DESC'),
   incident: (id) => db.oneOrNone('SELECT * FROM incidents WHERE id=$1', [id]),

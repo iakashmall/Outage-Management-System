@@ -23,7 +23,7 @@ import { nanoid } from 'nanoid';
 import { substationForFeeder } from '../domain/prediction.js';
 import { plannedOutageRoutes } from './plannedOutages.js';
 import { plannedComplaintDecision } from '../domain/plannedComplaints.js';
-
+import { feederKpiRoutes } from './feederKpi.js';
 export const api = Router();
 
 // Every route below is an async handler with no try/catch. If the returned
@@ -44,7 +44,7 @@ for (const method of ['get', 'post', 'patch', 'put', 'delete']) {
 // GET /incidents/:id, PATCH /incidents/:id/status and PATCH
 // /mobile/jobs/:id/status, and passes every other request on unchanged.
 api.use(plannedOutageRoutes);
-
+api.use(feederKpiRoutes);
 const actor = (req) => req.header('x-user') || 'operator';
 // ---------- network topology (real Haridwar GIS, loaded once - unchanged, no DB) ----------
 const _dir = dirname(fileURLToPath(import.meta.url));

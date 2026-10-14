@@ -1,0 +1,17 @@
+# HTTPS front door for the OMS, separate from any other Caddy on the server.
+# One origin serves both the web app and the Keycloak login pages, so the browser never mixes http and https.
+{
+	# Browsers send no SNI for a bare IP address, so say which certificate to use.
+	default_sni {$OMS_HOST}
+	skip_install_trust
+	auto_https disable_redirects
+}
+
+https://{$OMS_HOST}:8443 {
+	tls internal
+
+	@keycloak path /realms/* /resources/* /js/* /admin/* /robots.txt
+	reverse_proxy @keycloak keycloak:8080
+
+	reverse_proxy oms-web:80
+}

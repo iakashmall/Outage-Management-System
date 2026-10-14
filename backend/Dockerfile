@@ -57,6 +57,7 @@ COPY --from=builder --chown=oms:oms /app/node_modules ./node_modules
 COPY --from=builder --chown=oms:oms /app/backend/node_modules ./backend/node_modules
 COPY --from=builder --chown=oms:oms /app/backend/package.json ./backend/package.json
 COPY --from=builder --chown=oms:oms /app/backend/src ./backend/src
+COPY --chown=oms:oms backend/public ./backend/public
 
 WORKDIR /app/backend
 

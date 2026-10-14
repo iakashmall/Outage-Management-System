@@ -10,6 +10,7 @@
     "seed": "node src/infra/seed.js",
     "test": "node src/selftest.js && node src/selftest-oms01.js",
     "test:oms01": "node src/selftest-oms01.js",
+    "test:feederkpi": "node src/selftest-feederkpi.js",
     "tiles:fetch": "node scripts/fetch-tiles.mjs",
     "map:test-server": "node map-test-server/server.mjs",
     "keycloak:mobile": "node scripts/setup-mobile-keycloak.mjs",
@@ -40,4 +41,5 @@
   "devDependencies": {
     "osm-pbf-parser": "^2.3.0"
   }
+  
 }
