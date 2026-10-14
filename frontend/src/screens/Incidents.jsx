@@ -120,7 +120,8 @@ function IncidentDrawer({ inc, onClose, onChange }) {
   // Return for correction replaces the plain "send crew back" step: it needs
   // a reason and reopens the crew's job (Requires Revisit) instead of
   // leaving it locked as Work Complete.
-  const canReturn = inc.status === 'pending' && !inc.plannedOutageId && isControlRoom() && report.some((r) => r.job.status === 'Work Complete');
+  const isPlanned = inc.type === 'Scheduled' || inc.source === 'PLANNED';
+  const canReturn = inc.status === 'pending' && !isPlanned && isControlRoom() && report.some((r) => r.job.status === 'Work Complete');
   const [returning, setReturning] = useState(false);
   const [reason, setReason] = useState('');
   const doReturn = async () => {
@@ -263,6 +264,16 @@ function IncidentDrawer({ inc, onClose, onChange }) {
 // Lock state of the incident's crew job (OMS-03): while the crew can still
 // undo, and once its completion is locked.
 function LockBadge({ locked, undoUntil }) {
+  // Re-render the moment the undo window ends, so an open drawer switches to
+  // "Locked" instead of still offering an undo time in the past.
+  const [, setTick] = useState(0);
+  const until = undoUntil ? new Date(undoUntil).getTime() : 0;
+  useEffect(() => {
+    if (!until || until <= Date.now()) return undefined;
+    const t = setTimeout(() => setTick((n) => n + 1), until - Date.now() + 50);
+    return () => clearTimeout(t);
+  }, [until]);
+  if (until && until <= Date.now()) return <span className="chip chip-ok" title="The undo window is over; use Return for correction">Locked</span>;
   if (undoUntil) return <span className="chip chip-minor" title="The crew can still reopen the job">Crew can undo until {hhmm(undoUntil)}</span>;
   if (locked) return <span className="chip chip-ok" title="Crew writes are no longer applied; use Return for correction">Locked</span>;
   return null;
@@ -470,7 +481,7 @@ function PhotoPanel({ incidentId }) {
               style={{ width: 84, height: 84, borderRadius: 8, overflow: 'hidden', cursor: 'pointer', background: '#f2f5f9', position: 'relative', border: '1px solid var(--line-2)' }}
               title={`${meta.technicianName || p.technician_id || 'Unknown'} - ${hhmm(p.ts)}${p.not_applied_reason ? ` - not applied (${p.not_applied_reason})` : ''}`}
             >
-              {p.not_applied_reason && <span className="chip chip-major" style={{ position: 'absolute', left: 3, top: 3, zIndex: 1 }}>Not applied</span>}
+              {p.not_applied_reason && <span className="chip chip-major" title={`Not applied - ${p.not_applied_reason}; kept for the record`} style={{ position: 'absolute', left: 2, top: 2, zIndex: 1, padding: '0 5px', fontSize: 10 }}>Late</span>}
               {thumbs[p.id] ? (
                 <img src={thumbs[p.id]} alt="Job photo" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
               ) : (
