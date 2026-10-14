@@ -180,7 +180,9 @@ const server = app.listen(0, async () => {
     r = await call('op', 'POST', `/dispatch/rebalance/proposals/${p.id}/apply`);
     check('stale proposal -> 409 STALE_PROPOSAL, nothing moved', r.status === 409 && r.body.code === 'STALE_PROPOSAL'
       && (await crewOf('JOB-102')) === 'C004' && (await repo.proposal(p.id)).status === 'stale', JSON.stringify(r.body.problems));
-    await call('op', 'PATCH', '/mobile/jobs/JOB-104/status', { status: 'Acknowledged', crewId: 'C004' });
+    // Back to Acknowledged for the next steps. Set directly: the status route
+    // no longer moves a job backwards (OMS-03 crew job workflow).
+    await repo.updateJob('JOB-104', { status: 'Acknowledged' });
 
     // Back on shift (balanced, so no proposal), then off again for the reject flow.
     r = await call('op', 'PATCH', '/crews/C004', { on_shift: true });

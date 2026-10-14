@@ -72,7 +72,7 @@ export async function seedOms03Demo() {
       id: `JOB-${n}`, incident_id: id, crew_id: crewId, priority: 'Normal', status: jobStatus, address,
       updated_at: iso(minAgo - 5), estimated_duration_min: minutes, required_skill: skill,
     });
-    await repo.addJobUpdate(`JOB-${n}`, jobStatus, null, null, 'OMS-03 demo');
+    await repo.addJobUpdate(`JOB-${n}`, jobStatus, null, null, 'OMS-03 demo', null, 'dispatch');
     if (jobStatus !== 'Acknowledged' || !firstIncident[crewId]) firstIncident[crewId] = id;
   }
   // crews.job_id points at a started job first (C004's En Route one).

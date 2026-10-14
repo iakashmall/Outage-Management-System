@@ -407,7 +407,7 @@ export const repo = {
   jobUpdates: (jobId) => db.any('SELECT * FROM job_updates WHERE job_id=$1 ORDER BY ts ASC', [jobId]),
   jobsForIncident: (incidentId) => db.any('SELECT * FROM jobs WHERE incident_id=$1 ORDER BY updated_at DESC', [incidentId]),
   photosForIncident: (incidentId) => db.any(
-    `SELECT p.id, p.job_id, p.lat, p.lon, p.note, p.ts, p.technician_id, p.metadata
+    `SELECT p.id, p.job_id, p.lat, p.lon, p.note, p.ts, p.technician_id, p.metadata, p.not_applied_reason
      FROM job_photos p JOIN jobs j ON p.job_id = j.id
      WHERE j.incident_id = $1 ORDER BY p.ts DESC`,
     [incidentId]
@@ -428,23 +428,47 @@ export const repo = {
   // and the caller gets null (NOT_YOUR_JOB) instead of moving another crew's job.
   updateJobForCrew: (id, crewId, patch) =>
     db.oneOrNone(`UPDATE jobs SET ${setClause(patch)} WHERE id=$/id/ AND crew_id=$/crewId/ RETURNING *`, { ...patch, id, crewId }),
-  addJobUpdate: async (jobId, status, lat, lon, note, ts) => {
-    const u = { id: 'JU' + nanoid(8), job_id: jobId, status, lat, lon, note, ts: ts || new Date().toISOString() };
-    await db.none(`INSERT INTO job_updates (id,job_id,status,lat,lon,note,ts)
-      VALUES ($/id/,$/job_id/,$/status/,$/lat/,$/lon/,$/note/,$/ts/)`, u);
+  // source: 'crew' (the crew's own update) or 'dispatch' (assignment,
+  // rebalance, control room on the crew's behalf). Only crew rows decide
+  // whether a queued crew update arrived late.
+  addJobUpdate: async (jobId, status, lat, lon, note, ts, source = null) => {
+    const u = { id: 'JU' + nanoid(8), job_id: jobId, status, lat, lon, note, ts: ts || new Date().toISOString(), source };
+    await db.none(`INSERT INTO job_updates (id,job_id,status,lat,lon,note,ts,source)
+      VALUES ($/id/,$/job_id/,$/status/,$/lat/,$/lon/,$/note/,$/ts/,$/source/)`, u);
     return u;
   },
+  latestCrewUpdateTs: async (jobId) =>
+    (await db.one(`SELECT max(ts) AS ts FROM job_updates WHERE job_id=$1 AND source='crew'`, [jobId])).ts,
+  // Status write that only lands while the job is still on crewId AND still
+  // at the status the decision was made on (a concurrent update wins).
+  updateJobIf: (id, crewId, fromStatus, patch) =>
+    db.oneOrNone(`UPDATE jobs SET ${setClause(patch)} WHERE id=$/id/ AND crew_id=$/crewId/ AND status=$/fromStatus/ RETURNING *`,
+      { ...patch, id, crewId, fromStatus }),
+  // true the first time this (job, kind, status, client time) is recorded.
+  recordLateUpdate: async (jobId, kind, status, clientTs, reason) =>
+    !!(await db.oneOrNone(`INSERT INTO job_late_updates (job_id,kind,status,client_ts,reason) VALUES ($1,$2,$3,$4,$5)
+      ON CONFLICT DO NOTHING RETURNING job_id`, [jobId, kind, status || '', clientTs, reason])),
+  addJobCompletion: async (c) => {
+    const row = await db.oneOrNone(`INSERT INTO job_completions
+      (id,job_id,incident_id,crew_id,client_request_id,diagnosis,parts_used,restored,sign_off,submitted_at,submitted_by)
+      VALUES ($/id/,$/job_id/,$/incident_id/,$/crew_id/,$/client_request_id/,$/diagnosis:json/,$/parts_used:json/,$/restored/,$/sign_off:json/,$/submitted_at/,$/submitted_by/)
+      ON CONFLICT (client_request_id) DO NOTHING RETURNING *`, { id: 'JC' + nanoid(8), ...c });
+    return row ? { row, created: true }
+      : { row: await db.one('SELECT * FROM job_completions WHERE client_request_id=$1', [c.client_request_id]), created: false };
+  },
+  jobCompletions: (jobId) => db.any('SELECT * FROM job_completions WHERE job_id=$1 ORDER BY received_at DESC', [jobId]),
   addAssetScan: async (scan) => {
     await db.none(
       `INSERT INTO asset_scans
-       (id,job_id,crew_id,asset_id,raw_value,asset_details,lat,lon,scanned_at)
-       VALUES ($/id/,$/job_id/,$/crew_id/,$/asset_id/,$/raw_value/,$/asset_details/,$/lat/,$/lon/,$/scanned_at/)`,
-      scan
+       (id,job_id,crew_id,asset_id,raw_value,asset_details,lat,lon,scanned_at,not_applied_reason)
+       VALUES ($/id/,$/job_id/,$/crew_id/,$/asset_id/,$/raw_value/,$/asset_details/,$/lat/,$/lon/,$/scanned_at/,$/not_applied_reason/)`,
+      { not_applied_reason: null, ...scan }
     );
     return db.one('SELECT * FROM asset_scans WHERE id=$1', [scan.id]);
   },
-  assetScansForJob: (jobId) =>
-    db.any('SELECT * FROM asset_scans WHERE job_id=$1 ORDER BY scanned_at DESC', [jobId]),
+  // includeNotApplied: the control room also sees scans that reached a locked job.
+  assetScansForJob: (jobId, includeNotApplied = false) =>
+    db.any(`SELECT * FROM asset_scans WHERE job_id=$1 ${includeNotApplied ? '' : 'AND not_applied_reason IS NULL'} ORDER BY scanned_at DESC`, [jobId]),
   // Across every job tied to the incident, like photosForIncident.
   assetScansForIncident: (incidentId) => db.any(
     `SELECT s.* FROM asset_scans s JOIN jobs j ON s.job_id = j.id
@@ -550,7 +574,7 @@ export const repo = {
           WHERE id=$1 AND (crew_id IS NULL OR crew_id=$3)`, [j.incident_id, m.toCrew, m.fromCrew]);
       }
       const note = `Reassigned from ${m.fromCrew ?? 'unassigned'} to ${m.toCrew} (${m.reason})`;
-      await t.none('INSERT INTO job_updates (id,job_id,status,note,ts) VALUES ($1,$2,$3,$4,$5)', ['JU' + nanoid(8), j.id, j.status, note, now]);
+      await t.none("INSERT INTO job_updates (id,job_id,status,note,ts,source) VALUES ($1,$2,$3,$4,$5,'dispatch')", ['JU' + nanoid(8), j.id, j.status, note, now]);
       await event(j.incident_id, 'reassigned', `Job ${j.id}: ${note}`);
       await addReassignment(t, { proposalId: id, jobId: j.id, incidentId: j.incident_id, fromCrew: m.fromCrew, toCrew: m.toCrew, reason: m.reason, actor });
       if (m.fromCrew) touchedCrews.add(m.fromCrew);
@@ -565,7 +589,7 @@ export const repo = {
           WHERE id=$1 AND crew_id=$2`, [j.incident_id, u.fromCrew]);
       }
       const note = `Unassigned from ${u.fromCrew}: ${u.reason}`;
-      await t.none('INSERT INTO job_updates (id,job_id,status,note,ts) VALUES ($1,$2,$3,$4,$5)', ['JU' + nanoid(8), j.id, j.status, note, now]);
+      await t.none("INSERT INTO job_updates (id,job_id,status,note,ts,source) VALUES ($1,$2,$3,$4,$5,'dispatch')", ['JU' + nanoid(8), j.id, j.status, note, now]);
       await event(j.incident_id, 'unassigned', `Job ${j.id}: ${note}`);
       await addReassignment(t, { proposalId: id, jobId: j.id, incidentId: j.incident_id, fromCrew: u.fromCrew, toCrew: null, reason: u.reason, actor });
       touchedCrews.add(u.fromCrew);
@@ -609,7 +633,7 @@ export const repo = {
 
   // `image` is the already-compressed photo ({ buffer, contentType, width, height });
   // the returned row is metadata only, without the image bytes.
-  addJobPhoto: async (jobId, { image, originalContentType, originalBytes }, lat, lon, note, technicianId, metadata, ts) => {
+  addJobPhoto: async (jobId, { image, originalContentType, originalBytes }, lat, lon, note, technicianId, metadata, ts, notAppliedReason = null) => {
     const ph = {
       id: 'PH' + nanoid(8),
       job_id: jobId,
@@ -623,16 +647,18 @@ export const repo = {
       ts: ts || new Date().toISOString(),
       technician_id: technicianId ?? null,
       metadata: { ...(metadata ?? {}), originalBytes, storedBytes: image.buffer.length },
+      not_applied_reason: notAppliedReason,
     };
     await db.none(
-      `INSERT INTO job_photos (id,job_id,image_data,content_type,original_content_type,width,height,lat,lon,note,ts,technician_id,metadata)
-       VALUES ($/id/,$/job_id/,$/image_data/,$/content_type/,$/original_content_type/,$/width/,$/height/,$/lat/,$/lon/,$/note/,$/ts/,$/technician_id/,$/metadata:json/::jsonb)`,
+      `INSERT INTO job_photos (id,job_id,image_data,content_type,original_content_type,width,height,lat,lon,note,ts,technician_id,metadata,not_applied_reason)
+       VALUES ($/id/,$/job_id/,$/image_data/,$/content_type/,$/original_content_type/,$/width/,$/height/,$/lat/,$/lon/,$/note/,$/ts/,$/technician_id/,$/metadata:json/::jsonb,$/not_applied_reason/)`,
       { ...ph, image_data: image.buffer }
     );
     return ph;
   },
-  jobPhotos: (jobId) =>
-    db.any('SELECT id, job_id, lat, lon, note, ts, technician_id, metadata FROM job_photos WHERE job_id=$1 ORDER BY ts DESC', [jobId]),
+  jobPhotos: (jobId, includeNotApplied = false) =>
+    db.any(`SELECT id, job_id, lat, lon, note, ts, technician_id, metadata, not_applied_reason FROM job_photos
+      WHERE job_id=$1 ${includeNotApplied ? '' : 'AND not_applied_reason IS NULL'} ORDER BY ts DESC`, [jobId]),
   jobPhotoById: (id) => db.oneOrNone('SELECT * FROM job_photos WHERE id=$1', [id]),
 
   addMessage: async (incidentId, sender, senderRole, body) => {
