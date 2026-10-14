@@ -455,13 +455,30 @@ const PAGE_SCRIPT = `
 })();
 `;
 
-export function buildHtml() {
+// Web build: the same page runs in a sandboxed iframe (components/OfflineMap.js).
+// This stands in for the WebView bridge — messages go to the parent window,
+// and commands arrive as { omsCmd } messages instead of injected JS.
+const WEB_BRIDGE = `
+window.ReactNativeWebView = { postMessage: function (m) { parent.postMessage({ omsMap: m }, '*'); } };
+window.addEventListener('message', function (e) {
+  var d = e.data;
+  if (e.source !== parent || !d || !window.OMS) return;
+  if (d.omsCmd === 'update') OMS.update(d.state);
+  else if (d.omsCmd === 'fit') OMS.fit(d.kind);
+});
+`;
+
+export function buildHtml({ web = false } = {}) {
+  // Native: tiles only from disk. Web: live OpenStreetMap tiles.
+  // blob: is for the vector map (MapLibre draws into blobs and runs a blob worker).
+  const imgSrc = web ? "https://tile.openstreetmap.org data: blob:" : "file: data: blob:";
   return `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src file: data: blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; worker-src blob:; child-src blob:; connect-src blob: data:" />
+${web ? '<meta name="referrer" content="strict-origin-when-cross-origin" />' : ""}
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${imgSrc}; style-src 'unsafe-inline'; script-src 'unsafe-inline'; worker-src blob:; child-src blob:; connect-src blob: data:" />
 <style>${LEAFLET_CSS}</style>
 <style>${MAPLIBRE_CSS}</style>
 <style>
@@ -474,6 +491,7 @@ export function buildHtml() {
 </head>
 <body>
 <div id="map"></div>
+${web ? `<script>${WEB_BRIDGE}</script>` : ""}
 <script>${LEAFLET_JS}</script>
 <script>${MAPLIBRE_JS}</script>
 <script>${MAPLIBRE_LEAFLET_JS}</script>

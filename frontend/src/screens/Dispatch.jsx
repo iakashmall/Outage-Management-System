@@ -9,9 +9,21 @@ const TRACKING_OFF_TEXT = {
   permission_denied: 'location permission was denied',
   background_permission_denied: 'background location ("Allow all the time") was denied',
   turned_off: 'the crew turned tracking off',
+  location_services_off: "the phone's Location is switched off",
+  start_failed: 'tracking failed to start on the phone',
 };
 
-const TOPICS = ['oms.incident.updated', 'oms.incident.created', 'crew.updated', 'crew.job.updated', 'crew.tracking.changed', 'oms.dispatch.rebalance'];
+// Tracking is on but no position for this long: the phone has gone quiet
+// (matches the backend's stale-location monitor; the app sends a fix at
+// least once a minute, even when parked).
+const STALE_MS = 5 * 60 * 1000;
+const isStale = (c, now) => {
+  if (c.tracking_state !== 'on') return false;
+  const since = Math.max(c.location_updated_at ? Date.parse(c.location_updated_at) : 0, c.tracking_changed_at ? Date.parse(c.tracking_changed_at) : 0);
+  return since > 0 && now - since > STALE_MS;
+};
+
+const TOPICS = ['oms.incident.updated', 'oms.incident.created', 'crew.updated', 'crew.job.updated', 'crew.tracking.changed', 'crew.location.stale', 'oms.dispatch.rebalance'];
 
 export default function Dispatch() {
   const [inc, setInc] = useState([]);
@@ -24,6 +36,7 @@ export default function Dispatch() {
   const [panel, setPanel] = useState(null);    // 'settings' | 'addCrew' | null
   const [stale, setStale] = useState(null);    // last apply refused as STALE_PROPOSAL
   const [proposing, setProposing] = useState(false);
+  const [now, setNow] = useState(Date.now());       // ticks so 'No GPS' badges appear without a refresh
 
   const wlErr = useRef(null);
   const refreshTimer = useRef(null);
@@ -42,6 +55,7 @@ export default function Dispatch() {
     load(); api.callAreas().then(setAreas).catch(() => setAreas([]));
     return () => { clearTimeout(refreshTimer.current); clearTimeout(historyTimer.current); };
   }, []); // eslint-disable-line
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 30000); return () => clearInterval(t); }, []);
   useLiveRefresh(TOPICS, refreshSoon);
   // History changes when a proposal is decided, or when a manual assign moves
   // a job (logged as manual_assign; that only publishes job/crew events).
@@ -202,6 +216,9 @@ export default function Dispatch() {
                       {c.status === 'off_shift' && <span className="chip chip-muted" style={{ marginLeft: 6 }}>Off shift</span>}
                       {c.tracking_state === 'off' && TRACKING_OFF_TEXT[c.tracking_reason] && (
                         <span title={`${TRACKING_OFF_TEXT[c.tracking_reason]}, ${timeAgo(c.tracking_changed_at)}`} style={{ marginLeft: 6, fontSize: 10.5, fontWeight: 600, color: 'var(--crit)', background: 'var(--crit-bg)', borderRadius: 4, padding: '1px 6px' }}>Tracking off</span>
+                      )}
+                      {isStale(c, now) && (
+                        <span title={`Tracking is on but no position since ${c.location_updated_at ? timeAgo(c.location_updated_at) : 'tracking started'}: Location off, no signal, or the app was stopped`} style={{ marginLeft: 6, fontSize: 10.5, fontWeight: 600, color: 'var(--crit)', background: 'var(--crit-bg)', borderRadius: 4, padding: '1px 6px' }}>No GPS · {c.location_updated_at ? timeAgo(c.location_updated_at) : 'none yet'}</span>
                       )}
                     </div>
                     <div style={{ fontSize: 12, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 5 }}>
