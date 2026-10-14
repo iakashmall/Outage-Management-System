@@ -61,6 +61,7 @@ const TAPE_LABEL = {
   'crew.updated': ['CREW', ''],
   'crew.job.updated': ['JOB', 'ok'],
   'crew.tracking.changed': ['TRACKING', ''],
+  'crew.location.stale': ['NO GPS', 'crit'],
 };
 
 function LiveTape() {
@@ -80,6 +81,7 @@ function LiveTape() {
       else if (topic === 'crew.updated') detail = `${p.name} . ${p.status}`;
       else if (topic === 'crew.job.updated') detail = `${p.id} . ${p.status}`;
       else if (topic === 'crew.tracking.changed') detail = `${p.crewName} . ${p.state === 'on' ? 'tracking on' : 'tracking OFF'}`;
+      else if (topic === 'crew.location.stale') detail = `${p.crewName} . ${p.stale ? `no position for ${p.minutes} min` : 'positions resumed'}`;
       setEvents((e) => [{ id: Math.random(), label, cls, detail, t: hhmm(new Date().toISOString()) }, ...e].slice(0, 14));
     };
     const hs = topics.map((t) => { const h = mk(t); socket.on(t, h); return [t, h]; });
@@ -115,8 +117,13 @@ export default function App() {
       if (p.alert) toast(`${p.crewName} (${p.crewId}): location tracking is OFF, ${p.reasonText}`, 'err', 20000);
       else if (p.state === 'on') toast(`${p.crewName} (${p.crewId}): location tracking is on`);
     };
+    const onStale = (p) => {
+      if (p.stale) toast(`${p.crewName} (${p.crewId}): no position for ${p.minutes} min, tracking is on but the phone has stopped reporting (Location off, no signal, or app stopped)`, 'err', 20000);
+      else toast(`${p.crewName} (${p.crewId}): positions are coming in again`);
+    };
     socket.on('crew.tracking.changed', onTracking);
-    return () => socket.off('crew.tracking.changed', onTracking);
+    socket.on('crew.location.stale', onStale);
+    return () => { socket.off('crew.tracking.changed', onTracking); socket.off('crew.location.stale', onStale); };
   }, []);
   const [clock, setClock] = useState('');
   useEffect(() => {

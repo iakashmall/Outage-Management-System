@@ -34,6 +34,7 @@ export const TOPICS = {
   CREW_TRACKING_CHANGED: 'crew.tracking.changed',
   // OMS-03 workload balancing: { event: proposed|applied|rejected|stale, proposalId, trigger }
   DISPATCH_REBALANCE: 'oms.dispatch.rebalance',
+  CREW_LOCATION_STALE: 'crew.location.stale',
 };
 const ALL_TOPICS = Object.values(TOPICS);
 

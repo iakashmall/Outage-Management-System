@@ -98,6 +98,7 @@ export default function PlannedOutagePanel({ job }) {
   const unsynced = pending.filter((p) => !p.last_code);
   const rejected = pending.filter((p) => p.last_code);
   const permit = view.permit;
+  const workNotStarted = ['Pending Acceptance', 'Acknowledged', 'En Route', 'On Site'].includes(job.status);
   const ownIsolationDone = view.steps.filter((s) => s.phase === 'isolate' && s.mine).every((s) => s.state === 'confirmed');
   const canRequest = !offline && ownIsolationDone && !pending.length && ['isolating', 'in_progress'].includes(view.status)
     && (!permit || ['refused', 'withdrawn', 'returned'].includes(permit.state)) && permit?.state !== 'returned';
@@ -181,7 +182,22 @@ export default function PlannedOutagePanel({ job }) {
           <Text style={styles.stepText}>Earths at: {permit.earthing_points}</Text>
           {returning
             ? <ReturnForm busy={busy || offline} onCancel={() => setReturning(false)} onSubmit={(d) => permitAction(() => returnPermit(permit.id, d), 'Permit returned to the control room.').then(() => setReturning(false))} />
-            : <Pressable style={styles.primary} onPress={() => setReturning(true)}><Text style={styles.primaryText}>Return permit</Text></Pressable>}
+            : workNotStarted
+              ? (
+                // Returning ends the work under this permit, so before Work
+                // Started it is only for cancelled work and must not look like
+                // the next step.
+                <View>
+                  <Text style={styles.okText}>Next: tap "Work Started →" below to start work.</Text>
+                  <Pressable style={styles.smallBtn} onPress={() => Alert.alert('Work not started yet', 'Return the permit only if this work is cancelled. After returning it you can NOT start work under this permit.', [
+                    { text: 'Keep permit', style: 'cancel' },
+                    { text: 'Work cancelled - return', style: 'destructive', onPress: () => setReturning(true) },
+                  ])}>
+                    <Text style={styles.smallBtnText}>Work cancelled? Return permit</Text>
+                  </Pressable>
+                </View>
+              )
+              : <Pressable style={styles.primary} onPress={() => setReturning(true)}><Text style={styles.primaryText}>Return permit</Text></Pressable>}
         </View>
       ) : (
         <Text style={styles.okText}>{permit.permit_no} returned at {hhmm(permit.returned_at)} - the line is handed back to the control room.</Text>

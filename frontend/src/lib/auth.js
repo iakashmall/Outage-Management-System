@@ -20,7 +20,14 @@ export const keycloak = new Keycloak({
 // a real login failure. This only disables Keycloak's periodic background
 // session-validity check; login itself and token verification still work.
 export function initKeycloak() {
-  return keycloak.init({ onLoad: 'login-required', pkceMethod: 'S256', checkLoginIframe: false });
+  return keycloak.init({ onLoad: 'login-required', pkceMethod: 'S256', checkLoginIframe: false }).then((ok) => {
+    // Access tokens last 5 minutes and nothing else renews them, so a form
+    // filled in slowly would be refused as "invalid/expired token". Renew in
+    // the background while the session (refresh token) is still alive.
+    keycloak.onTokenExpired = () => keycloak.updateToken(30).catch(() => {});
+    setInterval(() => keycloak.updateToken(60).catch(() => {}), 30000);
+    return ok;
+  });
 }
 
 // Attach this to every API call so the backend can verify who's asking.

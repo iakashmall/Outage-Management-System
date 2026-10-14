@@ -174,11 +174,13 @@ export async function getMyJobs() {
   return (await fetchMyJobs()).jobs;
 }
 
-// PATCH /api/mobile/jobs/:id/status  { status, lat, lon, crewId }
+// PATCH /api/mobile/jobs/:id/status  { status, lat, lon, crewId, ts, sentAt }
 // crewId lets the server refuse (409 NOT_YOUR_JOB) an update to a job that
 // was reassigned away from this crew. A queued update passes the crew that
 // made it; otherwise it is the signed-in crew.
-export async function updateJobStatus(id, status, location = {}, crewId) {
+// ts: when the crew made the change, if earlier than now (pending sync).
+// sentAt lets the server correct for a phone clock that is off.
+export async function updateJobStatus(id, status, location = {}, crewId, ts) {
   const { isAuthenticated, myCrewId } = await session();
   if (!isAuthenticated()) {
     // Demo mode: keep the change locally so the demo flow still advances.
@@ -190,6 +192,8 @@ export async function updateJobStatus(id, status, location = {}, crewId) {
     lat: location.lat ?? null,
     lon: location.lon ?? null,
     crewId: crewId || myCrewId(),
+    ts: ts ?? null,
+    sentAt: new Date().toISOString(),
   });
 }
 
@@ -203,6 +207,7 @@ export async function uploadJobPhoto(id, dataUrl, location = {}, note, metadata 
     lon: location.lon ?? null,
     note: note ?? null,
     ...metadata,
+    sentAt: new Date().toISOString(),
   });
 }
 
@@ -227,7 +232,7 @@ export async function getJobPhotos(jobId) {
 }
 
 export async function saveAssetScan(jobId, scan) {
-  return req(`/mobile/jobs/${jobId}/assets/scans`, "POST", scan);
+  return req(`/mobile/jobs/${jobId}/assets/scans`, "POST", { ...scan, sentAt: new Date().toISOString() });
 }
 
 export async function getAssetScans(jobId) {
