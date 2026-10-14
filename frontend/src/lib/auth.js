@@ -1,4 +1,5 @@
 import Keycloak from 'keycloak-js';
+import { createTokenManager } from './tokenRefresh.js';
 
 // Configurable at build time (see .env.production / Vite's VITE_ prefix
 // convention). This URL runs in the VISITOR'S BROWSER, not on the server â€”
@@ -20,19 +21,33 @@ export const keycloak = new Keycloak({
 // a real login failure. This only disables Keycloak's periodic background
 // session-validity check; login itself and token verification still work.
 export function initKeycloak() {
-  return keycloak.init({ onLoad: 'login-required', pkceMethod: 'S256', checkLoginIframe: false }).then((ok) => {
-    // Access tokens last 5 minutes and nothing else renews them, so a form
-    // filled in slowly would be refused as "invalid/expired token". Renew in
-    // the background while the session (refresh token) is still alive.
-    keycloak.onTokenExpired = () => keycloak.updateToken(30).catch(() => {});
-    setInterval(() => keycloak.updateToken(60).catch(() => {}), 30000);
-    return ok;
-  });
+  return keycloak
+    .init({ onLoad: 'login-required', pkceMethod: 'S256', checkLoginIframe: false })
+    .then((authenticated) => { if (authenticated) startAutoRefresh(); return authenticated; });
+}
+
+// Access tokens last 5 minutes and nothing else renews them, so a form filled in slowly would be refused as
+// "invalid/expired token". tokenRefresh.js renews the token while the session (refresh token) is alive, shares one
+// renewal between simultaneous callers, and, if the Keycloak session itself has ended, sends the user to sign in
+// again (once) instead of failing silently. 60 s is how early a token is renewed.
+const tokens = createTokenManager(keycloak, { onLoginRequired: () => keycloak.login(), minValidity: 60 });
+export const refreshToken = (force = false) => tokens.refresh(force);
+
+function startAutoRefresh() {
+  const quietly = () => { tokens.refresh(false).catch(() => {}); };
+  keycloak.onTokenExpired = quietly;                                                          // renew when it expires
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) quietly(); });  // tab or laptop woke up
+  setInterval(quietly, 30 * 1000);                                                            // no-op unless <60 s are left
 }
 
 // Attach this to every API call so the backend can verify who's asking.
 export function authHeader() {
   return keycloak.token ? { Authorization: `Bearer ${keycloak.token}` } : {};
+}
+// Same, but renews the token first when it is about to expire. Prefer this for requests.
+export async function freshAuthHeader() {
+  try { await tokens.refresh(false); } catch { /* the sign-in redirect has already been triggered */ }
+  return authHeader();
 }
 export function currentUser() {
   const t = keycloak.tokenParsed || {};
