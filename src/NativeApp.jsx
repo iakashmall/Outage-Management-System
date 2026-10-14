@@ -954,6 +954,9 @@ function CrewLogin({ onSuccess }) {
       responseType: AuthSession.ResponseType.Code,
       usePKCE: true,
       scopes: ['openid', 'profile'],
+      // Always show the Keycloak login form: crews share phones, and a
+      // leftover SSO session must not sign the next person in as the last.
+      prompt: AuthSession.Prompt.Login,
     },
     discovery
   );
@@ -1258,6 +1261,10 @@ function JobDetail({ job, crew, onClose, onAdvance, onQueued, onNavigate, onNavi
   const [advancing, setAdvancing] = useState(false);
   const [checklistDone, setChecklistDone] = useState(false);
   const [plannedMessage, setPlannedMessage] = useState('');
+  // The status button is at the bottom but the safety checklist / completion
+  // steps it opens render near the top, so scroll them into view.
+  const scrollRef = useRef(null);
+  const flowY = useRef(0);
 
   // Completion flow: fault diagnosis -> parts used -> crew-lead sign-off.
   // Gates the final "Work Started" -> "Work Complete" transition.
@@ -1277,6 +1284,10 @@ function JobDetail({ job, crew, onClose, onAdvance, onQueued, onNavigate, onNavi
   }, [job.id]);
 
   const next = NEXT_STATUS[job.status];
+
+  useEffect(() => {
+    if (showSafety || completionStep) scrollRef.current?.scrollTo({ y: Math.max(0, flowY.current - 12), animated: true });
+  }, [showSafety, completionStep]);
 
   // OMS-01 gates for planned-outage jobs: Work Started needs the crew's own
   // isolation steps confirmed and the permit issued; Work Finished needs the
@@ -1430,6 +1441,7 @@ function JobDetail({ job, crew, onClose, onAdvance, onQueued, onNavigate, onNavi
         <Text style={styles.detailId}>{job.id}</Text>
       </View>
       <ScrollView
+        ref={scrollRef}
         contentContainerStyle={styles.detailContent}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
@@ -1463,6 +1475,7 @@ function JobDetail({ job, crew, onClose, onAdvance, onQueued, onNavigate, onNavi
           </View>
         )}
 
+        <View onLayout={(e) => { flowY.current = e.nativeEvent.layout.y; }}>
         {checklistDone && showSafety && (
           <SafetyChecklist
             onPass={() => {
@@ -1500,6 +1513,7 @@ function JobDetail({ job, crew, onClose, onAdvance, onQueued, onNavigate, onNavi
             onCancel={() => setCompletionStep('parts')}
           />
         )}
+        </View>
 
         {checklistDone && signOff && (
           <View style={styles.completionSummary}>
