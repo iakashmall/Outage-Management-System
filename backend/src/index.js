@@ -22,7 +22,7 @@ import { seed } from './infra/seed.js';
 import { api } from './routes/api.js';
 import { repo } from './infra/repo.js';
 import { requireAuth } from './routes/auth.js';
-import { bus, initBus } from './domain/bus.js';
+import { bus, initBus, NOT_BROADCAST } from './domain/bus.js';
 import { connectRedis } from './infra/redis.js';
 import { startPlannedNotices } from './realtime/plannedNotices.js';
 import { publicOutages } from './domain/publicStatus.js';
@@ -31,6 +31,8 @@ import { startScadaConsumer } from './realtime/scada.js';
 import { startRestorationPublisher } from './realtime/restoration.js';
 import { startNotifier } from './realtime/notifier.js';
 import { startScheduledReports } from './realtime/scheduledReports.js';
+import { ensureRatings, startFeederKpiJobs } from './realtime/feederKpi.js';
+import { startFeederTelemetrySim } from './realtime/feederTelemetrySim.js';
 import { startStaleLocationMonitor } from './realtime/staleLocation.js';
 // ...alongside your other startX() calls at boot:
 startScheduledReports();
@@ -58,6 +60,8 @@ process.on('uncaughtException', (err) => logFatal('uncaughtException', err));
  await initBus();       // memory driver by default; EVENT_BUS_DRIVER=kafka for the real broker
  startScadaConsumer();  // Phase 2: auto-detect outages from SCADA fault events
  startRestorationPublisher(); // Phase 2: publish restoration commands back to the DMS
+await ensureRatings();
+startFeederKpiJobs();
  startStaleLocationMonitor(); // alert dispatch when a tracked crew's phone goes quiet
 
 const app = express();
@@ -100,7 +104,8 @@ const io = new Server(http, { cors: { origin: '*' } });
 
 // Bridge every domain event straight to WebSocket subscribers.
 // The frontend and mobile app both listen on these topic names.
-bus.onAny(({ topic, payload }) => io.emit(topic, payload));
+// Raw SCADA analog samples are not bridged (see NOT_BROADCAST in bus.js).
+bus.onAny(({ topic, payload }) => { if (!NOT_BROADCAST.has(topic)) io.emit(topic, payload); });
 
 io.on('connection', (socket) => {
   socket.emit('server.hello', { ts: new Date().toISOString() });
@@ -119,6 +124,7 @@ http.listen(PORT, () => {
   } else {
     console.log('  [simulator] running - fake crew GPS, alarms and calls (set SIMULATOR=off to disable)');
     startSimulator();
+    startFeederTelemetrySim();
   }
   startNotifier();
   startPlannedNotices(); // OMS-01 advance notices, after the notifier is listening

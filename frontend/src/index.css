@@ -566,7 +566,7 @@ tr.row-hot td{background:var(--crit-bg)}
   box-shadow: var(--shadow-lg) !important;
   max-height: 400px !important;
   overflow-y: auto !important;
-  z-index: 500 !important;
+  z-index: 2100 !important;
 }
 [role='listbox'] * { color: var(--ink) !important; }
 [role='listbox'] [role='option']:hover,
@@ -837,3 +837,111 @@ body{
 .trail-ctl .lp-knote{margin-top:6px;font-size:10px;line-height:1.35;color:var(--faint)}
 .trail-btn{background:#7c3aed}
 .trail-sum{margin-top:8px}
+
+/* Keep Leaflet panes/controls (z 400-1000) inside the map so they never paint over app overlays */
+.leaflet-host .leaflet-container,.leaflet-container{isolation:isolate}
+/* ---- PFC feeder KPIs (components/FeederKpiPanel.jsx) ---- */
+.fk{padding:14px 16px 16px}
+.fk-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.fk-bar .grow{flex:1}
+.fk-bar input[type=date],.fk-bar select{font:inherit;font-size:12.5px;padding:6px 8px;border:1px solid var(--line);
+  border-radius:var(--r-sm);background:var(--surface);color:var(--ink)}
+.fk-bar select{max-width:320px}
+.fk-dates{display:inline-flex;gap:6px;align-items:center}
+.fk-range{font-size:12.5px;margin:12px 0 10px}
+.fk-err{color:var(--crit)}
+.fk-warn-t{color:var(--high)}
+.fk-scroll{overflow-x:auto;border:1px solid var(--line);border-radius:var(--r-sm)}
+.fk-tbl th{white-space:nowrap;vertical-align:bottom}
+.fk-num{text-align:right}
+.fk-sort{cursor:pointer;user-select:none}
+.fk-sort:hover{background:var(--paper-2)}
+.fk-sub{font-size:10px;font-weight:500;color:var(--faint);letter-spacing:.02em}
+.fk-arrow{font-size:9px;margin-left:4px;color:var(--navy)}
+.fk-subst{font-size:12px;color:var(--muted);white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}
+.fk-tbl td.fk-crit{background:var(--crit-bg);color:var(--crit);font-weight:600}
+.fk-tbl td.fk-warn{background:var(--high-bg);color:var(--high)}
+.fk-tbl td.fk-ok{color:var(--ink-2)}
+.fk-tbl td.fk-total{border-left:1px solid var(--line-2);font-weight:600}
+.fk-nodata td{color:var(--faint)}
+.fk-note{font-size:12px;text-align:right}
+.fk-cards{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:14px}
+.fk-card{border-left:3px solid var(--line-2)}
+.fk-edge-crit{border-left-color:var(--crit)}
+.fk-edge-warn{border-left-color:var(--high)}
+.fk-edge-ok{border-left-color:var(--low)}
+.fk-foot{font-size:11.5px;line-height:1.5;margin:10px 2px 0}
+@media (max-width:1100px){.fk-cards{grid-template-columns:repeat(3,1fr)}}
+/* ---- PFC feeder KPI charts (components/KpiCharts.jsx) ---- */
+.fk-chartcard{border:1px solid var(--line);border-radius:var(--r-sm);padding:12px 14px 10px;margin-bottom:14px;background:var(--surface)}
+.fk-charthead{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px;font-size:13px}
+.fk-charthead select{font:inherit;font-size:12.5px;padding:6px 8px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface);color:var(--ink);max-width:360px}
+.fk-chartwrap{position:relative}
+.fk-svg{width:100%;height:auto;display:block}
+.fk-ytick{font-size:11px;fill:var(--muted);text-anchor:end}
+.fk-xtick{font-size:11px;fill:var(--muted);text-anchor:middle}
+.fk-limit{stroke:var(--crit);stroke-width:1.2;stroke-dasharray:5 4;opacity:.7}
+.fk-cross{stroke:var(--faint);stroke-width:1;stroke-dasharray:3 3}
+.fk-legend{display:flex;gap:14px;align-items:center;font-size:12px;margin-bottom:4px;flex-wrap:wrap}
+.fk-legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+.fk-legend i.dash{background:none;border-top:2px dashed var(--crit);height:0;width:14px;border-radius:0}
+.fk-unit{margin-left:auto}
+.fk-tip{position:absolute;top:30px;transform:translateX(12px);background:var(--navy);color:#fff;border-radius:8px;padding:8px 10px;
+  font-size:12px;pointer-events:none;min-width:110px;box-shadow:0 6px 20px rgba(15,27,45,.25);z-index:2}
+.fk-tip b{display:block;margin-bottom:4px}
+.fk-tip div{display:flex;align-items:center;gap:6px}
+.fk-tip i{width:8px;height:8px;border-radius:2px;display:inline-block}
+.fk-tip span{margin-left:auto;padding-left:14px;font-variant-numeric:tabular-nums}
+.fk-bars{display:flex;flex-direction:column;gap:5px}
+.fk-bar-row{display:grid;grid-template-columns:110px 1fr 90px;align-items:center;gap:10px;border:0;background:transparent;
+  padding:3px 4px;border-radius:6px;cursor:pointer;font:inherit;text-align:left}
+.fk-bar-row:hover{background:var(--paper-2)}
+.fk-bar-name{font-size:12px}
+.fk-bar-track{height:14px;background:var(--paper);border-radius:7px;overflow:hidden;display:block}
+.fk-bar-fill{display:block;height:100%;border-radius:7px}
+.fk-fill-crit{background:var(--crit)}
+.fk-fill-warn{background:var(--high)}
+.fk-fill-ok{background:var(--low)}
+.fk-bar-val{font-size:12px;text-align:right}
+.fk-bar-val small{color:var(--muted)}
+.fk-tbl tr.fk-rowsel{box-shadow:inset 3px 0 0 var(--navy);background:var(--paper-2)}
+.fk-tbl td.mono{white-space:nowrap}
+/* PFC KPI hierarchy view */
+.kh-crumbs{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:10px 0;font-size:13px}
+.kh-crumbs>button:not(.btn){border:1px solid var(--line);background:transparent;color:var(--fg);border-radius:6px;padding:4px 10px;cursor:pointer;font:inherit}
+.kh-crumbs>button.on{border-color:#3b82f6;color:#3b82f6;font-weight:600}
+.kh-hint{margin-left:auto;font-size:12px}
+.kh-tabs{margin:0 0 12px}
+.kh-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,460px),1fr));gap:16px}
+@media (max-width:600px){.kh-grid{grid-template-columns:1fr}}
+.kh-card{border:1px solid var(--line);border-left-width:4px;border-radius:8px;padding:14px 16px}
+.kh-head{display:flex;justify-content:space-between;gap:8px;margin-bottom:8px}
+.kh-name{font-size:11.5px;color:var(--muted)}
+.kh-total{font-size:20px;font-weight:700;white-space:nowrap}
+.kh-row{display:grid;grid-template-columns:96px 1fr 56px;align-items:center;gap:8px;width:100%;border:0;background:transparent;color:var(--fg);padding:3px 2px;font:inherit;font-size:12px;text-align:left;cursor:pointer;border-radius:4px}
+.kh-row:hover:not(:disabled){background:var(--line-2)}
+.kh-row:disabled{cursor:default}
+.kh-lbl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kh-track{height:10px;background:var(--line-2);border-radius:5px;overflow:hidden}
+.kh-bar{display:block;height:100%;border-radius:5px;background:#3b82f6;transition:width .3s}
+.kh-ok{background:#22b06b}.kh-warn{background:#ef9021}.kh-crit{background:#e23b2e}
+.kh-val{text-align:right}
+.kh-empty,.kh-more{font-size:11.5px;padding-top:4px}
+.kh-chart{position:relative}
+.kh-chart svg{width:100%;height:auto;display:block}
+.kh-tip{position:absolute;top:4px;right:4px;background:var(--bg,#fff);border:1px solid var(--line);border-radius:6px;padding:5px 8px;font-size:11px;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.kh-tip i,.kh-legend i{display:inline-block;width:10px;height:3px;border-radius:2px;margin-right:5px;vertical-align:middle}
+.kh-legend{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:2px 16px;margin-top:10px}
+.kh-legend button{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:4px;border:0;background:transparent;color:var(--fg);font:inherit;font-size:12px;padding:2px 4px;border-radius:4px;cursor:pointer;text-align:left}
+.kh-legend button:hover:not(:disabled){background:var(--line-2)}
+.kh-legend button:disabled{cursor:default}
+.kh-loading{font-size:12px;margin-bottom:8px}
+/* One-chart tab (Load imbalance): capped width, legend beside the chart */
+.kh-grid.kh-single{grid-template-columns:minmax(0,1100px)}
+.kh-single .kh-body{display:grid;grid-template-columns:minmax(0,2fr) minmax(220px,1fr);gap:24px;align-items:start}
+.kh-single .kh-legend{grid-template-columns:1fr;margin-top:0;border-left:1px solid var(--line);padding-left:16px}
+.kh-single .kh-legend button{padding:6px 4px;font-size:13px}
+@media (max-width:800px){.kh-single .kh-body{grid-template-columns:1fr}.kh-single .kh-legend{border-left:0;padding-left:0}}
+.kh-zero{display:flex;align-items:center;justify-content:center;min-height:140px;padding:16px;text-align:center;color:var(--muted);font-size:13px;border:1px dashed var(--line);border-radius:8px;background:var(--line-2)}
+.kh-jump{display:inline-flex;gap:6px;flex-wrap:wrap}
+.kh-jump select{font:inherit;font-size:12.5px;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--fg);max-width:220px}

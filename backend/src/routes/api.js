@@ -23,6 +23,7 @@ import { nanoid } from 'nanoid';
 import { substationForFeeder } from '../domain/prediction.js';
 import { plannedOutageRoutes } from './plannedOutages.js';
 import { plannedComplaintDecision } from '../domain/plannedComplaints.js';
+import { feederKpiRoutes } from './feederKpi.js';
 import { dispatchRoutes } from './dispatch.js';
 import { PRIORITY_CLASSES, isActive, isMovable, priorityInfo } from '../domain/rebalance.js';
 import { isOperator } from '../domain/plannedOutage.js';
@@ -48,6 +49,7 @@ for (const method of ['get', 'post', 'patch', 'put', 'delete']) {
 // GET /incidents/:id, PATCH /incidents/:id/status and PATCH
 // /mobile/jobs/:id/status, and passes every other request on unchanged.
 api.use(plannedOutageRoutes);
+api.use(feederKpiRoutes);
 // OMS-03 workload balancing (/dispatch/*, POST /crews, PATCH /crews/:id).
 api.use(dispatchRoutes);
 

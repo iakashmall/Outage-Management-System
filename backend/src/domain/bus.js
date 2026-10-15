@@ -32,11 +32,20 @@ export const TOPICS = {
   MESSAGE_POSTED: 'oms.message.posted',
     ERT_CHANGED: 'oms.incident.ert_changed',
   CREW_TRACKING_CHANGED: 'crew.tracking.changed',
+  FEEDER_ANALOG: 'scada.analog.feeder',
   // OMS-03 workload balancing: { event: proposed|applied|rejected|stale, proposalId, trigger }
   DISPATCH_REBALANCE: 'oms.dispatch.rebalance',
   CREW_LOCATION_STALE: 'crew.location.stale',
 };
 const ALL_TOPICS = Object.values(TOPICS);
+
+// Topics that are never bridged to WebSocket clients: high-rate machine data
+// that no screen renders message by message (the browser would drown in it).
+export const NOT_BROADCAST = new Set([TOPICS.FEEDER_ANALOG]);
+
+// Messages that cannot be processed go to <topic>.dlq (Kafka driver only).
+const DLQ_SUFFIX = '.dlq';
+const MAX_ATTEMPTS = Number(process.env.KAFKA_MAX_ATTEMPTS) || 5;
 
 class MemoryBus {
   constructor() { this._e = new EventEmitter(); this._e.setMaxListeners(0); }
@@ -45,7 +54,13 @@ class MemoryBus {
     this._e.emit(topic, payload);
     this._e.emit('*', { topic, payload });
   }
-  subscribe(topic, handler) { this._e.on(topic, handler); return () => this._e.off(topic, handler); }
+  subscribe(topic, handler) {
+    // Handlers may be async; in-process there is nothing to retry, so log.
+    const h = (p) => Promise.resolve().then(() => handler(p))
+      .catch((err) => console.error(`[bus] handler failed (${topic}):`, err.message));
+    this._e.on(topic, h);
+    return () => this._e.off(topic, h);
+  }
   onAny(handler) { this._e.on('*', handler); }
   async close() {}
 }
@@ -54,9 +69,40 @@ class KafkaBus {
   constructor(brokers) {
     this._kafka = new Kafka({ clientId: 'oms-backend', brokers, logLevel: logLevel.NOTHING });
     this._producer = this._kafka.producer();
-    this._consumer = this._kafka.consumer({ groupId: 'oms-backend' });
-    this._local = new EventEmitter(); // fan-out to in-process subscribers once a message round-trips through Kafka
-    this._local.setMaxListeners(0);
+    // Every process in one group shares the topics' partitions, so a second
+    // process (self-test, load-test probe) needs its own KAFKA_GROUP_ID or it
+    // steals messages from the running backend.
+    this._consumer = this._kafka.consumer({ groupId: process.env.KAFKA_GROUP_ID || 'oms-backend' });
+    this._handlers = new Map(); // topic -> Set(handler); awaited, so Kafka waits for them
+    this._any = new EventEmitter(); // WebSocket bridge etc.; fire-and-forget
+    this._any.setMaxListeners(0);
+    this._attempts = new Map(); // "topic/partition/offset" -> failed attempts
+  }
+
+  // Run every subscriber of `topic` and wait for all of them.
+  async _dispatch(topic, payload) {
+    const hs = [...(this._handlers.get(topic) || [])];
+    await Promise.all(hs.map((h) => h(payload)));
+    this._any.emit('*', { topic, payload });
+  }
+
+  async _deadLetter(topic, messages, reason) {
+    console.error(`[bus] ${messages.length} message(s) on ${topic} -> ${topic}${DLQ_SUFFIX}: ${reason}`);
+    await this._producer.send({
+      topic: topic + DLQ_SUFFIX,
+      messages: messages.map((m) => ({ key: m.key, value: m.value, headers: { ...(m.headers || {}), 'x-dlq-reason': String(reason).slice(0, 500) } })),
+    }).catch((err) => console.error(`[bus] dead-letter publish failed (${topic}):`, err.message));
+  }
+
+  // A batch that keeps failing (e.g. the database rejects it) is retried a few
+  // times - a database blip heals - then parked in the DLQ so one bad batch
+  // cannot stop the topic forever.
+  _giveUp(key) {
+    const n = (this._attempts.get(key) || 0) + 1;
+    this._attempts.set(key, n);
+    if (n < MAX_ATTEMPTS) return false;
+    this._attempts.delete(key);
+    return true;
   }
 
   async init() {
@@ -65,16 +111,60 @@ class KafkaBus {
     const admin = this._kafka.admin();
     await admin.connect();
     const existing = await admin.listTopics();
-    const missing = ALL_TOPICS.filter((t) => !existing.includes(t));
+    const want = [...ALL_TOPICS, ...ALL_TOPICS.map((t) => t + DLQ_SUFFIX)];
+    const missing = want.filter((t) => !existing.includes(t));
     if (missing.length) await admin.createTopics({ topics: missing.map((topic) => ({ topic, numPartitions: 1 })) });
     await admin.disconnect();
 
     await this._consumer.subscribe({ topics: ALL_TOPICS, fromBeginning: false });
+    // eachBatch, not eachMessage: an offset is committed only after its
+    // handlers have finished, so a slow database slows consumption (Kafka
+    // holds the backlog) instead of piling work up in memory, and a crash
+    // re-delivers instead of losing data.
     await this._consumer.run({
-      eachMessage: async ({ topic, message }) => {
-        const payload = message.value ? JSON.parse(message.value.toString()) : null;
-        this._local.emit(topic, payload);
-        this._local.emit('*', { topic, payload });
+      eachBatchAutoResolve: false,
+      partitionsConsumedConcurrently: Number(process.env.KAFKA_PARTITIONS_CONCURRENT) || 4,
+      eachBatch: async ({ batch, resolveOffset, heartbeat, isRunning, isStale }) => {
+        const { topic, partition } = batch;
+        // 1) Parse. Unparseable messages go to the DLQ and are skipped.
+        const good = [];
+        const bad = [];
+        for (const m of batch.messages) {
+          // A leading byte-order mark (Windows tools add one) is not part of the JSON.
+          try { good.push({ m, payload: m.value ? JSON.parse(m.value.toString().replace(/^﻿/, '')) : null }); }
+          catch { bad.push(m); }
+        }
+        if (bad.length) await this._deadLetter(topic, bad, 'invalid JSON');
+
+        // 2) Feeder analog samples: one database insert for the whole batch.
+        if (topic === TOPICS.FEEDER_ANALOG) {
+          if (good.length) {
+            const samples = good.flatMap(({ payload }) => (Array.isArray(payload?.samples) ? payload.samples : [payload]));
+            const key = `${topic}/${partition}/${batch.firstOffset()}`;
+            try { await this._dispatch(topic, { samples }); this._attempts.delete(key); }
+            catch (err) {
+              if (!this._giveUp(key)) throw err; // kafkajs retries from the last committed offset
+              await this._deadLetter(topic, good.map((g) => g.m), err.message);
+            }
+          }
+          resolveOffset(batch.lastOffset());
+          await heartbeat();
+          return;
+        }
+
+        // 3) Everything else: in order, one message at a time.
+        for (const { m, payload } of good) {
+          if (!isRunning() || isStale()) break;
+          const key = `${topic}/${partition}/${m.offset}`;
+          try { await this._dispatch(topic, payload); this._attempts.delete(key); }
+          catch (err) {
+            if (!this._giveUp(key)) throw err;
+            await this._deadLetter(topic, [m], err.message);
+          }
+          resolveOffset(m.offset);
+          await heartbeat();
+        }
+        if (!good.length) resolveOffset(batch.lastOffset());
       },
     });
     console.log('[bus] Kafka driver connected');
@@ -87,8 +177,12 @@ class KafkaBus {
     this._producer.send({ topic, messages: [{ value: JSON.stringify(payload) }] })
       .catch((err) => console.error(`[bus] publish failed (${topic}):`, err.message));
   }
-  subscribe(topic, handler) { this._local.on(topic, handler); return () => this._local.off(topic, handler); }
-  onAny(handler) { this._local.on('*', handler); }
+  subscribe(topic, handler) {
+    if (!this._handlers.has(topic)) this._handlers.set(topic, new Set());
+    this._handlers.get(topic).add(handler);
+    return () => this._handlers.get(topic)?.delete(handler);
+  }
+  onAny(handler) { this._any.on('*', handler); }
   async close() { await this._producer.disconnect(); await this._consumer.disconnect(); }
 }
 

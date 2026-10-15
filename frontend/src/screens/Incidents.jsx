@@ -481,7 +481,7 @@ function PhotoPanel({ incidentId }) {
         })}
       </div>
       {openPhoto && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setOpenPhoto(null)}>
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 2300, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setOpenPhoto(null)}>
           <div style={{ background: '#fff', borderRadius: 10, padding: 16, maxWidth: '90vw', maxHeight: '90vh', overflow: 'auto' }} onClick={(e) => e.stopPropagation()}>
             <img src={openPhoto.data_url} alt="Job photo full size" style={{ maxWidth: '100%', maxHeight: '70vh', display: 'block', borderRadius: 6, marginBottom: 10 }} />
             <div style={{ fontSize: 13, marginBottom: 8 }}>

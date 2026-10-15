@@ -11,6 +11,7 @@
     "seed:oms03": "node src/infra/seed.js --force --scenario=oms03",
     "test": "node --test src/domain/rebalance.test.js && node src/selftest.js && node src/selftest-oms01.js && node src/selftest-oms03.js && node src/selftest-jobs.js",
     "test:oms01": "node src/selftest-oms01.js",
+    "test:feederkpi": "node src/selftest-feederkpi.js",
     "test:oms03": "node --test src/domain/rebalance.test.js",
     "test:oms03:db": "node src/selftest-oms03.js",
     "tiles:fetch": "node scripts/fetch-tiles.mjs",
@@ -45,4 +46,5 @@
   "devDependencies": {
     "osm-pbf-parser": "^2.3.0"
   }
+  
 }

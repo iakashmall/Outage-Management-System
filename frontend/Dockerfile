@@ -31,6 +31,10 @@ RUN rm -f package-lock.json && npm install --legacy-peer-deps --workspace=fronte
 
 # Now bring in the actual frontend source and build it.
 COPY frontend ./frontend
+ARG VITE_KEYCLOAK_URL
+ENV VITE_KEYCLOAK_URL=$VITE_KEYCLOAK_URL
+ARG VITE_BASEMAP_FALLBACK=osm
+ENV VITE_BASEMAP_FALLBACK=$VITE_BASEMAP_FALLBACK
 RUN npm run build --workspace=frontend
 
 # ---------- Stage 2: serve with nginx ----------

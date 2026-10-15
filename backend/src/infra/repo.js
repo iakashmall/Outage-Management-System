@@ -2,6 +2,7 @@ import { db } from './db.js';
 import { nanoid } from 'nanoid';
 import { canTransition, LABELS } from '../domain/lifecycle.js';
 import * as rules from '../domain/plannedOutage.js';
+import { feederKpiRepo } from './feederKpiRepo.js';
 import { normalizeSettings, validateProposal, INACTIVE_STATUSES, MOVABLE_STATUSES } from '../domain/rebalance.js';
 
 // The only module that talks SQL. Every function is now async because the
@@ -152,6 +153,7 @@ async function syncCrewPointer(t, crewId) {
 }
 
 export const repo = {
+  ...feederKpiRepo,
   // ---- incidents
   incidents: () => db.any('SELECT * FROM incidents ORDER BY opened_at DESC'),
   incident: (id) => db.oneOrNone('SELECT * FROM incidents WHERE id=$1', [id]),

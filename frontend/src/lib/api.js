@@ -37,6 +37,19 @@ async function exportReliabilityReport(format, filters = {}) {
   a.remove();
   URL.revokeObjectURL(url);
 }
+async function exportFeederKpi(params = {}) {
+  const r = await fetch(`${BASE}/analytics/feeder-kpi/export?${new URLSearchParams(params)}`, { headers: { ...authHeader() } });
+  if (!r.ok) {
+    const data = await r.json().catch(() => ({}));
+    throw Object.assign(new Error(data.error || r.statusText), { data, status: r.status });
+  }
+  const name = (r.headers.get('content-disposition') || '').match(/filename="([^"]+)"/)?.[1] || 'feeder-kpi.csv';
+  const url = URL.createObjectURL(await r.blob());
+  const a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
 export const api = {
   incidents: () => req('GET', '/incidents'),
   incident: (id) => req('GET', `/incidents/${id}`),
@@ -73,6 +86,13 @@ export const api = {
   slaCompliance: () => req('GET', '/analytics/sla'),
   crewProductivity: () => req('GET', '/analytics/crew-productivity'),
   outageFrequency: () => req('GET', '/analytics/outage-frequency'),
+  feederKpiDefs: () => req('GET', '/analytics/feeder-kpi/defs'),
+  feederKpi: (params) => req('GET', `/analytics/feeder-kpi?${new URLSearchParams(params)}`),
+  feederKpiRatings: () => req('GET', '/analytics/feeder-kpi/ratings'),
+  feederKpiChildSeries: (params) => req('GET', `/analytics/feeder-kpi/child-series?${new URLSearchParams(params)}`),
+  feederKpiSeries: (params) => req('GET', `/analytics/feeder-kpi/series?${new URLSearchParams(params)}`),
+  updateFeederKpiRating: (feeder, patch) => req('PUT', `/analytics/feeder-kpi/ratings/${encodeURIComponent(feeder)}`, patch),
+  exportFeederKpi,
   audit: () => req('GET', '/audit'),
   network: () => req('GET', '/network'),
   networkTopology: () => req('GET', '/network/topology'),

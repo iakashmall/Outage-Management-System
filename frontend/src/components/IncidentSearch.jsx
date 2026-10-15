@@ -64,7 +64,7 @@ export default function IncidentSearch({ onOpen }) {
       </div>
 
       {open && (
-        <div className="ms-results" style={{ position: 'absolute', top: 'calc(100% + 6px)', left: 0, right: 0, zIndex: 900, marginTop: 0 }}>
+        <div className="ms-results" style={{ position: 'absolute', top: 'calc(100% + 6px)', left: 0, right: 0, zIndex: 2100, marginTop: 0 }}>
           {!results.length && <div className="ms-empty">{query ? `No incidents match "${q}".` : 'No incidents to show.'}</div>}
           {results.map((i) => (
             <button
