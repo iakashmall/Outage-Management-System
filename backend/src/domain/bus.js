@@ -66,7 +66,10 @@ class KafkaBus {
   constructor(brokers) {
     this._kafka = new Kafka({ clientId: 'oms-backend', brokers, logLevel: logLevel.NOTHING });
     this._producer = this._kafka.producer();
-    this._consumer = this._kafka.consumer({ groupId: 'oms-backend' });
+    // Every process in one group shares the topics' partitions, so a second
+    // process (self-test, load-test probe) needs its own KAFKA_GROUP_ID or it
+    // steals messages from the running backend.
+    this._consumer = this._kafka.consumer({ groupId: process.env.KAFKA_GROUP_ID || 'oms-backend' });
     this._handlers = new Map(); // topic -> Set(handler); awaited, so Kafka waits for them
     this._any = new EventEmitter(); // WebSocket bridge etc.; fire-and-forget
     this._any.setMaxListeners(0);

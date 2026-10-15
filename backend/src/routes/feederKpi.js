@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { requireRole } from './auth.js';
 import { repo } from '../infra/repo.js';
 import { KPI_DEFS, PERIODS, SUFFIXES } from '../domain/feederKpi.js';
-import { feederKpisForPeriod, feederKpiSeries, feederKpiChildSeries, ingestSamples, rollupDay, feederCatalog, maxGapMs, fyStartMonth } from '../realtime/feederKpi.js';
+import { feederKpisForPeriod, feederKpiSeries, feederKpiChildSeries, ingestSamples, rollupDay, clearKpiCache, feederCatalog, maxGapMs, fyStartMonth } from '../realtime/feederKpi.js';
 
 // PFC feeder-wise KPIs (FVHI ... FLIF). Mounted on the authenticated /api router.
 //
@@ -77,6 +77,7 @@ feederKpiRoutes.put('/analytics/feeder-kpi/ratings/:feeder', requireRole('system
     const row = await repo.updateFeederRating(req.params.feeder, patch, who(req));
     if (!row) return res.status(404).json({ error: 'feeder not found' });
     await repo.audit(who(req), 'feeder_kpi.rating.update', req.params.feeder);
+    clearKpiCache(); // today's live values use the rating
     res.json(row);
   } catch (e) {
     if (e.code === '23514') return res.status(400).json({ error: 'low threshold must be below high threshold' });

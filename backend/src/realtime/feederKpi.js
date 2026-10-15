@@ -17,6 +17,41 @@ const DAY_MS = 86_400_000;
 export const maxGapMs = () => (Number(process.env.FEEDER_KPI_MAX_GAP_MIN) || 10) * 60_000;
 export const fyStartMonth = () => Number(process.env.KPI_FY_START_MONTH) || 4;
 
+// ---- short-lived result cache ----
+// Today's KPIs are computed from raw telemetry, so at a high SCADA rate every
+// dashboard load would rescan millions of rows. Results are kept for
+// FEEDER_KPI_CACHE_SEC (default 60, 0 = off) - the dashboard itself refreshes
+// once a minute - and identical requests in flight share one computation.
+// Cleared when stored days are recomputed or a feeder rating changes.
+const cacheMs = () => {
+  const v = Number(process.env.FEEDER_KPI_CACHE_SEC);
+  return (Number.isFinite(v) && v >= 0 ? v : 60) * 1000;
+};
+const CACHE_MAX = 500;
+const cache = new Map(); // key -> { at, promise }
+let cacheGen = 0;
+
+function cached(key, fn) {
+  const ttl = cacheMs();
+  if (!ttl) return fn();
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.at < ttl) return hit.promise;
+  const gen = cacheGen;
+  const promise = fn().catch((e) => { if (cache.get(key)?.promise === promise) cache.delete(key); throw e; });
+  cache.set(key, { at: Date.now(), promise });
+  if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value); // oldest first
+  // A clear that ran while this was computing makes the result stale.
+  promise.then(() => { if (gen !== cacheGen && cache.get(key)?.promise === promise) cache.delete(key); }, () => {});
+  return promise;
+}
+
+export function clearKpiCache() {
+  cacheGen++;
+  cache.clear();
+}
+
+const queryKey = (q) => `${q.period}|${q.date || ''}|${q.from || ''}|${q.to || ''}`;
+
 // Feeder codes as the GIS model names them (the same codes incidents use).
 const codeToSub = new Map(substations.map((s) => [s.code, s.name]));
 const CATALOG = (() => {
@@ -64,6 +99,7 @@ function blankIfNoData(r) {
 export async function rollupDay(day) {
   const rows = await computeDay(day, await ratingsMap());
   await repo.saveFeederKpiDaily(rows.map(({ feeder, day: d, kpis, extras, coverage, rating }) => ({ feeder, day: d, kpis, extras, coverage, rating })));
+  clearKpiCache();
   return rows.length;
 }
 
@@ -71,7 +107,11 @@ export async function rollupDay(day) {
  * KPIs for every feeder (or one) over a period.
  * @returns { range, today, feeders: [{ feeder, substation, kpis, extras, coverage, days }] }
  */
-export async function feederKpisForPeriod(query, onlyFeeder = null) {
+export function feederKpisForPeriod(query, onlyFeeder = null) {
+  return cached(`period|${queryKey(query)}|${onlyFeeder || ''}`, () => feederKpisForPeriodNow(query, onlyFeeder));
+}
+
+async function feederKpisForPeriodNow(query, onlyFeeder) {
   let range;
   try { range = periodRange(query.period, { date: query.date, from: query.from, to: query.to, fyStartMonth: fyStartMonth() }); }
   catch (e) { e.status = 400; throw e; }
@@ -91,7 +131,9 @@ export async function feederKpisForPeriod(query, onlyFeeder = null) {
     for (const row of await repo.feederKpiDaily(pastDays[0], pastDays.at(-1), onlyFeeder)) add(row.feeder, row);
   }
   if (includesToday) {
-    for (const row of await computeDay(today, await ratingsMap())) {
+    // Today for all feeders: shared by every period and feeder view for a minute.
+    const todayRows = await cached(`today|${today}`, async () => computeDay(today, await ratingsMap()));
+    for (const row of todayRows) {
       if (!onlyFeeder || row.feeder === onlyFeeder) add(row.feeder, row);
     }
   }
@@ -196,8 +238,12 @@ async function computeDayOne(day, feeder, rating) {
   return computeFeederKpis(samples, rating, { from, to, prior: priors.find((p) => p.feeder === feeder), maxGapMs: maxGapMs() });
 }
 
-export async function feederKpiSeries(query, feeder) {
-  if (!feeder) { const e = new Error('feeder is required'); e.status = 400; throw e; }
+export function feederKpiSeries(query, feeder) {
+  if (!feeder) { const e = new Error('feeder is required'); e.status = 400; return Promise.reject(e); }
+  return cached(`series|${queryKey(query)}|${feeder}`, () => feederKpiSeriesNow(query, feeder));
+}
+
+async function feederKpiSeriesNow(query, feeder) {
   let range;
   try { range = periodRange(query.period, { date: query.date, from: query.from, to: query.to, fyStartMonth: fyStartMonth() }); }
   catch (e) { e.status = 400; throw e; }
@@ -254,7 +300,11 @@ export async function feederKpiSeries(query, feeder) {
 //   substation = null -> one series per substation (its feeders combined)
 //   substation = name -> one series per feeder of that substation
 // Children are combined point by point with the same rules as periods.
-export async function feederKpiChildSeries(query, substation = null) {
+export function feederKpiChildSeries(query, substation = null) {
+  return cached(`children|${queryKey(query)}|${substation || ''}`, () => feederKpiChildSeriesNow(query, substation));
+}
+
+async function feederKpiChildSeriesNow(query, substation) {
   const scope = CATALOG.filter((c) => !substation || c.substation === substation);
   const perFeeder = [];
   for (let i = 0; i < scope.length; i += 8) {
