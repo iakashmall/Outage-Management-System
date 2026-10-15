@@ -11,12 +11,13 @@
 //   { type: 'completion', id, form, queuedAt }   OMS-03, fault jobs only
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Directory, File, Paths } from "expo-file-system";
-import { updateJobStatus, uploadJobPhoto, saveAssetScan, postJobCompletion } from "./api";
+import { updateJobStatus, uploadJobPhoto, saveAssetScan, postJobCompletion, isSignedIn, isNotYourJob } from "./api";
 import { serverJobUpdate } from "./jobFlow";
 
 const KEY = "oms-status-queue";
-// OMS-03: completion forms the server answered applied:false, by job id:
-// { form, reason, at }. Kept until delivered so a form is never lost.
+// OMS-03: completion forms the server answered applied:false or refused
+// with a 4xx, by job id: { form, reason, at }. Kept until delivered so a
+// form is never lost.
 const UNDELIVERED_KEY = "oms-undelivered-completions";
 // Photos are several hundred KB of base64, too big for AsyncStorage (about
 // 2 MB per entry on Android), so each one waits in its own file.
@@ -74,9 +75,12 @@ export async function queueScan(jobId, scan) {
 }
 
 // The crew's completion form (OMS-03). Callers check canSendCompletion(job)
-// first: never queued for a planned-outage job.
+// first: never queued for a planned-outage job. Demo mode (not signed in)
+// has no server to deliver it to, so it is not queued there.
 export async function queueCompletion(jobId, form) {
+  if (!(await isSignedIn())) return false;
   await push({ type: "completion", id: jobId, form });
+  return true;
 }
 
 async function readUndelivered() {
@@ -145,7 +149,9 @@ let flushing = null;
 // be reached for (the rest would fail too, and order matters: "On Site" must
 // not arrive before "En Route"). One the server refuses is dropped and
 // returned in `dropped` ({ ...item, code, message }) so the app can say
-// which updates were not applied and why. Only one flush runs at a time; a
+// which updates were not applied and why. A refused completion form is kept
+// as "not delivered" instead, unless the job is no longer the crew's (409
+// NOT_YOUR_JOB, 404). Only one flush runs at a time; a
 // call made meanwhile gets the running one.
 export function flushQueue() {
   if (!flushing) {
@@ -171,6 +177,12 @@ export function flushQueue() {
           done.add(itemKey(item));
         } catch (err) {
           if (!isRefusal(err)) break;
+          if (item.type === "completion" && !isNotYourJob(err) && err.status !== 404) {
+            await keepUndeliveredCompletion(item.id, item.form, err.message);
+            notApplied.push({ ...item, reason: `not delivered: ${err.message}` });
+            done.add(itemKey(item));
+            continue;
+          }
           dropped.push({ ...item, code: err.code ?? null, message: err.message });
           deletePhotoFile(item);
           done.add(itemKey(item));

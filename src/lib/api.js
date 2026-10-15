@@ -102,6 +102,11 @@ async function req(path, method = "GET", body) {
 // another crew (rebalance or manual reassign) or left unassigned.
 export const isNotYourJob = (err) => err?.code === "NOT_YOUR_JOB";
 
+// False in demo mode, and once the crew signs out (items may still be queued).
+export async function isSignedIn() {
+  return (await session()).isAuthenticated();
+}
+
 function normalizeOmsJob(job) {
   const lat = Number(job.lat ?? job.latitude ?? job.location?.lat ?? job.location?.latitude ?? job.incident?.lat ?? job.incident?.latitude);
   const lon = Number(job.lon ?? job.lng ?? job.longitude ?? job.location?.lon ?? job.location?.longitude ?? job.incident?.lon ?? job.incident?.longitude);
@@ -243,8 +248,10 @@ export async function saveAssetScan(jobId, scan) {
 // lib/jobFlow.js). Both answer 200 { applied:false, reason } when the
 // server does not apply them, e.g. once the job is locked.
 // POST /api/mobile/jobs/:id/completion { diagnosis, partsUsed, restored, signOff, clientRequestId, submittedAt }
+// Signed out there is nothing to send it with: it throws 401, as the server
+// would, so a queued form stays queued until the crew signs in again.
 export async function postJobCompletion(jobId, form) {
-  if (!(await session()).isAuthenticated()) return null;
+  if (!(await isSignedIn())) throw Object.assign(new Error("Not signed in"), { status: 401, code: "SIGNED_OUT" });
   return req(`/mobile/jobs/${jobId}/completion`, "POST", { ...form, sentAt: new Date().toISOString() });
 }
 
