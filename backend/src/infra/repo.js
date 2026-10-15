@@ -459,6 +459,27 @@ export const repo = {
       : { row: await db.one('SELECT * FROM job_completions WHERE client_request_id=$1', [c.client_request_id]), created: false };
   },
   jobCompletions: (jobId) => db.any('SELECT * FROM job_completions WHERE job_id=$1 ORDER BY received_at DESC', [jobId]),
+
+  // ---- OMS-03 daily work orders (work_date comes back as 'YYYY-MM-DD')
+  workOrder: (crewId, date) => db.oneOrNone(`SELECT *, to_char(work_date, 'YYYY-MM-DD') AS work_date
+    FROM daily_work_orders WHERE crew_id=$1 AND work_date=$2`, [crewId, date]),
+  workOrdersOn: (date) => db.any(`SELECT *, to_char(work_date, 'YYYY-MM-DD') AS work_date
+    FROM daily_work_orders WHERE work_date=$1 ORDER BY crew_id`, [date]),
+  // { row, created }: created false when the crew's day was already started.
+  startWorkOrder: async (w) => {
+    const row = await db.oneOrNone(`INSERT INTO daily_work_orders
+      (id,crew_id,work_date,status,members,start_checks,start_note,started_at,started_by,start_lat,start_lon,start_client_id)
+      VALUES ($/id/,$/crew_id/,$/work_date/,'started',$/members:json/,$/start_checks:json/,$/start_note/,$/started_at/,$/started_by/,$/start_lat/,$/start_lon/,$/start_client_id/)
+      ON CONFLICT DO NOTHING RETURNING id`, w);
+    return { row: await repo.workOrder(w.crew_id, w.work_date), created: !!row };
+  },
+  // Lands only while the day is still open, so two closes can't both win.
+  closeWorkOrderIf: async (id, c) => {
+    const row = await db.oneOrNone(`UPDATE daily_work_orders SET status='closed', closed_at=$/closed_at/, closed_by=$/closed_by/,
+      close_remarks=$/close_remarks/, close_sign_off=$/close_sign_off:json/, close_snapshot=$/close_snapshot:json/, close_client_id=$/close_client_id/
+      WHERE id=$/id/ AND status='started' RETURNING crew_id, to_char(work_date, 'YYYY-MM-DD') AS work_date`, { ...c, id });
+    return row ? repo.workOrder(row.crew_id, row.work_date) : null;
+  },
   addAssetScan: async (scan) => {
     await db.none(
       `INSERT INTO asset_scans

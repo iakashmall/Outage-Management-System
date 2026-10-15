@@ -33,14 +33,17 @@ import {
 import { biometricUnlock } from './lib/biometric';
 import { getLockoutStatus, recordFailedAttempt, resetAttempts as resetLoginAttempts, MAX_ATTEMPTS, LOCKOUT_MS } from './lib/lockout';
 import { API_PORT, CLIENT_ID, KEYCLOAK_PORT, JOB_POLL_INTERVAL_MS } from './config';
-import { reportTrackingState, getCurrentCrew, fetchMyJobs, clearJobCache, updateJobStatus, getJobsLastSyncedAt, getJobMessages, getJobPhotos, getCrewMessages, saveAssetScan, getAssetScans, isNotYourJob, postJobCompletion, reopenJob } from './lib/api.js';
+import { reportTrackingState, getCurrentCrew, fetchMyJobs, clearJobCache, updateJobStatus, getJobsLastSyncedAt, getJobMessages, getJobPhotos, getCrewMessages, saveAssetScan, getAssetScans, isNotYourJob, postJobCompletion, reopenJob, getWorkOrder, startWorkOrder, closeWorkOrder } from './lib/api.js';
 import { getLocation, getLastKnownLocation } from './lib/location';
 import { uploadCapturedPhoto } from './lib/photos';
 import { navigateTo } from './lib/navigate';
 import { isOnlineState, distanceAndDirection } from './lib/offlineNavigation';
 import { getRoadRoute, preloadRoadGraph, formatDistance, formatDuration } from './lib/roadRouting';
 import { openMultiJobRoute } from './lib/routing';
-import { queueUpdate, queueScan, queueCompletion, keepUndeliveredCompletion, getUndeliveredCompletion, clearUndeliveredCompletion, isRetryable, isRefusal, flushQueue, getQueueLength, getQueueItems } from './lib/offlineQueue';
+import { queueUpdate, queueScan, queueCompletion, queueWorkOrder, keepUndeliveredCompletion, getUndeliveredCompletion, clearUndeliveredCompletion, isRetryable, isRefusal, flushQueue, getQueueLength, getQueueItems } from './lib/offlineQueue';
+import { localDate, workOrderId, viewWorkOrder, dayJobs, summarize, startPayload, closePayload, cleanMembers } from './lib/workOrder';
+import { getCachedWorkOrder, cacheWorkOrder, getPendingWorkOrder, setPendingWorkOrder, getLastMembers, saveLastMembers, clearWorkOrderCache } from './lib/workOrderStore';
+import DailyWorkOrder from './components/DailyWorkOrder';
 import { SUBMITTED_LABEL, RESTORED_CHOICES, isCompleted, canSendCompletion, canResendCompletion, canReopen, isReadOnly, completionPayload, serverJobUpdate } from './lib/jobFlow';
 import { startCrewTracking, stopCrewTracking, autoStartCrewTracking, setTrackingPausedByCrew, isLocationServiceOn } from './lib/backgroundLocation';
 import { flushLocations, getPendingLocationCount } from './lib/locationQueue';
@@ -112,7 +115,8 @@ function jobPlanLine(job) {
 
 // Why a status update was dropped instead of retried.
 const itemLabel = (item) => (item.type === 'photo' ? `${item.id} photo` : item.type === 'scan' ? `${item.id} QR scan`
-  : item.type === 'completion' ? `${item.id} completion form` : `${item.id} → ${item.status}`);
+  : item.type === 'completion' ? `${item.id} completion form` : item.type === 'wo-start' ? `${item.id} start of day`
+  : item.type === 'wo-close' ? `${item.id} end of day` : `${item.id} → ${item.status}`);
 
 function droppedUpdateNotice(item) {
   const what = itemLabel(item);
@@ -218,6 +222,13 @@ function NativeAppScreen() {
   // Short notice for things done to the crew's work by someone else, e.g. a
   // job reassigned to another crew (OMS-03).
   const [notice, setNotice] = useState('');
+  // OMS-03 daily work order: the server's last answer and a start / end of
+  // day still waiting in pending sync (see lib/workOrder.js viewWorkOrder).
+  const [workDate, setWorkDate] = useState(() => localDate());
+  const [workOrderServer, setWorkOrderServer] = useState(null);
+  const [workOrderLocal, setWorkOrderLocal] = useState(null);
+  const [lastMembers, setLastMembers] = useState([]);
+  const [workOrderBusy, setWorkOrderBusy] = useState(false);
   const addNotice = useCallback((msg) => setNotice((prev) => appendNotice(prev, msg)), []);
   // True while the job list is the server's answer (not the FALLBACK_JOBS
   // placeholder or the offline cache), so a missing job really means it was
@@ -459,6 +470,9 @@ function NativeAppScreen() {
     applyTracking(false, 'signed_out');
     await authLogout();
     await clearJobCache();
+    await clearWorkOrderCache();
+    setWorkOrderServer(null);
+    setLastMembers([]);
     // Nothing of this crew's session may carry over to the next sign-in on
     // the same phone (a stale notice, or an open job closed as "reassigned").
     jobsSyncedRef.current = false;
@@ -469,9 +483,30 @@ function NativeAppScreen() {
     setAuthenticated(false);
   }, [applyTracking]);
 
+  // OMS-03: today's work order. The date is the phone's, so the screen moves
+  // to the new day by itself after midnight. Offline, the last answer stays.
+  const loadWorkOrder = useCallback(async () => {
+    const date = localDate();
+    setWorkDate(date);
+    const [cached, pending, members] = await Promise.all([getCachedWorkOrder(), getPendingWorkOrder(), getLastMembers()]);
+    setWorkOrderLocal(pending);
+    setLastMembers(members);
+    if (cached) setWorkOrderServer((current) => current || cached);
+    try {
+      const { workOrder } = await getWorkOrder(date);
+      if (workOrder) {
+        setWorkOrderServer(workOrder);
+        cacheWorkOrder(workOrder);
+      }
+    } catch {
+      // no signal: keep showing the cached work order
+    }
+  }, []);
+
   const refresh = useCallback(() => {
     if (!authenticated) return;
     getCurrentCrew().then(setCrew).catch(() => {});
+    loadWorkOrder().catch(() => {});
     fetchMyJobs()
       .then(({ jobs: items, fromServer }) => {
         if (!Array.isArray(items)) return;
@@ -483,7 +518,7 @@ function NativeAppScreen() {
         setJobs(items);
       })
       .catch(() => {});
-  }, [authenticated]);
+  }, [authenticated, loadWorkOrder]);
 
   useEffect(() => {
     refresh();
@@ -678,6 +713,63 @@ function NativeAppScreen() {
     }
   }, [refresh, addNotice, reloadPending, syncPending, applyServerJob]);
 
+  // OMS-03: start or end the crew's day. Sent at once when there is signal
+  // and nothing older is waiting; otherwise queued behind the waiting items
+  // (so the day ends after the job updates it reports on). Returns true when
+  // the Today screen can go back to the work order view.
+  const sendWorkOrder = useCallback(async (kind, payload) => {
+    const crewId = isAuthenticated() ? myCrewId() : crew.id;
+    const woId = workOrderId(crewId, payload.date);
+    const what = kind === 'start' ? 'start of day' : 'end of day';
+    const keepOffline = async () => {
+      if (!(await queueWorkOrder(kind, woId, crewId, payload))) return false;
+      await setPendingWorkOrder(crewId, payload.date, kind, payload);
+      setWorkOrderLocal(await getPendingWorkOrder());
+      await reloadPending();
+      addNotice(`No signal: the ${what} is saved on the phone and will be sent automatically.`);
+      return true;
+    };
+    setWorkOrderBusy(true);
+    try {
+      if (isAuthenticated() && (await getQueueLength()) > 0) {
+        const queued = await keepOffline();
+        syncPending();
+        return queued;
+      }
+      const res = await (kind === 'start' ? startWorkOrder : closeWorkOrder)(payload, crewId);
+      if (res?.workOrder) {
+        setWorkOrderServer(res.workOrder);
+        cacheWorkOrder(res.workOrder);
+      }
+      if (res?.applied === false) addNotice(`${woId}: ${what} not applied: ${res.reason}`);
+      return true;
+    } catch (err) {
+      if (isRefusal(err)) {
+        addNotice(`${woId}: ${what} refused: ${err.message}`);
+        return false;
+      }
+      return keepOffline();
+    } finally {
+      setWorkOrderBusy(false);
+    }
+  }, [crew.id, addNotice, reloadPending, syncPending]);
+
+  const startDay = useCallback(async ({ members, checks, note }) => {
+    const location = await getLocation().catch(() => null);
+    const crewId = isAuthenticated() ? myCrewId() : crew.id;
+    const payload = startPayload({ crewId, date: localDate(), members, checks, note, location });
+    saveLastMembers(payload.members);
+    setLastMembers(payload.members);
+    return sendWorkOrder('start', payload);
+  }, [crew.id, sendWorkOrder]);
+
+  const endDay = useCallback(({ open, reasons, notes, remarks, signOff }) => {
+    const crewId = isAuthenticated() ? myCrewId() : crew.id;
+    return sendWorkOrder('close', closePayload({ crewId, date: workDate, open, reasons, notes, remarks, signOff }));
+  }, [crew.id, workDate, sendWorkOrder]);
+
+  const workOrder = viewWorkOrder({ crewId: isAuthenticated() ? myCrewId() : crew.id, date: workDate, server: workOrderServer, local: workOrderLocal });
+
   if (checkingSession) {
     return (
       <SafeAreaView style={[styles.safe, styles.center]}>
@@ -814,6 +906,7 @@ function NativeAppScreen() {
           <>
             <Text style={styles.title}>Today&apos;s field work</Text>
             <Text style={styles.subtitle}>Priority outages assigned to your crew.</Text>
+            <WorkOrderCard workOrder={workOrder} jobs={jobs} date={workDate} onPress={() => openPage({ tab: 'Today', jobId: null })} />
             <JobStats
               jobs={jobs}
               onSelect={(filter) => {
@@ -838,7 +931,7 @@ function NativeAppScreen() {
                     <View style={styles.pendingDot} />
                     <View style={{ flex: 1 }}>
                       <Text style={styles.pendingItemTitle}>
-                        {item.type === 'photo' ? `${item.id} · Photo` : item.type === 'scan' ? `${item.id} · QR scan ${item.scan?.assetId ?? ''}` : `${item.id} → ${item.status}`}
+                        {item.type === 'photo' ? `${item.id} · Photo` : item.type === 'scan' ? `${item.id} · QR scan ${item.scan?.assetId ?? ''}` : item.type === 'completion' ? `${item.id} · Completion form` : item.type === 'wo-start' ? `${item.id} · Start of day` : item.type === 'wo-close' ? `${item.id} · End of day` : `${item.id} → ${item.status}`}
                       </Text>
                       <Text style={styles.pendingItemMeta}>
                         {item.queuedAt ? `Queued ${timeAgo(item.queuedAt)}` : 'Queued offline'}
@@ -854,6 +947,18 @@ function NativeAppScreen() {
               <JobCard key={job.id} job={job} onPress={() => openPage({ tab: 'Dashboard', jobId: job.id })} />
             ))}
           </>
+        ) : tab === 'Today' ? (
+          <DailyWorkOrder
+            crew={crew}
+            jobs={jobs}
+            date={workDate}
+            workOrder={workOrder}
+            lastMembers={lastMembers}
+            busy={workOrderBusy}
+            onStart={startDay}
+            onEnd={endDay}
+            onOpenJob={(job) => openPage({ tab: 'Today', jobId: job.id })}
+          />
         ) : tab === 'Jobs' ? (
           <NativeJobsPage
             jobs={jobs}
@@ -880,7 +985,7 @@ function NativeAppScreen() {
         )}
       </ScrollView>
       <View style={[styles.nav, { paddingBottom: 12 + insets.bottom }]}>
-        {['Dashboard', 'Jobs', 'Map', 'Profile'].map((item) => (
+        {['Dashboard', 'Today', 'Jobs', 'Map', 'Profile'].map((item) => (
           <Pressable
             key={item}
             onPress={() => {
@@ -940,6 +1045,26 @@ function NativeAppScreen() {
         </SafeAreaView>
       </Modal>
     </SafeAreaView>
+  );
+}
+
+// OMS-03: the day's work order at a glance on the Dashboard; opens Today.
+function WorkOrderCard({ workOrder, jobs, date, onPress }) {
+  const summary = summarize(dayJobs(jobs, date));
+  const status = workOrder?.status || 'not_started';
+  const text = status === 'not_started'
+    ? 'Day not started. Tap to start your day.'
+    : status === 'started'
+      ? `${summary.done} of ${summary.total} jobs done today`
+      : 'Day ended.';
+  return (
+    <Pressable style={[styles.woCard, status === 'not_started' && styles.woCardTodo]} onPress={onPress} accessibilityRole="button" accessibilityLabel={`Today's work order. ${text}`}>
+      <View style={{ flex: 1 }}>
+        <Text style={styles.woCardTitle}>TODAY&apos;S WORK ORDER{workOrder?.pendingSync ? ' · WAITING TO SYNC' : ''}</Text>
+        <Text style={styles.woCardText}>{text}</Text>
+      </View>
+      <Text style={styles.woCardArrow}>›</Text>
+    </Pressable>
   );
 }
 
@@ -2172,6 +2297,11 @@ function ProfileScreen({ crew, jobs, onLogout, onOpenNativeMap }) {
 }
 
 const styles = StyleSheet.create({
+  woCard: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 14, borderRadius: 12, backgroundColor: '#fff', borderWidth: 1, borderColor: '#e6ecf3', marginBottom: 12 },
+  woCardTodo: { borderColor: '#e0a33a', backgroundColor: '#fff8ec' },
+  woCardTitle: { fontSize: 11, fontWeight: '800', color: '#7c8da3', letterSpacing: 0.5 },
+  woCardText: { fontSize: 15, fontWeight: '700', color: '#0f1b2d', marginTop: 3 },
+  woCardArrow: { fontSize: 26, color: '#1F3864', fontWeight: '700' },
   plannedGate: { color: '#8A4B00', backgroundColor: '#FFF4E5', borderRadius: 10, padding: 10, marginTop: 10, fontSize: 14, fontWeight: '600' },
   loginSafe: { flex: 1, backgroundColor: '#10201d' },
   login: { flexGrow: 1, paddingHorizontal: 24, paddingTop: 48 },

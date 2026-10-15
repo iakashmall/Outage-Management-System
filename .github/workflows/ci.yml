@@ -131,6 +131,16 @@ jobs:
           KAFKA_BROKERS: localhost:9092
         run: node src/selftest-jobs.js
 
+      # OMS-03 daily work orders: start / end of day, replays, ownership,
+      # end-of-day snapshot, and the crew app payloads the server accepts.
+      - name: Run daily work order self-test
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://oms:oms@localhost:5432/oms
+          REDIS_URL: redis://localhost:6379
+          KAFKA_BROKERS: localhost:9092
+        run: node src/selftest-workorders.js
+
       # Feeder KPIs (domain/feederKpi.js): hand-worked numbers, no DB needed.
       - name: Run feeder KPI self-test
         working-directory: backend

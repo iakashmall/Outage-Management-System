@@ -9,10 +9,12 @@
 //   { type: 'photo',  id, file, location, note, extra, queuedAt }   image in `file`
 //   { type: 'scan',   id, scan, queuedAt }
 //   { type: 'completion', id, form, queuedAt }   OMS-03, fault jobs only
+//   { type: 'wo-start' | 'wo-close', id, crewId, form, queuedAt }   OMS-03 daily work order; id = work order id
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Directory, File, Paths } from "expo-file-system";
-import { updateJobStatus, uploadJobPhoto, saveAssetScan, postJobCompletion, isSignedIn, isNotYourJob } from "./api";
+import { updateJobStatus, uploadJobPhoto, saveAssetScan, postJobCompletion, startWorkOrder, closeWorkOrder, isSignedIn, isNotYourJob } from "./api";
 import { serverJobUpdate } from "./jobFlow";
+import { clearPendingWorkOrder } from "./workOrderStore";
 
 const KEY = "oms-status-queue";
 // OMS-03: completion forms the server answered applied:false or refused
@@ -83,6 +85,16 @@ export async function queueCompletion(jobId, form) {
   return true;
 }
 
+// Start / end of the crew's day (OMS-03), made without signal. Goes behind
+// the job updates already waiting, so the day is ended after the jobs it
+// reports on reached the server. Not queued in demo mode (nothing to send to).
+export async function queueWorkOrder(kind, workOrderId, crewId, form) {
+  if (!(await isSignedIn())) return false;
+  await push({ type: `wo-${kind}`, id: workOrderId, crewId, form });
+  return true;
+}
+const isWorkOrderItem = (item) => item.type === "wo-start" || item.type === "wo-close";
+
 async function readUndelivered() {
   try {
     return JSON.parse((await AsyncStorage.getItem(UNDELIVERED_KEY)) || "{}");
@@ -137,11 +149,21 @@ async function send(item) {
     return saveAssetScan(item.id, { ...item.scan, scannedAt: ts });
   } else if (item.type === "completion") {
     return postJobCompletion(item.id, item.form);
+  } else if (item.type === "wo-start") {
+    if (!(await isSignedIn())) throw Object.assign(new Error("Not signed in"), { status: 401 });
+    return startWorkOrder(item.form, item.crewId);
+  } else if (item.type === "wo-close") {
+    if (!(await isSignedIn())) throw Object.assign(new Error("Not signed in"), { status: 401 });
+    return closeWorkOrder(item.form, item.crewId);
   }
   return updateJobStatus(item.id, item.status, item.location || {}, item.crewId, ts);
 }
 
 const itemKey = (u) => `${u.type || "status"}|${u.id}|${u.status ?? u.file ?? u.form?.clientRequestId ?? ""}|${u.queuedAt}`;
+
+// A start / end of day dealt with either way: the Today screen goes back to
+// showing the server's work order.
+const settleWorkOrder = (item) => (isWorkOrderItem(item) ? clearPendingWorkOrder(item.form?.date, item.type.slice(3)) : null);
 
 let flushing = null;
 
@@ -174,9 +196,11 @@ export function flushQueue() {
             if (res?.applied === false) await keepUndeliveredCompletion(item.id, item.form, res.reason);
             else await clearUndeliveredCompletion(item.id);
           }
+          await settleWorkOrder(item);
           done.add(itemKey(item));
         } catch (err) {
           if (!isRefusal(err)) break;
+          await settleWorkOrder(item);
           if (item.type === "completion" && !isNotYourJob(err) && err.status !== 404) {
             await keepUndeliveredCompletion(item.id, item.form, err.message);
             notApplied.push({ ...item, reason: `not delivered: ${err.message}` });

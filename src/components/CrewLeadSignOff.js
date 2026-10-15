@@ -4,7 +4,14 @@
 import { useState } from "react";
 import { View, Text, TextInput, Pressable, StyleSheet } from "react-native";
 
-export default function CrewLeadSignOff({ defaultName = "", onComplete, onCancel }) {
+// confirmText / submitLabel let the end-of-day report (DailyWorkOrder.js) reuse it.
+export default function CrewLeadSignOff({
+  defaultName = "",
+  onComplete,
+  onCancel,
+  confirmText = "I confirm the work described above was completed safely and correctly, and the site has been left in a safe condition.",
+  submitLabel = "Sign off & complete job",
+}) {
   const [name, setName] = useState(defaultName);
   const [confirmed, setConfirmed] = useState(false);
 
@@ -26,10 +33,7 @@ export default function CrewLeadSignOff({ defaultName = "", onComplete, onCancel
         <View style={[s.checkbox, confirmed && s.checkboxOn]}>
           {confirmed && <Text style={s.checkTick}>✓</Text>}
         </View>
-        <Text style={s.checkLabel}>
-          I confirm the work described above was completed safely and correctly, and the
-          site has been left in a safe condition.
-        </Text>
+        <Text style={s.checkLabel}>{confirmText}</Text>
       </Pressable>
 
       <View style={s.navRow}>
@@ -41,7 +45,7 @@ export default function CrewLeadSignOff({ defaultName = "", onComplete, onCancel
           disabled={!canSubmit}
           onPress={() => onComplete({ name: name.trim(), signedAt: new Date().toISOString() })}
         >
-          <Text style={s.nextBtnText}>Sign off &amp; complete job</Text>
+          <Text style={s.nextBtnText}>{submitLabel}</Text>
         </Pressable>
       </View>
     </View>

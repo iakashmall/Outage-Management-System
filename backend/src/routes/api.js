@@ -28,6 +28,7 @@ import { dispatchRoutes } from './dispatch.js';
 import { PRIORITY_CLASSES, isActive, isMovable, priorityInfo } from '../domain/rebalance.js';
 import { isOperator } from '../domain/plannedOutage.js';
 import { normalizeStatus, isCrewStatus, decideStatus, undoOpenUntil, isLocked, RESTORED } from '../domain/jobWorkflow.js';
+import * as wo from '../domain/workOrder.js';
 
 export const api = Router();
 
@@ -1274,6 +1275,108 @@ api.get('/incidents/:id/field-report', async (req, res) => {
       scans: (await repo.assetScansForJob(j.id, true)).filter((x) => x.not_applied_reason),
     },
   }))));
+});
+
+// ---------- OMS-03: daily work orders ----------
+// One per crew per working day (domain/workOrder.js). The crew lead starts
+// the day and ends it; both are idempotent by clientRequestId and answered
+// 200 { applied:false, reason } when they don't apply (already started,
+// closed, not started), so the phone's pending sync drops a stale resend.
+const badRequest = (res, message, code = 'BAD_REQUEST') => res.status(400).json({ code, message });
+
+// The day as the crew or the control room sees it: the work order (or a
+// not-started placeholder), the day's jobs in working order, and a summary.
+async function workOrderView(crewId, date) {
+  const row = await repo.workOrder(crewId, date);
+  const day = wo.dayJobs(await repo.jobsForCrew(crewId), date);
+  const brief = (j) => ({ id: j.id, incidentId: j.incident_id ?? null, status: j.status, priority: priorityInfo(j).priority, estimatedDurationMin: j.estimated_duration_min ?? null });
+  return {
+    workOrder: row || { id: wo.workOrderId(crewId, date), crew_id: crewId, work_date: date, status: 'not_started' },
+    jobs: { open: day.open.map(brief), done: day.done.map(brief) },
+    summary: wo.summarize(day),
+  };
+}
+
+// The date in the body or query, else today; null (after a 400) if malformed.
+function workDateFrom(res, value) {
+  if (value == null || value === '') return wo.workDate();
+  if (!wo.isWorkDate(value)) { badRequest(res, 'date must be YYYY-MM-DD', 'BAD_DATE'); return null; }
+  return value;
+}
+
+api.get('/mobile/crews/:id/work-order', async (req, res) => {
+  if (!crewAllowed(req, res, req.params.id)) return;
+  const date = workDateFrom(res, req.query.date);
+  if (!date) return;
+  if (!(await repo.crew(req.params.id))) return res.status(404).json({ error: 'not found' });
+  res.json(await workOrderView(req.params.id, date));
+});
+
+api.post('/mobile/crews/:id/work-order/start', async (req, res) => {
+  const crewId = req.params.id;
+  if (!crewAllowed(req, res, crewId)) return;
+  const b = req.body || {};
+  const date = workDateFrom(res, b.date);
+  if (!date) return;
+  if (!(await repo.crew(crewId))) return res.status(404).json({ error: 'not found' });
+  const form = wo.parseStart(b);
+  if (form.error) return badRequest(res, form.error, form.code);
+  const startedAt = clientTime(b.startedAt, b.sentAt);
+  const clientRequestId = typeof b.clientRequestId === 'string' && b.clientRequestId ? b.clientRequestId : `${crewId}@${date}@start@${startedAt}`;
+  const answer = async (status, extra) => res.status(status).json({ ...extra, ...(await workOrderView(crewId, date)) });
+  if (!wo.dateAllowed(date)) return answer(200, { applied: false, reason: `work date ${date} is not open` });
+  const lat = Number(b.lat), lon = Number(b.lon);
+  const { row, created } = await repo.startWorkOrder({
+    id: wo.workOrderId(crewId, date), crew_id: crewId, work_date: date,
+    members: form.members, start_checks: form.checks, start_note: form.note,
+    started_at: startedAt, started_by: req.user?.username || null,
+    start_lat: Number.isFinite(lat) ? lat : null, start_lon: Number.isFinite(lon) ? lon : null,
+    start_client_id: clientRequestId,
+  });
+  if (!created) {
+    if (row?.start_client_id === clientRequestId) return answer(200, { applied: true, duplicate: true });
+    return answer(200, { applied: false, reason: row?.status === 'closed' ? 'day already ended' : 'day already started' });
+  }
+  await repo.audit(req.user?.username || 'Crew', 'work_order.start', row.id);
+  bus.publish(TOPICS.CREW_UPDATED, await repo.crew(crewId));
+  answer(201, { applied: true });
+});
+
+api.post('/mobile/crews/:id/work-order/close', async (req, res) => {
+  const crewId = req.params.id;
+  if (!crewAllowed(req, res, crewId)) return;
+  const b = req.body || {};
+  const date = workDateFrom(res, b.date);
+  if (!date) return;
+  if (!(await repo.crew(crewId))) return res.status(404).json({ error: 'not found' });
+  const form = wo.parseClose(b);
+  if (form.error) return badRequest(res, form.error);
+  const closedAt = clientTime(b.closedAt, b.sentAt);
+  const clientRequestId = typeof b.clientRequestId === 'string' && b.clientRequestId ? b.clientRequestId : `${crewId}@${date}@close@${closedAt}`;
+  const answer = async (status, extra) => res.status(status).json({ ...extra, ...(await workOrderView(crewId, date)) });
+  const current = await repo.workOrder(crewId, date);
+  if (!current) return answer(200, { applied: false, reason: 'day not started' });
+  if (current.status === 'closed') {
+    if (current.close_client_id === clientRequestId) return answer(200, { applied: true, duplicate: true });
+    return answer(200, { applied: false, reason: 'day already ended' });
+  }
+  const day = wo.dayJobs(await repo.jobsForCrew(crewId), date);
+  const closed = await repo.closeWorkOrderIf(current.id, {
+    closed_at: closedAt, closed_by: req.user?.username || null, close_remarks: form.remarks,
+    close_sign_off: form.signOff, close_snapshot: wo.closeSnapshot(day, form.carryOver), close_client_id: clientRequestId,
+  });
+  if (!closed) return answer(200, { applied: false, reason: 'day already ended' });
+  await repo.audit(req.user?.username || 'Crew', 'work_order.close', closed.id);
+  bus.publish(TOPICS.CREW_UPDATED, await repo.crew(crewId));
+  answer(200, { applied: true });
+});
+
+// The control room's view of every crew's day.
+api.get('/work-orders', requireRole('oms_operator', 'system_admin', 'field_crew_coordinator'), async (req, res) => {
+  const date = workDateFrom(res, req.query.date);
+  if (!date) return;
+  const crews = await repo.crews();
+  res.json({ date, crews: await Promise.all(crews.map(async (c) => ({ crew: { id: c.id, name: c.name, lead: c.lead }, ...(await workOrderView(c.id, date)) }))) });
 });
 
 // ---------- admin ----------

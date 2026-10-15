@@ -545,6 +545,31 @@ export async function migrate() {
       ts        TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY (job_id, kind, status, client_ts)
     );
+
+    -- OMS-03 daily work orders (domain/workOrder.js): one per crew per working
+    -- day, created when the crew lead starts the day. The client ids make a
+    -- resend from the phone's pending sync a replay, not a second start/close.
+    CREATE TABLE IF NOT EXISTS daily_work_orders (
+      id              TEXT PRIMARY KEY,
+      crew_id         TEXT NOT NULL REFERENCES crews(id) ON DELETE CASCADE,
+      work_date       DATE NOT NULL,
+      status          TEXT NOT NULL CHECK (status IN ('started', 'closed')),
+      members         JSONB NOT NULL,
+      start_checks    JSONB NOT NULL,
+      start_note      TEXT,
+      started_at      TIMESTAMPTZ NOT NULL,
+      started_by      TEXT,
+      start_lat       DOUBLE PRECISION,
+      start_lon       DOUBLE PRECISION,
+      start_client_id TEXT UNIQUE,
+      closed_at       TIMESTAMPTZ,
+      closed_by       TEXT,
+      close_remarks   TEXT,
+      close_sign_off  JSONB,
+      close_snapshot  JSONB,
+      close_client_id TEXT UNIQUE,
+      UNIQUE (crew_id, work_date)
+    );
   `);
 
   // ID sequences for incidents.id / complaints.qid. These replace the old
