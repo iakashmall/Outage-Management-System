@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
-import { Icon, SevBadge, StatusBadge, timeAgo, hhmm, useLiveRefresh, toast } from '../lib/ui.jsx';
+import { Icon, SevBadge, StatusBadge, timeAgo, hhmm, useLiveRefresh, toast, crewBusyText } from '../lib/ui.jsx';
 import { Drawer, DrawerContent } from '../components/ui/drawer.jsx';
 import { currentUser } from '../lib/auth.js';
 
@@ -229,14 +229,14 @@ function IncidentDrawer({ inc, onClose, onChange }) {
 
           {!inc.crew_id && ['open', 'dispatched'].includes(inc.status) && (
             <>
-              <div style={{ margin: '18px 0 8px' }} className="eyebrow">Assign crew - nearest first</div>
+              <div style={{ margin: '18px 0 8px' }} className="eyebrow">Assign crew - free crews first, then nearest</div>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 {nearest.map((c) => (
                   <button key={c.id} className="btn sm" disabled={busy} onClick={() => doAssign(c.id)}>
-                    {c.name} - {c.meters_away < 1000 ? `${Math.round(c.meters_away)} m` : `${(c.meters_away / 1000).toFixed(1)} km`}
+                    {c.name} - {c.meters_away < 1000 ? `${Math.round(c.meters_away)} m` : `${(c.meters_away / 1000).toFixed(1)} km`}{crewBusyText(c)}
                   </button>
                 ))}
-                {!nearest.length && <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>No crews available right now.</span>}
+                {!nearest.length && <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>No crews on shift right now.</span>}
               </div>
             </>
           )}

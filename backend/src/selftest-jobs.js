@@ -294,6 +294,38 @@ const server = app.listen(0, async () => {
     check('planned job listed with planned:true, locked:false', (await call('c3', 'GET', '/mobile/crews/C003/jobs')).body.some((j) => j.id === 'JOB-PLANNED-T' && j.planned === true && j.locked === false));
     check('return-for-correction on a planned incident -> 409', (await call('op', 'POST', `/incidents/${po.incident_id}/return-for-correction`, { reason: 'x' })).status === 409);
     await db.none("DELETE FROM jobs WHERE id='JOB-PLANNED-T'");
+
+    console.log('Crews offered for assignment (a crew may hold several jobs)');
+    if (!(await db.oneOrNone("SELECT 1 FROM pg_extension WHERE extname='postgis'"))) {
+      console.log('  (skipped: needs PostGIS for distances)');
+    } else {
+      // Only these three crews are on shift, so the list is exactly theirs.
+      await db.none('UPDATE crews SET on_shift=false');
+      const incAt = async (lat, lon) => (await call('op', 'POST', '/incidents', { zone: 'Kankhal-2', severity: 'high', lat, lon })).body;
+      const busyInc = await incAt(29.937, 78.174);
+      await db.none(`INSERT INTO crews (id, name, lead, status, location, job_id, lat, lon, skills, on_shift) VALUES
+        ('T-FREE', 'Test Free', 'A', 'available', 'far depot', NULL, 30.05, 78.30, 'MV', true),
+        ('T-BUSY', 'Test Busy', 'B', 'in_service', 'site', $1, 29.9372, 78.1742, 'MV', true),
+        ('T-OFF',  'Test Off',  'C', 'available', 'near', NULL, 29.9371, 78.1741, 'MV', false)`, [busyInc.id]);
+      await repo.createJob({ id: 'JOB-T-BUSY', incident_id: busyInc.id, crew_id: 'T-BUSY', priority: 'Normal', status: 'On Site', address: 'x', updated_at: new Date().toISOString() });
+      const target = await incAt(29.937, 78.174);
+      const offer = (await call('op', 'GET', `/incidents/${target.id}/nearest-crews`)).body;
+      check('busy crews are offered, off-shift ones are not', offer.map((c) => c.id).join() === 'T-FREE,T-BUSY', offer.map((c) => c.id));
+      check('a free crew comes first even when farther (T-FREE ~16 km before T-BUSY ~20 m)', offer[0]?.id === 'T-FREE' && offer[0].meters_away > offer[1].meters_away, offer.map((c) => Math.round(c.meters_away)));
+      check('each crew carries its active job count (T-BUSY 1, T-FREE 0)', offer.find((c) => c.id === 'T-BUSY')?.active_jobs === 1 && offer.find((c) => c.id === 'T-FREE')?.active_jobs === 0);
+      const a1 = await call('op', 'POST', `/incidents/${target.id}/assign`, { crewId: 'T-BUSY' });
+      const busyAfter = await repo.crew('T-BUSY');
+      check('assign to a crew On Site elsewhere: job created, crew stays in_service on its current job',
+        a1.status === 200 && a1.body.job?.crew_id === 'T-BUSY' && busyAfter.status === 'in_service' && busyAfter.job_id === busyInc.id, JSON.stringify({ status: busyAfter.status, job_id: busyAfter.job_id }));
+      const again = (await call('op', 'GET', `/incidents/${(await incAt(29.937, 78.174)).id}/nearest-crews`)).body;
+      check('T-BUSY now shows 2 active jobs', again.find((c) => c.id === 'T-BUSY')?.active_jobs === 2);
+      const idleInc = await incAt(30.0, 78.25);
+      await call('op', 'POST', `/incidents/${idleInc.id}/assign`, { crewId: 'T-FREE' });
+      const freeAfter = await repo.crew('T-FREE');
+      check('assign to an idle crew: in_transit to that incident (unchanged behaviour)', freeAfter.status === 'in_transit' && freeAfter.job_id === idleInc.id, JSON.stringify({ status: freeAfter.status, job_id: freeAfter.job_id }));
+      check('assign to an off-shift crew -> 409 CREW_OFF_SHIFT', (await call('op', 'POST', `/incidents/${idleInc.id}/assign`, { crewId: 'T-OFF' })).body.code === 'CREW_OFF_SHIFT');
+      await db.none("UPDATE crews SET on_shift=true WHERE id NOT LIKE 'T-%'");
+    }
   } catch (e) {
     fails++;
     console.log('  [FAIL] unexpected error', e.stack);

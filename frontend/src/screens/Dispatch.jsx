@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
 import { dispatchApi } from '../lib/dispatchApi.js';
-import { CrewDot, Icon, SevBadge, timeAgo, useLiveRefresh, toast } from '../lib/ui.jsx';
+import { CrewDot, Icon, SevBadge, crewBusyText, timeAgo, useLiveRefresh, toast } from '../lib/ui.jsx';
 import { AddCrewForm, Field, HistoryCard, PRIORITIES, ProposalCard, SettingsEditor, WorkloadPanel, inp } from './DispatchWorkload.jsx';
 
 // Why a crew's continuous tracking is off (reported by the crew app).
@@ -272,13 +272,13 @@ function NearestCrewPicker({ incId, area, skill, pick, setPick, offShift, fallba
   const dist = (m) => (m == null ? '' : m < 1000 ? ` · ${Math.round(m)} m` : ` · ${(m / 1000).toFixed(1)} km`);
   return (
     <select className="btn sm" style={{ flex: 1 }} aria-label="Select nearest crew to assign" value={cur || ''} onChange={(e) => setPick({ ...pick, [incId]: e.target.value })}>
-      <option value="">{nearest === null ? 'Loading crews…' : usable.length ? 'Select crew…' : 'No crews available'}</option>
+      <option value="">{nearest === null ? 'Loading crews…' : usable.length ? 'Select crew…' : 'No crews on shift'}</option>
       {list.map((c) => {
         const off = offShift.has(c.id);
         const why = misfit(byId.get(c.id), area, skill);
         return (
           <option key={c.id} value={c.id} disabled={off}>
-            {c.name}{dist(c.meters_away)}{off ? ' (off shift)' : ''}{why.length ? ` (${why.join(', ')})` : ''}
+            {c.name}{dist(c.meters_away)}{crewBusyText(c)}{off ? ' (off shift)' : ''}{why.length ? ` (${why.join(', ')})` : ''}
           </option>
         );
       })}

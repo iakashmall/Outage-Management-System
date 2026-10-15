@@ -327,7 +327,11 @@ api.post('/incidents/:id/assign', requireRole('oms_operator', 'system_admin'), a
   const existing = mine || active.find((j) => j.crew_id == null) || active.find(movable);
 
   await repo.updateIncident(inc.id, { crew_id: crew.id, status: inc.status === 'open' ? 'dispatched' : inc.status });
-  await repo.updateCrew(crew.id, { status: 'in_transit', job_id: inc.id, location: inc.zone });
+  // An idle crew heads to this incident. A crew already working (OMS-03: a
+  // crew may hold several jobs) keeps its status and current job; syncCrew
+  // below keeps its pointer in line with its work, as a rebalance does.
+  const busy = (await repo.jobsForCrew(crew.id)).some((j) => isActive(j) && j.incident_id !== inc.id);
+  if (!busy) await repo.updateCrew(crew.id, { status: 'in_transit', job_id: inc.id, location: inc.zone });
   const fields = { priority, estimated_duration_min: dur ?? null, required_skill };
   let job, fromCrew = null;
   if (existing) {
@@ -342,6 +346,7 @@ api.post('/incidents/:id/assign', requireRole('oms_operator', 'system_admin'), a
       address: inc.zone, updated_at: new Date().toISOString(), ...fields });
   }
   await repo.addJobUpdate(job.id, job.status, null, null, existing ? `Assigned to ${crew.id}` : null, null, 'dispatch');
+  if (busy) await repo.syncCrew(crew.id);
   if (fromCrew && fromCrew !== crew.id) bus.publish(TOPICS.CREW_UPDATED, await repo.crew(fromCrew));
   await repo.addIncidentEvent(inc.id, who, 'assigned', `${crew.name} assigned`);
   await repo.audit(who, 'dispatch.assign', `${inc.id}-${crew.id}`);
@@ -356,7 +361,8 @@ api.post('/incidents/:id/assign', requireRole('oms_operator', 'system_admin'), a
 // ---------- crews ----------
 api.get('/crews', async (req, res) => res.json(await repo.crews()));
 
-// Nearest available crews to an incident (PostGIS distance-ranked).
+// Crews to offer for an incident: every on-shift crew, idle first, then
+// nearest (PostGIS distance-ranked), with each crew's active job count.
 // Was previously registered *inside* the POST /assign handler, which meant it
 // only existed after the first assign call (and got re-registered on every
 // call after that). Hoisted to top-level route registration - fixed as part
@@ -364,7 +370,7 @@ api.get('/crews', async (req, res) => res.json(await repo.crews()));
 api.get('/incidents/:id/nearest-crews', async (req, res) => {
   const inc = await repo.incident(req.params.id);
   if (!inc) return res.status(404).json({ error: 'not found' });
-  const crews = await repo.nearestAvailableCrews(inc.id);
+  const crews = await repo.nearestOnShiftCrews(inc.id);
   res.json(crews);
 });
 

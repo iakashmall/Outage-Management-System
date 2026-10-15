@@ -41,6 +41,16 @@ export const CrewDot = ({ status, size = 9 }) => (
     : <span title={status} style={{ width: size, height: size, borderRadius: '50%', flex: '0 0 auto', background: CREW_STATUS_COLOR[status] || 'var(--faint)' }} />
 );
 
+// OMS-03: a crew offered for assignment may already be working (GET
+// /incidents/:id/nearest-crews lists every on-shift crew): " · on site · 2 jobs".
+const CREW_STATUS_TEXT = { in_transit: 'en route', in_service: 'on site', on_break: 'on break' };
+export const crewBusyText = (c) => {
+  if (c.status === 'available' && !c.active_jobs) return '';
+  const st = CREW_STATUS_TEXT[c.status] || (c.status === 'available' ? '' : c.status);
+  const jobs = c.active_jobs ? `${c.active_jobs} job${c.active_jobs === 1 ? '' : 's'}` : '';
+  return [st, jobs].filter(Boolean).map((s) => ` · ${s}`).join('');
+};
+
 export const timeAgo = (iso) => {
   if (!iso) return '—';
   const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);

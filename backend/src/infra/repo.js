@@ -365,14 +365,19 @@ export const repo = {
     ),
   // Available crews nearest an incident, using real PostGIS distance -- replaces
   // picking "any available crew" with a distance-ranked list.
-  nearestAvailableCrews: (incidentId, limit = 6) =>
+  // OMS-03: a crew may carry several jobs, so every on-shift crew is offered,
+  // idle ones first, then by distance; active_jobs lets the dispatcher see
+  // how busy each one is (same rule as the workload: open incidents only).
+  nearestOnShiftCrews: (incidentId, limit = 8) =>
     db.any(`
-      SELECT c.*, public.ST_Distance(c.geog, i.geog) AS meters_away
+      SELECT c.*, public.ST_Distance(c.geog, i.geog) AS meters_away,
+        (SELECT count(*)::int FROM jobs WHERE jobs.crew_id = c.id
+           AND (jobs.status IS NULL OR jobs.status NOT IN (${INACTIVE_SQL})) AND ${OPEN_INCIDENT_SQL}) AS active_jobs
       FROM crews c, incidents i
       WHERE i.id = $1
-        AND c.status = 'available'
+        AND c.on_shift IS NOT FALSE AND c.status <> 'off_shift'
         AND c.geog IS NOT NULL AND i.geog IS NOT NULL
-      ORDER BY meters_away
+      ORDER BY (c.status = 'available') DESC, meters_away
       LIMIT $2
     `, [incidentId, limit]),
   // ---- alarms
