@@ -1,5 +1,7 @@
+import { pathToFileURL } from 'node:url';
 import { db, migrate, syncIdSequences } from './db.js';
 import { repo } from './repo.js';
+import { seedOms03Demo } from './seedOms03.js';
 
 // Seed mirrors the UPCL "Ganga Corridor" reference data from the SRS/screens:
 // Dehradun, Haridwar, Rishikesh — real coordinates, CIM-style feeder IDs, UNS tags.
@@ -12,6 +14,9 @@ export async function seed({ force = false } = {}) {
     // OMS-01 planned-outage rows reference incidents, so they go first.
     // safety_log is left alone: it is append-only by design (a DB trigger
     // refuses DELETE) and has no foreign keys, so it outlives the reset.
+    // OMS-03: proposals are working data; job_reassignments is append-only
+    // (like safety_log) and has no FKs, so it is left alone too.
+    await t.none('DELETE FROM rebalance_proposals');
     for (const table of ['planned_crew_reports', 'switching_steps', 'work_permits', 'switching_plans', 'planned_outages']) {
       await t.none(`DELETE FROM ${table}`);
     }
@@ -32,9 +37,14 @@ export async function seed({ force = false } = {}) {
     ['C005','Crew Echo-1','Meena Rao','available','Gurukul Depot',null,29.9200,78.1161,'MV,LV'],
     ['C006','Crew Zeta-2','Vijay Nair','on_break','Jwalapur Depot',null,29.9281,78.0850,'HV,Substation'],
   ];
+  // Area of responsibility (OMS-03) = each crew's own substation, using the
+  // incidents.substation strings. capacity/on_shift keep their column defaults.
+  const BW = '33/11 kV BHOOPATWALA S/s', IA = '33/11 kV INDUSTRIAL AREA S/s', JW = '33/11 kV JWALAPUR-I S/s';
+  const MP = '33/11 kV MAYAPUR S/s', KK = '33/11 kV KANKHAL- 2 S/s', BC = '33/11 kV BAIRAGI CAMP S/s';
+  const AOR = { C001: BW, C002: IA, C003: MP, C004: KK, C005: BC, C006: JW };
   for (const c of crews) {
-    await db.none(`INSERT INTO crews (id,name,lead,status,location,job_id,lat,lon,skills)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, c);
+    await db.none(`INSERT INTO crews (id,name,lead,status,location,job_id,lat,lon,skills,aor)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [...c, [AOR[c[0]]]]);
   }
 
   const SLA = { critical: 90, high: 180, medium: 360, low: 720 }; // minutes
@@ -87,8 +97,6 @@ export async function seed({ force = false } = {}) {
 
   // Displayed state is derived from the linked incident (see domain/callState.js);
   // only 'rejected' is stored. Area = substation, same string format as incidents.substation.
-  const BW = '33/11 kV BHOOPATWALA S/s', IA = '33/11 kV INDUSTRIAL AREA S/s', JW = '33/11 kV JWALAPUR-I S/s';
-  const MP = '33/11 kV MAYAPUR S/s', KK = '33/11 kV KANKHAL- 2 S/s', BC = '33/11 kV BAIRAGI CAMP S/s';
   const calls = [
     // id, customer, phone, address, category, status, linked incident, minutes ago, area, reject reason
     ['CALL-001','Suresh Agarwal','9876543210','12 Rajpur Rd, Dehradun','Normal','incident','INC-2026-000001',128,BW],             // Assigned (in_progress)
@@ -187,8 +195,11 @@ async function seedPlannedOutages(now) {
   return 2;
 }
 
-// allow `npm run seed`
-if (import.meta.url === `file://${process.argv[1]}`) {
+// allow `npm run seed` (pathToFileURL so the check also matches on Windows).
+// `--scenario=oms03` (npm run seed:oms03) adds the OMS-03 workload demo on top.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const r = await seed({ force: process.argv.includes('--force') });
+  if (process.argv.includes('--scenario=oms03')) r.oms03 = await seedOms03Demo();
   console.log('[seed]', r);
+  await db.$pool.end();
 }

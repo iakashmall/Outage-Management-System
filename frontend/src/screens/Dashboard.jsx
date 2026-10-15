@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
-import { Icon, SevBadge, StatusBadge, timeAgo, useLiveRefresh } from '../lib/ui.jsx';
+import { CrewDot, Icon, SevBadge, StatusBadge, timeAgo, useLiveRefresh } from '../lib/ui.jsx';
 import ReliabilityRings from '../components/ReliabilityRings.jsx';
 
 export default function Dashboard({ go }) {
@@ -123,7 +123,3 @@ const IndexBar = ({ label, value, target, unit, pct }) => (
 const MiniStat = ({ label, value, unit }) => (
   <div><div className="eyebrow">{label}</div><div style={{ fontFamily: 'var(--disp)', fontSize: 20, fontWeight: 600 }}>{value}<small style={{ fontSize: 12, color: 'var(--muted)', marginLeft: 3 }}>{unit}</small></div></div>
 );
-const CrewDot = ({ status }) => {
-  const c = { available: 'var(--live)', in_service: 'var(--med)', in_transit: 'var(--high)', on_break: 'var(--faint)' }[status] || 'var(--faint)';
-  return <span style={{ width: 9, height: 9, borderRadius: '50%', background: c, flex: '0 0 auto' }} />;
-};

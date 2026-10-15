@@ -87,9 +87,20 @@ async function req(path, method = "GET", body) {
     headers: { "Content-Type": "application/json", ...(await freshAuthHeader()) },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (!response.ok) throw new Error(await response.text());
+  if (!response.ok) {
+    // Keep the HTTP status and the server's rule code (e.g. NOT_YOUR_JOB) so
+    // callers can tell a refusal (4xx: don't retry) from a network failure.
+    const text = await response.text().catch(() => "");
+    let data = {};
+    try { data = JSON.parse(text); } catch { /* plain-text error body */ }
+    throw Object.assign(new Error(data.message || data.error || text || `HTTP ${response.status}`), { status: response.status, code: data.code });
+  }
   return response.json();
 }
+
+// OMS-03: the server refused a job update because the job was reassigned to
+// another crew (rebalance or manual reassign) or left unassigned.
+export const isNotYourJob = (err) => err?.code === "NOT_YOUR_JOB";
 
 function normalizeOmsJob(job) {
   const lat = Number(job.lat ?? job.latitude ?? job.location?.lat ?? job.location?.latitude ?? job.incident?.lat ?? job.incident?.latitude);
@@ -100,12 +111,17 @@ function normalizeOmsJob(job) {
     address: job.address ?? job.incident?.zone ?? job.location ?? "Location unavailable",
     feeder: job.feeder ?? job.incident?.feeder ?? job.feederId ?? "—",
     severity: job.severity ?? job.incident?.severity ?? "Medium",
-    priority: job.priority ?? "Urgent",
+    // OMS-03: the priority dispatch plans with (raised by Medical / Critical /
+    // VIP trouble calls on the incident), else the job's own.
+    priority: job.effectivePriority ?? job.priority ?? "Urgent",
+    medical: !!job.medical,
+    // OMS-03: dispatch's planning estimate in minutes, when set.
+    estimatedDurationMin: job.estimated_duration_min ?? job.estimatedDurationMin ?? null,
     customers: job.customers ?? job.incident?.customers ?? job.affectedCustomers ?? 0,
     status: job.status ?? "Pending Acceptance",
     distance: job.distance ?? (job.distanceKm ? `${job.distanceKm} km` : "—"),
     eta: job.eta ?? "—",
-    assignedCrewId: job.assignedCrewId ?? job.crewId ?? null,
+    assignedCrewId: job.assignedCrewId ?? job.crewId ?? job.crew_id ?? null,
     assignedDistance: job.assignedDistance ?? job.distance ?? "Nearest available",
     incidentId: job.incident_id ?? job.incidentId ?? null,
     // OMS-01: a job on a planned outage gets the permit / switching gates.
@@ -133,27 +149,39 @@ export async function getCurrentCrew() {
 }
 
 // GET /api/mobile/crews/:crewId/jobs — this crew's jobs + incidents.
-export async function getMyJobs() {
+// { jobs, fromServer }: fromServer is false for the demo set and the offline
+// fallback, so the app can tell "the server says this job is gone" from
+// "no network".
+export async function fetchMyJobs() {
   const { isAuthenticated, myCrewId } = await session();
-  if (!isAuthenticated()) return demoJobs;
+  if (!isAuthenticated()) return { jobs: demoJobs, fromServer: false };
   try {
     const jobs = await req("/mobile/crews/" + myCrewId() + "/jobs");
     const mapped = (jobs ?? []).map(normalizeOmsJob);
     await cacheJobs(mapped);
-    return mapped;
+    return { jobs: mapped, fromServer: true };
   } catch {
     // No connectivity / backend unreachable — show the last real synced
     // job list (offline-ready data) so the crew still sees their actual
     // last-known assignments. A signed-in crew never gets the demo set:
     // sample jobs would look like real work and hide the outage.
     const cached = await readCachedJobs();
-    return cached ?? [];
+    return { jobs: cached ?? [], fromServer: false };
   }
 }
 
-// PATCH /api/mobile/jobs/:id/status  { status, lat, lon }
-export async function updateJobStatus(id, status, location = {}) {
-  const { isAuthenticated } = await session();
+export async function getMyJobs() {
+  return (await fetchMyJobs()).jobs;
+}
+
+// PATCH /api/mobile/jobs/:id/status  { status, lat, lon, crewId, ts, sentAt }
+// crewId lets the server refuse (409 NOT_YOUR_JOB) an update to a job that
+// was reassigned away from this crew. A queued update passes the crew that
+// made it; otherwise it is the signed-in crew.
+// ts: when the crew made the change, if earlier than now (pending sync).
+// sentAt lets the server correct for a phone clock that is off.
+export async function updateJobStatus(id, status, location = {}, crewId, ts) {
+  const { isAuthenticated, myCrewId } = await session();
   if (!isAuthenticated()) {
     // Demo mode: keep the change locally so the demo flow still advances.
     demoJobs = demoJobs.map((item) => (item.id === id ? { ...item, status } : item));
@@ -163,6 +191,9 @@ export async function updateJobStatus(id, status, location = {}) {
     status,
     lat: location.lat ?? null,
     lon: location.lon ?? null,
+    crewId: crewId || myCrewId(),
+    ts: ts ?? null,
+    sentAt: new Date().toISOString(),
   });
 }
 
@@ -176,6 +207,7 @@ export async function uploadJobPhoto(id, dataUrl, location = {}, note, metadata 
     lon: location.lon ?? null,
     note: note ?? null,
     ...metadata,
+    sentAt: new Date().toISOString(),
   });
 }
 
@@ -200,16 +232,20 @@ export async function getJobPhotos(jobId) {
 }
 
 export async function saveAssetScan(jobId, scan) {
-  return req(`/mobile/jobs/${jobId}/assets/scans`, "POST", scan);
+  return req(`/mobile/jobs/${jobId}/assets/scans`, "POST", { ...scan, sentAt: new Date().toISOString() });
 }
 
 export async function getAssetScans(jobId) {
   return req(`/mobile/jobs/${jobId}/assets/scans`);
 }
 
-export async function logout() {
-  // The cached job list belongs to the crew that is signing out.
+// The cached job list belongs to the crew that is signing out.
+export async function clearJobCache() {
   await AsyncStorage.multiRemove([JOBS_CACHE_KEY, JOBS_CACHE_SYNCED_AT_KEY]).catch(() => {});
+}
+
+export async function logout() {
+  await clearJobCache();
   const { logout: sessionLogout } = await session();
   await sessionLogout(); // on web this redirects through Keycloak's logout
 }
@@ -276,6 +312,7 @@ export const newReportId = newRequestId;
 
 // Gated status change for a planned job (Work Started / Work Finished):
 // online only, so a refused or unsent change is reported, never queued.
-export function updatePlannedJobStatus(id, status, location = {}) {
-  return plannedReq(`/mobile/jobs/${id}/status`, "PATCH", { status, lat: location.lat ?? null, lon: location.lon ?? null });
+export async function updatePlannedJobStatus(id, status, location = {}) {
+  const { myCrewId } = await session();
+  return plannedReq(`/mobile/jobs/${id}/status`, "PATCH", { status, lat: location.lat ?? null, lon: location.lon ?? null, crewId: myCrewId() });
 }

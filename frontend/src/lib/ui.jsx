@@ -31,6 +31,15 @@ export const StatusBadge = ({ status }) => {
   return <span className={`badge-st st-${status}`}>{label}</span>;
 };
 
+// Crew status dot shared by the roster views. Off shift is drawn as a hollow
+// ring so it reads differently from a crew that is merely on a break.
+const CREW_STATUS_COLOR = { available: 'var(--live)', in_service: 'var(--med)', in_transit: 'var(--high)', on_break: 'var(--faint)' };
+export const CrewDot = ({ status, size = 9 }) => (
+  status === 'off_shift'
+    ? <span title="Off shift" style={{ width: size, height: size, borderRadius: '50%', flex: '0 0 auto', boxSizing: 'border-box', border: '2px solid var(--muted)' }} />
+    : <span title={status} style={{ width: size, height: size, borderRadius: '50%', flex: '0 0 auto', background: CREW_STATUS_COLOR[status] || 'var(--faint)' }} />
+);
+
 export const timeAgo = (iso) => {
   if (!iso) return '—';
   const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);

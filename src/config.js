@@ -15,6 +15,11 @@ export const DEFAULT_SERVER = process.env.EXPO_PUBLIC_OMS_SERVER || "192.168.29.
 export const API_PORT = 4000;
 export const KEYCLOAK_PORT = 18080;
 
+// How often the signed-in app flushes queued status updates and re-reads
+// its job list, so a job dispatch reassigns (OMS-03) appears or disappears
+// within this time. There is no push channel to the phone.
+export const JOB_POLL_INTERVAL_MS = 10000;
+
 export const REALM = "oms-upcl";
 export const CLIENT_ID = "oms-mobile";
 export const REDIRECT_SCHEME = "omscrew";

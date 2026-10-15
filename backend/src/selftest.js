@@ -99,6 +99,18 @@ const server = app.listen(4100, async () => {
   const incAfter = await j('GET', '/incidents/INC-2026-000006');
   check('mobile On Site flips incident → in_progress', incAfter.body.status === 'in_progress', incAfter.body.status);
 
+  // Pending sync: an update queued offline 10 min ago arrives after a newer one.
+  // OMS-03: it is answered 200 { applied:false } (so the phone's queue drops
+  // it), must not roll the status back, and the dispatcher sees it on the
+  // incident timeline with its real time instead of in the job history.
+  const tenMinAgo = new Date(Date.now() - 10 * 60000).toISOString();
+  const late = await j('PATCH', `/mobile/jobs/${jobId}/status`, { status: 'En Route', ts: tenMinAgo, sentAt: new Date().toISOString() });
+  check('late queued update accepted', late.status === 200, `(${late.status})`);
+  check('late queued update does not roll status back', late.body.status === 'On Site' && late.body.applied === false, late.body.status);
+  const lateEv = (await j('GET', '/incidents/INC-2026-000006')).body.events.find((e) => /late update from crew not applied/.test(e.note));
+  check('late queued update shown on the timeline with its real time',
+    !!lateEv && lateEv.note.includes('En Route') && Math.abs(new Date(lateEv.note.match(/made (\S+)\)/)[1]) - new Date(tenMinAgo)) < 5000, lateEv?.note);
+
   const ack = await j('POST', '/alarms/ack-all');
   check('ack-all clears unacked alarms', ack.body.every(a => a.ack === 1));
 

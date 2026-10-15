@@ -1,5 +1,16 @@
 import 'dotenv/config'; // loads .env into process.env
-console.log('DATABASE_URL loaded as:', process.env.DATABASE_URL);
+// Log which database we use, but never the password inside the URL.
+function redactUrl(raw) {
+  if (!raw) return '(unset)';
+  try {
+    const u = new URL(raw);
+    if (u.password) u.password = '***';
+    return u.toString();
+  } catch {
+    return '(unparseable)';
+  }
+}
+console.log('DATABASE_URL loaded as:', redactUrl(process.env.DATABASE_URL));
 import express from 'express';
 import cors from 'cors';
 import path from 'node:path';
@@ -22,6 +33,7 @@ import { startNotifier } from './realtime/notifier.js';
 import { startScheduledReports } from './realtime/scheduledReports.js';
 import { ensureRatings, startFeederKpiJobs } from './realtime/feederKpi.js';
 import { startFeederTelemetrySim } from './realtime/feederTelemetrySim.js';
+import { startStaleLocationMonitor } from './realtime/staleLocation.js';
 // ...alongside your other startX() calls at boot:
 startScheduledReports();
 const PORT = process.env.PORT || 4000;
@@ -50,6 +62,8 @@ process.on('uncaughtException', (err) => logFatal('uncaughtException', err));
  startRestorationPublisher(); // Phase 2: publish restoration commands back to the DMS
 await ensureRatings();
 startFeederKpiJobs();
+ startStaleLocationMonitor(); // alert dispatch when a tracked crew's phone goes quiet
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '12mb' }));

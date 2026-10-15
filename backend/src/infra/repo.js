@@ -3,6 +3,8 @@ import { nanoid } from 'nanoid';
 import { canTransition, LABELS } from '../domain/lifecycle.js';
 import * as rules from '../domain/plannedOutage.js';
 import { feederKpiRepo } from './feederKpiRepo.js';
+import { normalizeSettings, validateProposal, INACTIVE_STATUSES, MOVABLE_STATUSES } from '../domain/rebalance.js';
+
 // The only module that talks SQL. Every function is now async because the
 // pg driver is async (unlike node:sqlite/better-sqlite3, which were sync).
 // Named params use pg-promise's $/name/ syntax instead of the old bare @name.
@@ -108,6 +110,48 @@ async function clientIdTaken(t, table, column, value, exceptId) {
   return !!(await t.oneOrNone(`SELECT 1 FROM ${table} WHERE ${column}=$1 AND id<>$2`, [value, exceptId || '']));
 }
 
+// ---- OMS-03 workload balancing: loaders in the engine's input shape ----
+// (domain/rebalance.js documents the shapes; capacity is NUMERIC, so pg hands it back as a string.)
+const crewInput = (r) => ({ ...parseSkills(r), capacity: r.capacity == null ? null : Number(r.capacity) });
+const INACTIVE_SQL = INACTIVE_STATUSES.map((s) => `'${s}'`).join(',');
+// A job whose incident is restored, closed or cancelled is not workload, even
+// if its own status was never moved on (the control room closes incidents,
+// not jobs). Same terminal states in the fault and planned lifecycles.
+const DONE_INCIDENT_SQL = `'resolved','closed','cancelled'`;
+const OPEN_INCIDENT_SQL = `NOT EXISTS (SELECT 1 FROM incidents di WHERE di.id = jobs.incident_id AND di.status IN (${DONE_INCIDENT_SQL}))`;
+const JOB_INPUT_SQL = `
+  SELECT j.id, j.crew_id, j.status, j.priority, j.estimated_duration_min, j.required_skill,
+         j.flagged_reason, j.flagged_at, j.incident_id, j.address, j.updated_at,
+         i.substation AS area, i.lat, i.lon,
+         EXISTS (SELECT 1 FROM planned_outages po WHERE po.incident_id = j.incident_id) AS planned,
+         COALESCE((SELECT array_agg(DISTINCT tc.category) FROM trouble_calls tc
+                    WHERE tc.linked_id = j.incident_id AND tc.category IS NOT NULL), '{}') AS call_categories
+  FROM jobs j LEFT JOIN incidents i ON i.id = j.incident_id`;
+
+async function addReassignment(t, { proposalId = null, jobId, incidentId, fromCrew, toCrew, reason, actor }) {
+  await t.none(`INSERT INTO job_reassignments (id, proposal_id, job_id, incident_id, from_crew, to_crew, reason, actor)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, ['RAS-' + nanoid(10), proposalId, jobId, incidentId, fromCrew, toCrew, reason, actor]);
+}
+
+// Keeps crews.job_id (an incident id) pointing at one of the crew's active
+// jobs, started work first, after jobs moved on or off it.
+async function syncCrewPointer(t, crewId) {
+  const crew = await t.oneOrNone('SELECT id, status, on_shift, job_id FROM crews WHERE id=$1', [crewId]);
+  if (!crew) return;
+  const active = await t.any(`SELECT incident_id, status FROM jobs WHERE crew_id=$1 AND (status IS NULL OR status NOT IN (${INACTIVE_SQL}))
+    AND ${OPEN_INCIDENT_SQL} ORDER BY CASE WHEN status IN ($2:csv) THEN 1 ELSE 0 END, updated_at DESC NULLS LAST, id`, [crewId, MOVABLE_STATUSES]);
+  const patch = {};
+  if (!active.length) {
+    if (crew.job_id) patch.job_id = null;
+    // Only a job-derived status goes back to available; on_break/off_shift stay.
+    if (crew.on_shift && ['in_transit', 'in_service'].includes(crew.status)) patch.status = 'available';
+  } else {
+    if (!active.some((j) => j.incident_id === crew.job_id)) patch.job_id = active[0].incident_id;
+    if (crew.status === 'available') patch.status = ['On Site', 'Work Started'].includes(active[0].status) ? 'in_service' : 'in_transit';
+  }
+  if (Object.keys(patch).length) await t.none(`UPDATE crews SET ${setClause(patch)} WHERE id=$/id/`, { ...patch, id: crewId });
+}
+
 export const repo = {
   ...feederKpiRepo,
   // ---- incidents
@@ -172,8 +216,9 @@ export const repo = {
     `UPDATE incidents SET open_trip_tags = open_trip_tags - $/tag/
      WHERE open_trip_tags ? $/tag/ AND status NOT IN ('resolved','closed','cancelled')
      RETURNING *`, { tag }),
-  addIncidentEvent: async (incidentId, actor, kind, note) => {
-    const ev = { id: 'EV' + nanoid(8), incident_id: incidentId, ts: new Date().toISOString(), actor, kind, note };
+  // ts: when it happened, if not now (e.g. a crew update synced late).
+  addIncidentEvent: async (incidentId, actor, kind, note, ts) => {
+    const ev = { id: 'EV' + nanoid(8), incident_id: incidentId, ts: ts || new Date().toISOString(), actor, kind, note };
     await db.none(`INSERT INTO incident_events (id,incident_id,ts,actor,kind,note)
       VALUES ($/id/,$/incident_id/,$/ts/,$/actor/,$/kind/,$/note/)`, ev);
     return ev;
@@ -356,48 +401,230 @@ export const repo = {
 
   // ---- jobs (crew app)
   jobs: () => db.any('SELECT * FROM jobs ORDER BY updated_at DESC'),
-  jobsForCrew: (crewId) => db.any('SELECT * FROM jobs WHERE crew_id=$1 ORDER BY updated_at DESC', [crewId]),
+  // call_categories: for the OMS-03 effective priority (see JOB_INPUT_SQL).
+  jobsForCrew: (crewId) => db.any(`SELECT j.*,
+      COALESCE((SELECT array_agg(DISTINCT tc.category) FROM trouble_calls tc
+                 WHERE tc.linked_id = j.incident_id AND tc.category IS NOT NULL), '{}') AS call_categories
+    FROM jobs j WHERE j.crew_id=$1 ORDER BY j.updated_at DESC`, [crewId]),
   jobUpdates: (jobId) => db.any('SELECT * FROM job_updates WHERE job_id=$1 ORDER BY ts ASC', [jobId]),
   jobsForIncident: (incidentId) => db.any('SELECT * FROM jobs WHERE incident_id=$1 ORDER BY updated_at DESC', [incidentId]),
   photosForIncident: (incidentId) => db.any(
-    `SELECT p.id, p.job_id, p.lat, p.lon, p.note, p.ts, p.technician_id, p.metadata
+    `SELECT p.id, p.job_id, p.lat, p.lon, p.note, p.ts, p.technician_id, p.metadata, p.not_applied_reason
      FROM job_photos p JOIN jobs j ON p.job_id = j.id
      WHERE j.incident_id = $1 ORDER BY p.ts DESC`,
     [incidentId]
   ),
   job: (id) => db.oneOrNone('SELECT * FROM jobs WHERE id=$1', [id]),
   createJob: async (j) => {
-    await db.none(`INSERT INTO jobs (id,incident_id,crew_id,priority,status,address,updated_at)
-      VALUES ($/id/,$/incident_id/,$/crew_id/,$/priority/,$/status/,$/address/,$/updated_at/)`, j);
+    await db.none(`INSERT INTO jobs (id,incident_id,crew_id,priority,status,address,updated_at,estimated_duration_min,required_skill)
+      VALUES ($/id/,$/incident_id/,$/crew_id/,$/priority/,$/status/,$/address/,$/updated_at/,$/estimated_duration_min/,$/required_skill/)`,
+      { estimated_duration_min: null, required_skill: null, ...j });
     return repo.job(j.id);
   },
   updateJob: async (id, patch) => {
     await db.none(`UPDATE jobs SET ${setClause(patch)} WHERE id=$/id/`, { ...patch, id });
     return repo.job(id);
   },
-  addJobUpdate: async (jobId, status, lat, lon, note) => {
-    const u = { id: 'JU' + nanoid(8), job_id: jobId, status, lat, lon, note, ts: new Date().toISOString() };
-    await db.none(`INSERT INTO job_updates (id,job_id,status,lat,lon,note,ts)
-      VALUES ($/id/,$/job_id/,$/status/,$/lat/,$/lon/,$/note/,$/ts/)`, u);
+  // Status write that only lands while the job is still on crewId: a
+  // rebalance committing between the ownership check and this write wins,
+  // and the caller gets null (NOT_YOUR_JOB) instead of moving another crew's job.
+  updateJobForCrew: (id, crewId, patch) =>
+    db.oneOrNone(`UPDATE jobs SET ${setClause(patch)} WHERE id=$/id/ AND crew_id=$/crewId/ RETURNING *`, { ...patch, id, crewId }),
+  // source: 'crew' (the crew's own update) or 'dispatch' (assignment,
+  // rebalance, control room on the crew's behalf). Only crew rows decide
+  // whether a queued crew update arrived late.
+  addJobUpdate: async (jobId, status, lat, lon, note, ts, source = null) => {
+    const u = { id: 'JU' + nanoid(8), job_id: jobId, status, lat, lon, note, ts: ts || new Date().toISOString(), source };
+    await db.none(`INSERT INTO job_updates (id,job_id,status,lat,lon,note,ts,source)
+      VALUES ($/id/,$/job_id/,$/status/,$/lat/,$/lon/,$/note/,$/ts/,$/source/)`, u);
     return u;
   },
+  latestCrewUpdateTs: async (jobId) =>
+    (await db.one(`SELECT max(ts) AS ts FROM job_updates WHERE job_id=$1 AND source='crew'`, [jobId])).ts,
+  // Status write that only lands while the job is still on crewId AND still
+  // at the status the decision was made on (a concurrent update wins).
+  updateJobIf: (id, crewId, fromStatus, patch) =>
+    db.oneOrNone(`UPDATE jobs SET ${setClause(patch)} WHERE id=$/id/ AND crew_id=$/crewId/ AND status=$/fromStatus/ RETURNING *`,
+      { ...patch, id, crewId, fromStatus }),
+  // true the first time this (job, kind, status, client time) is recorded.
+  recordLateUpdate: async (jobId, kind, status, clientTs, reason) =>
+    !!(await db.oneOrNone(`INSERT INTO job_late_updates (job_id,kind,status,client_ts,reason) VALUES ($1,$2,$3,$4,$5)
+      ON CONFLICT DO NOTHING RETURNING job_id`, [jobId, kind, status || '', clientTs, reason])),
+  addJobCompletion: async (c) => {
+    const row = await db.oneOrNone(`INSERT INTO job_completions
+      (id,job_id,incident_id,crew_id,client_request_id,diagnosis,parts_used,restored,sign_off,submitted_at,submitted_by)
+      VALUES ($/id/,$/job_id/,$/incident_id/,$/crew_id/,$/client_request_id/,$/diagnosis:json/,$/parts_used:json/,$/restored/,$/sign_off:json/,$/submitted_at/,$/submitted_by/)
+      ON CONFLICT (client_request_id) DO NOTHING RETURNING *`, { id: 'JC' + nanoid(8), ...c });
+    return row ? { row, created: true }
+      : { row: await db.one('SELECT * FROM job_completions WHERE client_request_id=$1', [c.client_request_id]), created: false };
+  },
+  jobCompletions: (jobId) => db.any('SELECT * FROM job_completions WHERE job_id=$1 ORDER BY received_at DESC', [jobId]),
   addAssetScan: async (scan) => {
     await db.none(
       `INSERT INTO asset_scans
-       (id,job_id,crew_id,asset_id,raw_value,asset_details,lat,lon,scanned_at)
-       VALUES ($/id/,$/job_id/,$/crew_id/,$/asset_id/,$/raw_value/,$/asset_details/,$/lat/,$/lon/,$/scanned_at/)`,
-      scan
+       (id,job_id,crew_id,asset_id,raw_value,asset_details,lat,lon,scanned_at,not_applied_reason)
+       VALUES ($/id/,$/job_id/,$/crew_id/,$/asset_id/,$/raw_value/,$/asset_details/,$/lat/,$/lon/,$/scanned_at/,$/not_applied_reason/)`,
+      { not_applied_reason: null, ...scan }
     );
     return db.one('SELECT * FROM asset_scans WHERE id=$1', [scan.id]);
   },
-  assetScansForJob: (jobId) =>
-    db.any('SELECT * FROM asset_scans WHERE job_id=$1 ORDER BY scanned_at DESC', [jobId]),
+  // includeNotApplied: the control room also sees scans that reached a locked job.
+  assetScansForJob: (jobId, includeNotApplied = false) =>
+    db.any(`SELECT * FROM asset_scans WHERE job_id=$1 ${includeNotApplied ? '' : 'AND not_applied_reason IS NULL'} ORDER BY scanned_at DESC`, [jobId]),
+  // Across every job tied to the incident, like photosForIncident.
+  assetScansForIncident: (incidentId) => db.any(
+    `SELECT s.* FROM asset_scans s JOIN jobs j ON s.job_id = j.id
+     WHERE j.incident_id = $1 ORDER BY s.scanned_at DESC`,
+    [incidentId]
+  ),
   addCrewLocation: async (crewId, lat, lon) =>
     db.one(
       `INSERT INTO crew_locations (crew_id, lat, lon) VALUES ($1, $2, $3)
        RETURNING id, crew_id, lat, lon, recorded_at`,
       [crewId, lat, lon]
     ),
+
+  // ---- OMS-03 workload balancing
+  workloadSettings: async () =>
+    normalizeSettings((await db.oneOrNone("SELECT value FROM oms_settings WHERE key='workload'"))?.value),
+  saveWorkloadSettings: async (value, username) => {
+    await db.none(`INSERT INTO oms_settings (key, value, updated_by, updated_at) VALUES ('workload', $1::jsonb, $2, now())
+      ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_by=EXCLUDED.updated_by, updated_at=now()`, [JSON.stringify(value), username]);
+    return repo.workloadSettings();
+  },
+  workloadCrews: async (t = db) => (await t.any('SELECT * FROM crews ORDER BY id')).map(crewInput),
+  // Active jobs only (job not finished, incident not finished), in the engine's job shape.
+  workloadJobs: (t = db) => t.any(`${JOB_INPUT_SQL} WHERE (j.status IS NULL OR j.status NOT IN (${INACTIVE_SQL}))
+    AND (i.id IS NULL OR i.status NOT IN (${DONE_INCIDENT_SQL})) ORDER BY j.id`),
+  // A dispatcher-created crew. Without an id the next free Cnnn is used.
+  createCrew: (c) => db.tx(async (t) => {
+    let id = c.id;
+    if (!id) {
+      const { n } = await t.one(`SELECT COALESCE(MAX((substring(id from '^C([0-9]+)$'))::int), 0) + 1 n FROM crews WHERE id ~ '^C[0-9]+$'`);
+      id = 'C' + String(n).padStart(3, '0');
+    }
+    if (await t.oneOrNone('SELECT 1 FROM crews WHERE id=$1', [id])) return { error: { code: 'CREW_EXISTS', message: `crew ${id} already exists`, status: 409 } };
+    await t.none(`INSERT INTO crews (id, name, lead, status, location, job_id, lat, lon, skills, capacity, on_shift, aor)
+      VALUES ($/id/, $/name/, $/lead/, 'available', $/location/, NULL, $/lat/, $/lon/, $/skills/, $/capacity/, true, $/aor/)`,
+      { lead: null, location: null, lat: null, lon: null, skills: null, aor: null, ...c, id });
+    return { crew: crewInput(await t.one('SELECT * FROM crews WHERE id=$1', [id])) };
+  }),
+  activeJobsForCrew: (crewId) => db.any(`SELECT * FROM jobs WHERE crew_id=$1 AND (status IS NULL OR status NOT IN (${INACTIVE_SQL}))
+    AND ${OPEN_INCIDENT_SQL} ORDER BY updated_at DESC NULLS LAST`, [crewId]),
+
+  // A proposal replaces any older open one (only the newest can be applied).
+  saveProposal: ({ trigger, detail = null, actor, settings, result }) => db.tx(async (t) => {
+    await t.none(`UPDATE rebalance_proposals SET status='superseded', decided_at=now(), decided_by=$1, decision_note='replaced by a newer proposal'
+      WHERE status='proposed'`, [actor]);
+    const id = 'RBP-' + nanoid(10);
+    return t.one(`INSERT INTO rebalance_proposals (id, trigger, trigger_detail, created_by, settings, result)
+      VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb) RETURNING *`, [id, trigger, detail, actor, JSON.stringify(settings), JSON.stringify(result)]);
+  }),
+  // A trigger that finds nothing to do closes any open proposal: it was made
+  // for a situation that no longer exists.
+  supersedeOpenProposals: (actor, note) => db.any(`UPDATE rebalance_proposals SET status='superseded', decided_at=now(), decided_by=$1,
+    decision_note=$2 WHERE status='proposed' RETURNING *`, [actor, note]),
+  proposal: (id) => db.oneOrNone('SELECT * FROM rebalance_proposals WHERE id=$1', [id]),
+  proposals: (status) => status
+    ? db.any('SELECT * FROM rebalance_proposals WHERE status=$1 ORDER BY created_at DESC LIMIT 100', [status])
+    : db.any('SELECT * FROM rebalance_proposals ORDER BY created_at DESC LIMIT 100'),
+  openProposal: () => db.oneOrNone("SELECT * FROM rebalance_proposals WHERE status='proposed' ORDER BY created_at DESC LIMIT 1"),
+  rejectProposal: (id, actor, note) => db.tx(async (t) => {
+    const p = await t.oneOrNone('SELECT * FROM rebalance_proposals WHERE id=$1 FOR UPDATE', [id]);
+    if (!p) return notFound('proposal');
+    if (p.status !== 'proposed') return { error: { code: 'NOT_OPEN', message: `proposal is ${p.status}`, status: 409 } };
+    const proposal = await t.one(`UPDATE rebalance_proposals SET status='rejected', decided_by=$2, decided_at=now(), decision_note=$3
+      WHERE id=$1 RETURNING *`, [id, actor, note || null]);
+    await t.none('INSERT INTO audit_log (id,ts,actor,action,target) VALUES ($1,$2,$3,$4,$5)',
+      ['AU' + nanoid(8), new Date().toISOString(), actor, 'dispatch.rebalance.reject', id]);
+    return { proposal };
+  }),
+
+  // Applies a proposal in one transaction. Every entry is checked against
+  // the current data first (domain validateProposal: job still on its
+  // from-crew and unstarted, target on shift and eligible, the reason for the
+  // move still holds); if anything changed the proposal is marked stale and
+  // nothing moves. Returns the touched ids so the route can publish events.
+  applyProposal: (id, actor) => db.tx(async (t) => {
+    const p = await t.oneOrNone('SELECT * FROM rebalance_proposals WHERE id=$1 FOR UPDATE', [id]);
+    if (!p) return notFound('proposal');
+    if (p.status !== 'proposed') return { error: { code: 'NOT_OPEN', message: `proposal is ${p.status}`, status: 409 } };
+    const moves = p.result.moves || [];
+    const unassigned = p.result.unassigned || [];
+    const jobIds = [...moves.map((m) => m.jobId), ...unassigned.map((u) => u.jobId)];
+    if (jobIds.length) await t.any('SELECT id FROM jobs WHERE id IN ($1:csv) FOR UPDATE', [jobIds]);
+    const crews = (await t.any('SELECT * FROM crews ORDER BY id FOR UPDATE')).map(crewInput);
+    const active = await repo.workloadJobs(t);
+    const settings = normalizeSettings((await t.oneOrNone("SELECT value FROM oms_settings WHERE key='workload'"))?.value);
+    const jobById = new Map(active.map((j) => [j.id, j]));
+    const problems = validateProposal({ crews, jobs: active, settings, moves, unassigned });
+    if (problems.length) {
+      const proposal = await t.one(`UPDATE rebalance_proposals SET status='stale', decided_by=$2, decided_at=now(), decision_note=$3
+        WHERE id=$1 RETURNING *`, [id, actor, problems.join('; ')]);
+      return { error: { code: 'STALE_PROPOSAL', message: 'the situation changed since this proposal was made; propose again', status: 409, problems }, proposal };
+    }
+
+    const now = new Date().toISOString();
+    const touchedCrews = new Set();
+    const incidents = new Set();
+    const event = (incidentId, kind, note) => incidentId && addEvent(t, incidentId, actor, kind, note);
+    for (const m of moves) {
+      const j = jobById.get(m.jobId);
+      await t.none('UPDATE jobs SET crew_id=$2, updated_at=$3, flagged_reason=NULL, flagged_at=NULL WHERE id=$1', [j.id, m.toCrew, now]);
+      if (j.incident_id) {
+        await t.none(`UPDATE incidents SET crew_id=$2, status=CASE WHEN status='open' THEN 'dispatched' ELSE status END
+          WHERE id=$1 AND (crew_id IS NULL OR crew_id=$3)`, [j.incident_id, m.toCrew, m.fromCrew]);
+      }
+      const note = `Reassigned from ${m.fromCrew ?? 'unassigned'} to ${m.toCrew} (${m.reason})`;
+      await t.none("INSERT INTO job_updates (id,job_id,status,note,ts,source) VALUES ($1,$2,$3,$4,$5,'dispatch')", ['JU' + nanoid(8), j.id, j.status, note, now]);
+      await event(j.incident_id, 'reassigned', `Job ${j.id}: ${note}`);
+      await addReassignment(t, { proposalId: id, jobId: j.id, incidentId: j.incident_id, fromCrew: m.fromCrew, toCrew: m.toCrew, reason: m.reason, actor });
+      if (m.fromCrew) touchedCrews.add(m.fromCrew);
+      touchedCrews.add(m.toCrew);
+      if (j.incident_id) incidents.add(j.incident_id);
+    }
+    for (const u of unassigned) {
+      const j = jobById.get(u.jobId);
+      await t.none('UPDATE jobs SET crew_id=NULL, updated_at=$2, flagged_reason=$3, flagged_at=$2 WHERE id=$1', [j.id, now, u.reason]);
+      if (j.incident_id) {
+        await t.none(`UPDATE incidents SET crew_id=NULL, status=CASE WHEN status='dispatched' THEN 'open' ELSE status END
+          WHERE id=$1 AND crew_id=$2`, [j.incident_id, u.fromCrew]);
+      }
+      const note = `Unassigned from ${u.fromCrew}: ${u.reason}`;
+      await t.none("INSERT INTO job_updates (id,job_id,status,note,ts,source) VALUES ($1,$2,$3,$4,$5,'dispatch')", ['JU' + nanoid(8), j.id, j.status, note, now]);
+      await event(j.incident_id, 'unassigned', `Job ${j.id}: ${note}`);
+      await addReassignment(t, { proposalId: id, jobId: j.id, incidentId: j.incident_id, fromCrew: u.fromCrew, toCrew: null, reason: u.reason, actor });
+      touchedCrews.add(u.fromCrew);
+      if (j.incident_id) incidents.add(j.incident_id);
+    }
+    for (const c of touchedCrews) await syncCrewPointer(t, c);
+    const proposal = await t.one(`UPDATE rebalance_proposals SET status='applied', decided_by=$2, decided_at=now() WHERE id=$1 RETURNING *`, [id, actor]);
+    await t.none('INSERT INTO audit_log (id,ts,actor,action,target) VALUES ($1,$2,$3,$4,$5)',
+      ['AU' + nanoid(8), now, actor, 'dispatch.rebalance.apply', id]);
+    return { proposal, jobIds, crewIds: [...touchedCrews], incidentIds: [...incidents] };
+  }),
+
+  // Manual assign onto an existing job row (a flagged job, or the job id
+  // assign would mint already exists): moves it instead of inserting a duplicate.
+  reassignJob: (jobId, toCrew, patch, actor) => db.tx(async (t) => {
+    const j = await t.one('SELECT * FROM jobs WHERE id=$1 FOR UPDATE', [jobId]);
+    const set = { ...patch, crew_id: toCrew, flagged_reason: null, flagged_at: null, updated_at: new Date().toISOString() };
+    await t.none(`UPDATE jobs SET ${setClause(set)} WHERE id=$/id/`, { ...set, id: jobId });
+    if (j.crew_id !== toCrew) {
+      await addReassignment(t, { jobId, incidentId: j.incident_id, fromCrew: j.crew_id, toCrew, reason: 'manual_assign', actor });
+      if (j.crew_id) await syncCrewPointer(t, j.crew_id);
+    }
+    return { job: await t.one('SELECT * FROM jobs WHERE id=$1', [jobId]), fromCrew: j.crew_id };
+  }),
+  // Re-derives crews.job_id/status from the crew's active jobs (after one finishes).
+  syncCrew: (crewId) => db.tx((t) => syncCrewPointer(t, crewId)),
+  // job_reassignments outlives a reseed (append-only) but proposals do not:
+  // rows of a deleted proposal belong to an earlier seed run, so hide them.
+  reassignments: (limit = 200) => db.any(`SELECT * FROM job_reassignments r
+    WHERE r.proposal_id IS NULL OR EXISTS (SELECT 1 FROM rebalance_proposals p WHERE p.id = r.proposal_id)
+    ORDER BY r.ts DESC, r.id LIMIT $1`, [limit]),
+  decidedProposals: (limit = 200) => db.any(`SELECT * FROM rebalance_proposals WHERE status IN ('applied','rejected','stale')
+    ORDER BY COALESCE(decided_at, created_at) DESC LIMIT $1`, [limit]),
 
   // ---- admin / audit
   audit: async (actor, action, target) => {
@@ -408,7 +635,7 @@ export const repo = {
 
   // `image` is the already-compressed photo ({ buffer, contentType, width, height });
   // the returned row is metadata only, without the image bytes.
-  addJobPhoto: async (jobId, { image, originalContentType, originalBytes }, lat, lon, note, technicianId, metadata) => {
+  addJobPhoto: async (jobId, { image, originalContentType, originalBytes }, lat, lon, note, technicianId, metadata, ts, notAppliedReason = null) => {
     const ph = {
       id: 'PH' + nanoid(8),
       job_id: jobId,
@@ -419,19 +646,21 @@ export const repo = {
       lat: lat ?? null,
       lon: lon ?? null,
       note: note ?? null,
-      ts: new Date().toISOString(),
+      ts: ts || new Date().toISOString(),
       technician_id: technicianId ?? null,
       metadata: { ...(metadata ?? {}), originalBytes, storedBytes: image.buffer.length },
+      not_applied_reason: notAppliedReason,
     };
     await db.none(
-      `INSERT INTO job_photos (id,job_id,image_data,content_type,original_content_type,width,height,lat,lon,note,ts,technician_id,metadata)
-       VALUES ($/id/,$/job_id/,$/image_data/,$/content_type/,$/original_content_type/,$/width/,$/height/,$/lat/,$/lon/,$/note/,$/ts/,$/technician_id/,$/metadata:json/::jsonb)`,
+      `INSERT INTO job_photos (id,job_id,image_data,content_type,original_content_type,width,height,lat,lon,note,ts,technician_id,metadata,not_applied_reason)
+       VALUES ($/id/,$/job_id/,$/image_data/,$/content_type/,$/original_content_type/,$/width/,$/height/,$/lat/,$/lon/,$/note/,$/ts/,$/technician_id/,$/metadata:json/::jsonb,$/not_applied_reason/)`,
       { ...ph, image_data: image.buffer }
     );
     return ph;
   },
-  jobPhotos: (jobId) =>
-    db.any('SELECT id, job_id, lat, lon, note, ts, technician_id, metadata FROM job_photos WHERE job_id=$1 ORDER BY ts DESC', [jobId]),
+  jobPhotos: (jobId, includeNotApplied = false) =>
+    db.any(`SELECT id, job_id, lat, lon, note, ts, technician_id, metadata, not_applied_reason FROM job_photos
+      WHERE job_id=$1 ${includeNotApplied ? '' : 'AND not_applied_reason IS NULL'} ORDER BY ts DESC`, [jobId]),
   jobPhotoById: (id) => db.oneOrNone('SELECT * FROM job_photos WHERE id=$1', [id]),
 
   addMessage: async (incidentId, sender, senderRole, body) => {

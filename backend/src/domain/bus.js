@@ -33,6 +33,9 @@ export const TOPICS = {
     ERT_CHANGED: 'oms.incident.ert_changed',
   CREW_TRACKING_CHANGED: 'crew.tracking.changed',
   FEEDER_ANALOG: 'scada.analog.feeder',
+  // OMS-03 workload balancing: { event: proposed|applied|rejected|stale, proposalId, trigger }
+  DISPATCH_REBALANCE: 'oms.dispatch.rebalance',
+  CREW_LOCATION_STALE: 'crew.location.stale',
 };
 const ALL_TOPICS = Object.values(TOPICS);
 

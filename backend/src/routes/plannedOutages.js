@@ -106,9 +106,15 @@ r.patch('/mobile/jobs/:id/status', async (req, res, next) => {
     if (blocked) return res.status(blocked.status).json({ code: blocked.code, message: blocked.message });
   }
   const { lat, lon, note } = req.body || {};
-  const updated = await repo.updateJob(job.id, { status, updated_at: new Date().toISOString() });
+  // Conditional on the crew checked above (the job may be reassigned meanwhile).
+  const updated = await repo.updateJobForCrew(job.id, job.crew_id, { status, updated_at: new Date().toISOString() });
+  if (!updated) return res.status(403).json({ code: 'NOT_YOUR_JOB', message: 'this job belongs to another crew' });
   await repo.addJobUpdate(job.id, status, lat ?? null, lon ?? null, note ?? null);
-  if (CREW_STATUS[status]) bus.publish(TOPICS.CREW_UPDATED, await repo.updateCrew(job.crew_id, { status: CREW_STATUS[status] }));
+  // OMS-03: an off-shift crew keeps status off_shift.
+  if (CREW_STATUS[status] && (await repo.crew(updated.crew_id))?.on_shift !== false) await repo.updateCrew(updated.crew_id, { status: CREW_STATUS[status] });
+  // A finished job: re-point the crew at its next active job, if any.
+  if (status === 'Work Complete') await repo.syncCrew(updated.crew_id);
+  if (CREW_STATUS[status]) bus.publish(TOPICS.CREW_UPDATED, await repo.crew(updated.crew_id));
   await repo.addIncidentEvent(job.incident_id, who.username || 'Crew', 'field', `Crew job ${job.id}: ${status}`);
   bus.publish(TOPICS.JOB_UPDATED, updated);
   res.json(updated);

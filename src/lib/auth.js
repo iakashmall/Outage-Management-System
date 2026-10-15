@@ -269,6 +269,24 @@ export function currentUsername() {
 export async function logout() {
   if (refreshTimer) clearTimeout(refreshTimer);
   refreshTimer = null;
+  // End the Keycloak session too. Clearing only our tokens leaves Keycloak's
+  // SSO cookie in the browser, and the next sign-in on this phone would
+  // silently come back as the previous crew. Best effort: offline, the
+  // tokens are still cleared (and sign-in always asks again, see prompt).
+  if (refreshToken) {
+    try {
+      await Promise.race([
+        fetch(getDiscovery().endSessionEndpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ client_id: CLIENT_ID, refresh_token: refreshToken }).toString(),
+        }),
+        new Promise((resolve) => setTimeout(resolve, 5000)), // don't hold sign-out up on a slow network
+      ]);
+    } catch {
+      // ignore: no network or server down
+    }
+  }
   accessToken = null;
   refreshToken = null;
   tokenParsed = null;

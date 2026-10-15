@@ -1,13 +1,18 @@
 import { io } from 'socket.io-client';
-import { authHeader } from './auth.js';
+import { freshAuthHeader, refreshToken } from './auth.js';
 
 const BASE = '/api';
-export async function req(method, path, body) {
+export async function req(method, path, body, retried = false) {
   const r = await fetch(BASE + path, {
     method,
-    headers: { 'content-type': 'application/json', ...authHeader() },
+    headers: { 'content-type': 'application/json', ...(await freshAuthHeader()) },
     body: body ? JSON.stringify(body) : undefined,
   });
+  // The server can still reject a token we thought was valid (clock skew, session revoked): renew it once and
+  // retry. A 401 is answered before anything is processed, so the retry is safe.
+  if (r.status === 401 && !retried) {
+    try { await refreshToken(true); return req(method, path, body, true); } catch { /* sign-in redirect triggered */ }
+  }
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw Object.assign(new Error(data.error || r.statusText), { data, status: r.status });
   return data;
@@ -16,7 +21,7 @@ async function exportReliabilityReport(format, filters = {}) {
   const params = new URLSearchParams({ format, ...filters });
   const r = await fetch(`${BASE}/reports/reliability?${params}`, {
     method: 'GET',
-    headers: { ...authHeader() },
+    headers: { ...(await freshAuthHeader()) },
   });
   if (!r.ok) {
     const data = await r.json().catch(() => ({}));
@@ -50,9 +55,15 @@ export const api = {
   incident: (id) => req('GET', `/incidents/${id}`),
   createIncident: (b) => req('POST', '/incidents', b),
   setStatus: (id, status, note) => req('PATCH', `/incidents/${id}/status`, { status, note }),
-  assign: (id, crewId, priority) => req('POST', `/incidents/${id}/assign`, { crewId, priority }),
+  // extra (OMS-03, optional): { requiredSkill, estimatedDurationMin }
+  assign: (id, crewId, priority, extra = {}) => req('POST', `/incidents/${id}/assign`, { crewId, priority, ...extra }),
   messages: (id) => req('GET', `/incidents/${id}/messages`),
   photos: (id) => req('GET', `/incidents/${id}/photos`),
+  assetScans: (id) => req('GET', `/incidents/${id}/asset-scans`),
+  // OMS-03 crew job workflow: each crew job's lock state, completion form and
+  // the photos/scans that reached it after it was locked.
+  fieldReport: (id) => req('GET', `/incidents/${id}/field-report`),
+  returnForCorrection: (id, reason) => req('POST', `/incidents/${id}/return-for-correction`, { reason }),
   photoDetail: (photoId) => req('GET', `/mobile/photos/${photoId}`),
   postMessage: (id, body) => req('POST', `/incidents/${id}/messages`, { body }),
   setErt: (id, ert) => req('PATCH', `/incidents/${id}/ert`, { ert }),

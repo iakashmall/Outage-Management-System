@@ -2,6 +2,11 @@ import { useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
 import { Icon, SevBadge, StatusBadge, timeAgo, hhmm, useLiveRefresh, toast } from '../lib/ui.jsx';
 import { Drawer, DrawerContent } from '../components/ui/drawer.jsx';
+import { currentUser } from '../lib/auth.js';
+
+// Creating an incident and returning one for correction are control-room
+// actions (the API refuses other roles, OMS-03).
+const isControlRoom = () => currentUser().roles.some((r) => r === 'oms_operator' || r === 'system_admin');
 
 const SEVS = ['all', 'critical', 'high', 'medium', 'low'];
 // 'planned' is a type filter, not a status: planned outages (OMS-01) move
@@ -49,7 +54,7 @@ export default function Incidents({ openId, focusIncidentId, clearFocus } = {}) 
       <div className="page-head">
         <div><div className="eyebrow">Lifecycle</div><h2>Incidents</h2>
           <p>Detect, classify, dispatch and restore - every transition audited.</p></div>
-        <button className="btn primary" onClick={() => setShowNew(true)}><Icon name="plus" size={16} /> New incident</button>
+        {isControlRoom() && <button className="btn primary" onClick={() => setShowNew(true)}><Icon name="plus" size={16} /> New incident</button>}
       </div>
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
@@ -105,6 +110,28 @@ function IncidentDrawer({ inc, onClose, onChange }) {
   const [busy, setBusy] = useState(false);
   const [nearest, setNearest] = useState([]);
   useEffect(() => { api.nearestCrews(inc.id).then(setNearest).catch(() => setNearest([])); }, [inc.id]);
+  // OMS-03: the crew's field completion report and lock state, per job.
+  const [report, setReport] = useState([]);
+  const loadReport = () => api.fieldReport(inc.id).then(setReport).catch(() => setReport([]));
+  useEffect(() => { loadReport(); }, [inc.id, inc.status]); // eslint-disable-line
+  useLiveRefresh(['crew.job.updated', 'oms.incident.updated'], loadReport);
+  const locked = report.some((r) => r.locked);
+  const undoUntil = report.map((r) => r.undoUntil).find(Boolean);
+  // Return for correction replaces the plain "send crew back" step: it needs
+  // a reason and reopens the crew's job (Requires Revisit) instead of
+  // leaving it locked as Work Complete.
+  const canReturn = inc.status === 'pending' && !inc.plannedOutageId && isControlRoom() && report.some((r) => r.job.status === 'Work Complete');
+  const [returning, setReturning] = useState(false);
+  const [reason, setReason] = useState('');
+  const doReturn = async () => {
+    if (!reason.trim()) { toast('Say what needs correcting', 'err'); return; }
+    setBusy(true);
+    try {
+      await api.returnForCorrection(inc.id, reason.trim());
+      toast(`${inc.id} returned to the crew for correction`);
+      setReturning(false); setReason(''); onChange(); loadReport();
+    } catch (e) { toast(e.message, 'err'); } finally { setBusy(false); }
+  };
 
   const doStatus = async (status) => {
     setBusy(true);
@@ -134,7 +161,7 @@ function IncidentDrawer({ inc, onClose, onChange }) {
           <div>
             <div className="id-cell" style={{ fontSize: 13 }}>{inc.id}</div>
             <div style={{ fontFamily: 'var(--disp)', fontSize: 18, fontWeight: 600, marginTop: 3 }}>{inc.type}</div>
-            <div style={{ display: 'flex', gap: 7, marginTop: 8, flexWrap: 'wrap' }}><SevBadge sev={inc.severity} /><StatusBadge status={inc.status} /><ScadaBadges inc={inc} /></div>
+            <div style={{ display: 'flex', gap: 7, marginTop: 8, flexWrap: 'wrap' }}><SevBadge sev={inc.severity} /><StatusBadge status={inc.status} /><ScadaBadges inc={inc} /><LockBadge locked={locked} undoUntil={undoUntil} /></div>
           </div>
           <button className="iconbtn" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
         </div>
@@ -173,7 +200,7 @@ function IncidentDrawer({ inc, onClose, onChange }) {
 
           <div style={{ margin: '18px 0 8px' }} className="eyebrow">Advance lifecycle</div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {(inc.nextStates || []).map((s) => (
+            {(inc.nextStates || []).filter((s) => !(canReturn && s === 'in_progress')).map((s) => (
               <button key={s} className={`btn sm ${s === 'cancelled' ? 'danger' : 'primary'}`} disabled={busy} onClick={() => doStatus(s)}>
                 {s === 'cancelled' ? 'Cancel' : (inc.status === 'pending' && s === 'resolved') ? 'Accept - verified restored' : (inc.status === 'pending' && s === 'in_progress') ? 'Deny - send crew back' : `-> ${(inc.stateLabels?.[s] || s)}`}
               </button>
@@ -181,7 +208,23 @@ function IncidentDrawer({ inc, onClose, onChange }) {
             {!inc.nextStates?.length && <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>{inc.plannedOutageId
               ? 'Planned outage - its status follows the switching plan and work permits. Manage it in Planned outages.'
               : 'Terminal state - no further transitions.'}</span>}
+            {canReturn && !returning && (
+              <button className="btn sm danger" disabled={busy} onClick={() => setReturning(true)}>Return for correction</button>
+            )}
           </div>
+          {canReturn && returning && (
+            <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
+              <label className="eyebrow" htmlFor="rfc-reason">What needs correcting? (required, the crew sees it on the timeline)</label>
+              <textarea id="rfc-reason" rows={3} maxLength={500} value={reason} onChange={(e) => setReason(e.target.value)} autoFocus
+                style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid #ccc', fontSize: 13 }} />
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="btn sm danger" disabled={busy || !reason.trim()} onClick={doReturn}>Return to crew</button>
+                <button className="btn sm" disabled={busy} onClick={() => { setReturning(false); setReason(''); }}>Cancel</button>
+              </div>
+            </div>
+          )}
+
+          <FieldReportPanel report={report} />
 
           {!inc.crew_id && ['open', 'dispatched'].includes(inc.status) && (
             <>
@@ -211,8 +254,59 @@ function IncidentDrawer({ inc, onClose, onChange }) {
           <MessagePanel incidentId={inc.id} />
         </div>
           <PhotoPanel incidentId={inc.id} />
+          <AssetScanPanel incidentId={inc.id} />
       </DrawerContent>
     </Drawer>
+  );
+}
+
+// Lock state of the incident's crew job (OMS-03): while the crew can still
+// undo, and once its completion is locked.
+function LockBadge({ locked, undoUntil }) {
+  if (undoUntil) return <span className="chip chip-minor" title="The crew can still reopen the job">Crew can undo until {hhmm(undoUntil)}</span>;
+  if (locked) return <span className="chip chip-ok" title="Crew writes are no longer applied; use Return for correction">Locked</span>;
+  return null;
+}
+
+function NotAppliedChip({ reason }) {
+  return <span className="chip chip-major" style={{ marginLeft: 6 }} title="Arrived after the job was locked; kept for the record, not applied">Not applied - {reason}</span>;
+}
+
+const RESTORED_LABEL = { yes: 'Yes', partial: 'Partly', no: 'No' };
+
+// The crew's completion form for each job of the incident (newest form
+// first), plus anything the crew sent after the job was locked.
+function FieldReportPanel({ report }) {
+  const jobs = report.filter((r) => r.completions.length || r.locked || r.undoUntil || r.notApplied.photos.length || r.notApplied.scans.length);
+  if (!jobs.length) return null;
+  return (
+    <div style={{ margin: '20px 0 10px' }}>
+      <div className="eyebrow">Field completion report</div>
+      {jobs.map((r) => {
+        const c = r.completions[0];
+        const parts = Array.isArray(c?.parts_used) ? c.parts_used : [];
+        const late = r.notApplied.photos.length + r.notApplied.scans.length;
+        return (
+          <div key={r.job.id} style={{ border: '1px solid var(--line-2)', borderRadius: 8, padding: '8px 10px', margin: '8px 0', fontSize: 13 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+              <b className="mono">{r.job.id} - {r.job.crew_id || 'unassigned'}</b>
+              <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>{r.job.status}<LockBadge locked={r.locked} undoUntil={r.undoUntil} /></span>
+            </div>
+            {!c && <div style={{ opacity: 0.6, marginTop: 4 }}>No completion form sent (the crew app sends it from the next app version).</div>}
+            {c && (
+              <div style={{ display: 'grid', gap: 3, marginTop: 6 }}>
+                {c.diagnosis && <div><span style={{ opacity: 0.6 }}>Diagnosis:</span> {c.diagnosis.cause || '-'}{c.diagnosis.action ? ` - ${c.diagnosis.action}` : ''}</div>}
+                <div><span style={{ opacity: 0.6 }}>Parts used:</span> {parts.length ? parts.map((x) => `${x.name} x${x.qty}`).join(', ') : 'none'}</div>
+                <div><span style={{ opacity: 0.6 }}>Supply restored:</span> {RESTORED_LABEL[c.restored] || 'not stated'}</div>
+                {c.sign_off && <div><span style={{ opacity: 0.6 }}>Signed off by:</span> {c.sign_off.name || '-'}{c.sign_off.signedAt ? ` at ${hhmm(c.sign_off.signedAt)}` : ''}</div>}
+                <div style={{ opacity: 0.6 }}>Submitted {hhmm(c.submitted_at)}{c.submitted_by ? ` by ${c.submitted_by}` : ''}{r.completions.length > 1 ? ` - ${r.completions.length} forms (job was reopened)` : ''}</div>
+              </div>
+            )}
+            {late > 0 && <div style={{ marginTop: 6 }}><NotAppliedChip reason="job locked" /> {late} item(s) arrived after the lock - see photos and scans below.</div>}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -300,6 +394,46 @@ function MessagePanel({ incidentId }) {
   );
 }
 
+// Equipment the crew scanned on site (QR on poles, transformers, meters).
+// asset_details is whatever the QR code carried, if it was JSON.
+function AssetScanPanel({ incidentId }) {
+  const [scans, setScans] = useState([]);
+  const load = () => api.assetScans(incidentId).then(setScans).catch(() => setScans([]));
+  useEffect(() => { load(); }, [incidentId]); // eslint-disable-line
+  useLiveRefresh(['crew.job.updated'], load);
+
+  return (
+    <div style={{ margin: '20px 0 10px' }}>
+      <div className="eyebrow">Asset scans ({scans.length})</div>
+      {!scans.length && <div style={{ fontSize: 13, opacity: 0.6, margin: '10px 0' }}>No assets scanned yet.</div>}
+      <div style={{ display: 'grid', gap: 8, margin: '10px 0' }}>
+        {scans.map((s) => {
+          const details = typeof s.asset_details === 'string' ? JSON.parse(s.asset_details) : (s.asset_details || {});
+          const entries = Object.entries(details).filter(([, v]) => v != null && typeof v !== 'object');
+          return (
+            <div key={s.id} style={{ border: '1px solid var(--line-2)', borderRadius: 8, padding: '8px 10px', fontSize: 13 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                <b className="mono">{s.asset_id || s.raw_value}{s.not_applied_reason && <NotAppliedChip reason={s.not_applied_reason} />}</b>
+                <span style={{ opacity: 0.7 }}>{s.crew_id || 'Unknown crew'} - {hhmm(s.scanned_at)}</span>
+              </div>
+              {entries.length > 0 && (
+                <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: '2px 12px', opacity: 0.85 }}>
+                  {entries.map(([k, v]) => <span key={k}><span style={{ opacity: 0.6 }}>{k}:</span> {String(v)}</span>)}
+                </div>
+              )}
+              {Number.isFinite(s.lat) && Number.isFinite(s.lon) && (
+                <a href={`https://www.openstreetmap.org/?mlat=${s.lat}&mlon=${s.lon}#map=18/${s.lat}/${s.lon}`} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>
+                  Scanned at {s.lat.toFixed(5)}, {s.lon.toFixed(5)}
+                </a>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function PhotoPanel({ incidentId }) {
   const [photos, setPhotos] = useState([]);
   const [openPhoto, setOpenPhoto] = useState(null);
@@ -334,8 +468,9 @@ function PhotoPanel({ incidentId }) {
               key={p.id}
               onClick={() => openFull(p)}
               style={{ width: 84, height: 84, borderRadius: 8, overflow: 'hidden', cursor: 'pointer', background: '#f2f5f9', position: 'relative', border: '1px solid var(--line-2)' }}
-              title={`${meta.technicianName || p.technician_id || 'Unknown'} - ${hhmm(p.ts)}`}
+              title={`${meta.technicianName || p.technician_id || 'Unknown'} - ${hhmm(p.ts)}${p.not_applied_reason ? ` - not applied (${p.not_applied_reason})` : ''}`}
             >
+              {p.not_applied_reason && <span className="chip chip-major" style={{ position: 'absolute', left: 3, top: 3, zIndex: 1 }}>Not applied</span>}
               {thumbs[p.id] ? (
                 <img src={thumbs[p.id]} alt="Job photo" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
               ) : (
