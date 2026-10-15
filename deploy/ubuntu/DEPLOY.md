@@ -3,8 +3,9 @@
 Everything runs in Docker: Postgres/PostGIS/TimescaleDB, Redis, the backend and the web app (nginx).
 Other apps on the server (HRMS, Caddy on ports 80/443, tile server) are not touched, and no volumes are deleted.
 
-0. Set the required passwords (see **Required settings** below). Without them `docker compose` stops with
-   "set a strong password in the environment".
+0. Export the required passwords (see **Required settings** below). `replace-old-oms.sh` checks both before it
+   does anything else, so a missing password stops it before the old OMS is removed. Without them `docker compose`
+   also stops, with "set a strong password in the environment".
 1. Copy `OMS-deploy.zip` to the server and unzip it (e.g. `~/Desktop/OMS-deploy`).
 2. `cd` into that folder and run:
    ```bash
@@ -28,7 +29,8 @@ The database is not exposed outside Docker.
 
 ## Required settings
 `docker-compose.deploy.yml` has no default passwords. Export both before any `docker compose` command (or put them in a
-`.env` file next to `docker-compose.deploy.yml`, readable only by you):
+`.env` file next to `docker-compose.deploy.yml`, readable only by you; `replace-old-oms.sh` still needs them exported
+in the shell, it does not read `.env`):
 ```bash
 export OMS_DB_PASSWORD='<strong password>'        # Postgres user "oms" (backend and Keycloak use it)
 export OMS_KC_ADMIN_PASSWORD='<strong password>'  # Keycloak "admin" user
