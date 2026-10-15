@@ -37,19 +37,25 @@ async function exportReliabilityReport(format, filters = {}) {
   a.remove();
   URL.revokeObjectURL(url);
 }
-async function exportFeederKpi(params = {}) {
-  const r = await fetch(`${BASE}/analytics/feeder-kpi/export?${new URLSearchParams(params)}`, { headers: { ...authHeader() } });
+// Downloads a file from the API (with the login token) under the name the server gives it.
+async function download(path, fallbackName) {
+  const r = await fetch(`${BASE}${path}`, { headers: { ...(await freshAuthHeader()) } });
   if (!r.ok) {
     const data = await r.json().catch(() => ({}));
     throw Object.assign(new Error(data.error || r.statusText), { data, status: r.status });
   }
-  const name = (r.headers.get('content-disposition') || '').match(/filename="([^"]+)"/)?.[1] || 'feeder-kpi.csv';
+  const name = (r.headers.get('content-disposition') || '').match(/filename="([^"]+)"/)?.[1] || fallbackName;
   const url = URL.createObjectURL(await r.blob());
   const a = document.createElement('a');
   a.href = url; a.download = name;
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 }
+const exportFeederKpi = (params = {}) => download(`/analytics/feeder-kpi/export?${new URLSearchParams(params)}`, 'feeder-kpi.csv');
+const exportFeederKpiPdf = (params = {}, feeders = []) => {
+  const { feeder, ...rest } = params; // the PDF names its own feeders
+  return download(`/analytics/feeder-kpi/export.pdf?${new URLSearchParams({ ...rest, feeders: feeders.join(',') })}`, 'feeder-kpi.pdf');
+};
 export const api = {
   incidents: () => req('GET', '/incidents'),
   incident: (id) => req('GET', `/incidents/${id}`),
@@ -92,7 +98,9 @@ export const api = {
   feederKpiChildSeries: (params) => req('GET', `/analytics/feeder-kpi/child-series?${new URLSearchParams(params)}`),
   feederKpiSeries: (params) => req('GET', `/analytics/feeder-kpi/series?${new URLSearchParams(params)}`),
   updateFeederKpiRating: (feeder, patch) => req('PUT', `/analytics/feeder-kpi/ratings/${encodeURIComponent(feeder)}`, patch),
+  feederKpiRollup: (range) => req('POST', '/analytics/feeder-kpi/rollup', range),
   exportFeederKpi,
+  exportFeederKpiPdf,
   audit: () => req('GET', '/audit'),
   network: () => req('GET', '/network'),
   networkTopology: () => req('GET', '/network/topology'),

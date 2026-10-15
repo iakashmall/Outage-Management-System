@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
 import { TrendChart, WorstBars, allZeroMessage } from './KpiCharts.jsx';
+import FeederPdfPicker from './FeederPdfPicker.jsx';
 
 // PFC feeder-wise KPIs (FVHI ... FLIF) for the Analytics screen.
 // Two views:
@@ -34,7 +35,7 @@ function tone(code, v) {
 }
 const fmt = (v, unit) => {
   if (v == null) return '—';
-  if (unit === 'Nos') return String(v);
+  if (unit === 'Nos') return Number.isInteger(Number(v)) ? String(v) : Number(v).toFixed(1); // axis ticks are fractional
   if (Math.abs(v) >= 10000) return Math.round(v).toLocaleString('en-IN');
   return Number(v).toFixed(unit === 'min' ? 0 : 1);
 };
@@ -67,6 +68,7 @@ export default function FeederKpiPanel() {
   const [code, setCode] = useState('FVLD'); // index shown in the chart
   const [series, setSeries] = useState(null);
   const dataRef = useRef(null); // the refresh timer reads the latest range from here
+  const [treeScope, setTreeScope] = useState([]); // feeders under the hierarchy's current drill-down
 
   useEffect(() => {
     api.feederKpiDefs().then((d) => { setDefs(d); setFeeder((f) => f || d.feeders[0]?.feeder || ''); })
@@ -124,6 +126,8 @@ export default function FeederKpiPanel() {
 
   const one = mode === 'one' ? data?.feeders?.[0] : null;
   const exportCsv = () => api.exportFeederKpi(params).catch((e) => alert('Export failed: ' + e.message));
+  // The PDF picker opens with the feeder(s) in view ticked.
+  const pdfInitial = mode === 'one' ? (feeder ? [feeder] : []) : mode === 'tree' ? treeScope : [];
   const openFeeder = (f) => { setFeeder(f); setMode('one'); };
   const clickSort = (c) => { setCode(c); setSort((s) => ({ code: c, dir: s.code === c && s.dir === 'worst' ? 'best' : 'worst' })); };
   const chartDef = defs?.defs.find((d) => d.code === code);
@@ -172,6 +176,8 @@ export default function FeederKpiPanel() {
         )}
         <div className="grow" />
         <button className="btn sm" onClick={exportCsv} disabled={!data}>Export CSV</button>
+        <FeederPdfPicker feeders={defs?.feeders || []} initial={pdfInitial} disabled={!defs}
+          onExport={(list) => api.exportFeederKpiPdf(params, list)} />
       </div>
 
       <div className="fk-range">
@@ -187,7 +193,7 @@ export default function FeederKpiPanel() {
       </div>
 
       {mode === 'tree' && data && defs && (
-        <KpiHierarchy feeders={data.feeders} defs={defs.defs} phase={phase} params={params} onOpenFeeder={openFeeder} />
+        <KpiHierarchy feeders={data.feeders} defs={defs.defs} phase={phase} params={params} onOpenFeeder={openFeeder} onScope={setTreeScope} />
       )}
 
       {mode === 'all' && data && chartDef && (
@@ -305,9 +311,9 @@ export default function FeederKpiPanel() {
 // worst five by period value. Click a legend entry to drill into it.
 // Scope totals use each index's own rule (incidents / durations / stress add
 // up, max takes the highest, min the lowest).
-const LINE_COLORS = ['#2f6fd6', '#e23b2e', '#0fb39d', '#d99a14', '#8b5cf6'];
+const LINE_COLORS = ['#2f6fd6', '#e23b2e', '#0fb39d', '#d99a14', '#8b5cf6', '#0f2847', '#db2777', '#65a30d', '#0891b2', '#9a3412'];
 const PHASE_LINE = { R: '#d7382a', Y: '#d99a14', B: '#2f6fd6', T: '#0f2847' };
-const SHOW_LINES = 5;
+const LINE_COUNTS = [5, 10]; // more than 10 lines cannot be told apart; the ranked list shows the rest
 // Tabs of the hierarchy view: one screen of related indices each.
 const KH_GROUPS = [
   { key: 'volt', label: 'Voltage events', codes: ['FVHI', 'FVHD', 'FVLI', 'FVLD'] },
@@ -392,11 +398,13 @@ function MiniLines({ labels: allLabels, granularity, lines: allLines, def, unit 
   );
 }
 
-function KpiHierarchy({ feeders, defs, phase, params, onOpenFeeder }) {
+function KpiHierarchy({ feeders, defs, phase, params, onOpenFeeder, onScope }) {
   const [sub, setSub] = useState(null);
   const [fdr, setFdr] = useState(null);
   const [loaded, setLoaded] = useState(null); // { scope, data }
   const [group, setGroup] = useState('volt');
+  const [topN, setTopN] = useState(5);
+  const [expanded, setExpanded] = useState(() => new Set()); // index codes whose full ranking is open
   const groupCodes = KH_GROUPS.find((g) => g.key === group).codes;
   const keyOf = (d, ph = phase) => (d.phased === false ? d.code : `${d.code}_${ph}`);
   const level = fdr ? 'phase' : sub ? 'feeder' : 'substation';
@@ -413,6 +421,8 @@ function KpiHierarchy({ feeders, defs, phase, params, onOpenFeeder }) {
     () => (fdr ? feeders.filter((f) => f.feeder === fdr) : sub ? (bySub.get(sub) || []) : feeders),
     [feeders, bySub, sub, fdr],
   );
+  // Tell the panel which feeders are in view (none at region level), for the PDF picker.
+  useEffect(() => { onScope?.(sub || fdr ? scopeFeeders.map((f) => f.feeder) : []); }, [scopeFeeders, sub, fdr]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Time series of the children of the current scope. Tagged with the scope
   // it was fetched for: right after a drill, the previous scope's data (a
@@ -440,6 +450,25 @@ function KpiHierarchy({ feeders, defs, phase, params, onOpenFeeder }) {
     ? aggOf(d, (bySub.get(id) || []).map((f) => f.kpis[keyOf(d)]))
     : feeders.find((f) => f.feeder === id)?.kpis[keyOf(d)]);
 
+  // Every child of the scope with a value for this index, worst first.
+  const rankedFor = (d) => {
+    if (!series || level === 'phase') return [];
+    const lowWorst = WORST_LOW.has(d.code);
+    return series.children
+      .map((c) => ({ id: c.id, value: childValue(d, c.id), values: c.points.map((k) => k[keyOf(d)]) }))
+      .filter((c) => c.value != null)
+      .sort((a, b) => (lowWorst ? a.value - b.value : b.value - a.value))
+      .map((c) => ({
+        ...c, label: level === 'substation' ? shortSub(c.id) : c.id,
+        drill: () => (level === 'substation' ? setSub(c.id) : setFdr(c.id)),
+      }));
+  };
+  const toggleRanking = (code) => setExpanded((s) => {
+    const n = new Set(s);
+    if (n.has(code)) n.delete(code); else n.add(code);
+    return n;
+  });
+
   const linesFor = (d) => {
     if (!series) return [];
     if (level === 'phase') {
@@ -450,16 +479,7 @@ function KpiHierarchy({ feeders, defs, phase, params, onOpenFeeder }) {
         values: series.phasePoints.map((k) => k[d.phased === false ? d.code : `${d.code}_${p}`]),
       }));
     }
-    const lowWorst = WORST_LOW.has(d.code);
-    return series.children
-      .map((c) => ({ id: c.id, value: childValue(d, c.id), values: c.points.map((k) => k[keyOf(d)]) }))
-      .filter((c) => c.value != null)
-      .sort((a, b) => (lowWorst ? a.value - b.value : b.value - a.value))
-      .slice(0, SHOW_LINES)
-      .map((c, i) => ({
-        ...c, color: LINE_COLORS[i], label: level === 'substation' ? shortSub(c.id) : c.id,
-        drill: () => (level === 'substation' ? setSub(c.id) : setFdr(c.id)),
-      }));
+    return rankedFor(d).slice(0, topN).map((c, i) => ({ ...c, color: LINE_COLORS[i] }));
   };
 
   return (
@@ -491,8 +511,15 @@ function KpiHierarchy({ feeders, defs, phase, params, onOpenFeeder }) {
         <span className="muted kh-hint">
           {level === 'phase'
             ? 'Lines = R / Y / B / Total for this feeder'
-            : `Lines = worst ${SHOW_LINES} ${childName}${phase !== 'T' ? ` · phase ${phase}` : ''} · click a name to drill down`}
+            : `Lines = worst ${topN} ${childName}${phase !== 'T' ? ` · phase ${phase}` : ''} · click a name to drill down`}
         </span>
+        {level !== 'phase' && (
+          <span className="seg kh-topn" role="group" aria-label="Lines per chart">
+            {LINE_COUNTS.map((n) => (
+              <button key={n} className={topN === n ? 'on' : ''} aria-pressed={topN === n} onClick={() => setTopN(n)}>Worst {n}</button>
+            ))}
+          </span>
+        )}
       </nav>
       <div className="seg kh-tabs" role="tablist" aria-label="Index group">
         {KH_GROUPS.map((g) => (
@@ -507,6 +534,8 @@ function KpiHierarchy({ feeders, defs, phase, params, onOpenFeeder }) {
           const total = scopeValue(d);
           const unit = d.unit === '% of nominal' ? '%' : d.unit;
           const lines = linesFor(d);
+          const ranked = rankedFor(d);
+          const open = expanded.has(d.code);
           return (
             <div key={d.code} className={`kh-card fk-edge-${tone(d.code, total)}`}>
               <div className="kh-head">
@@ -523,6 +552,23 @@ function KpiHierarchy({ feeders, defs, phase, params, onOpenFeeder }) {
                   </button>
                 ))}
               </div>
+              {ranked.length > lines.length && (
+                <button className="kh-more" onClick={() => toggleRanking(d.code)} aria-expanded={open}>
+                  {open ? 'Hide full ranking' : `Show all ${ranked.length} ${childName}`}
+                </button>
+              )}
+              {open && ranked.length > lines.length && (
+                <ol className="kh-rank">
+                  {ranked.map((c) => (
+                    <li key={c.id}>
+                      <button onClick={c.drill} title={`Drill into ${c.id}`}>
+                        <span className="kh-lbl">{c.label}</span>
+                        <b className={`mono fk-${tone(d.code, c.value)}`}>{fmt(c.value, unit)}</b>
+                      </button>
+                    </li>
+                  ))}
+                </ol>
+              )}
               </div>
             </div>
           );
