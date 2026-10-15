@@ -102,6 +102,11 @@ async function req(path, method = "GET", body) {
 // another crew (rebalance or manual reassign) or left unassigned.
 export const isNotYourJob = (err) => err?.code === "NOT_YOUR_JOB";
 
+// False in demo mode, and once the crew signs out (items may still be queued).
+export async function isSignedIn() {
+  return (await session()).isAuthenticated();
+}
+
 function normalizeOmsJob(job) {
   const lat = Number(job.lat ?? job.latitude ?? job.location?.lat ?? job.location?.latitude ?? job.incident?.lat ?? job.incident?.latitude);
   const lon = Number(job.lon ?? job.lng ?? job.longitude ?? job.location?.lon ?? job.location?.longitude ?? job.incident?.lon ?? job.incident?.longitude);
@@ -125,7 +130,11 @@ function normalizeOmsJob(job) {
     assignedDistance: job.assignedDistance ?? job.distance ?? "Nearest available",
     incidentId: job.incident_id ?? job.incidentId ?? null,
     // OMS-01: a job on a planned outage gets the permit / switching gates.
-    planned: (job.incident?.type ?? job.incidentType) === "Scheduled",
+    planned: job.planned === true || (job.incident?.type ?? job.incidentType) === "Scheduled",
+    // OMS-03: a finished fault job can be reopened until undoUntil; after
+    // that it is locked (read-only on the phone).
+    locked: !!job.locked,
+    undoUntil: job.undoUntil ?? null,
     coordinates: Number.isFinite(lat) && Number.isFinite(lon) ? { lat, lon } : null,
   };
 }
@@ -233,6 +242,22 @@ export async function getJobPhotos(jobId) {
 
 export async function saveAssetScan(jobId, scan) {
   return req(`/mobile/jobs/${jobId}/assets/scans`, "POST", { ...scan, sentAt: new Date().toISOString() });
+}
+
+// OMS-03 crew job workflow (fault jobs only; never for job.planned, see
+// lib/jobFlow.js). Both answer 200 { applied:false, reason } when the
+// server does not apply them, e.g. once the job is locked.
+// POST /api/mobile/jobs/:id/completion { diagnosis, partsUsed, restored, signOff, clientRequestId, submittedAt }
+// Signed out there is nothing to send it with: it throws 401, as the server
+// would, so a queued form stays queued until the crew signs in again.
+export async function postJobCompletion(jobId, form) {
+  if (!(await isSignedIn())) throw Object.assign(new Error("Not signed in"), { status: 401, code: "SIGNED_OUT" });
+  return req(`/mobile/jobs/${jobId}/completion`, "POST", { ...form, sentAt: new Date().toISOString() });
+}
+
+// POST /api/mobile/jobs/:id/reopen — undo Work Complete while the window is open. Online only.
+export async function reopenJob(jobId) {
+  return req(`/mobile/jobs/${jobId}/reopen`, "POST", {});
 }
 
 export async function getAssetScans(jobId) {
