@@ -23,7 +23,11 @@
 //     Loss of ONE phase is not an interruption and does count as low voltage.
 //   * FMXC/FMNC are divided by NOMINAL CURRENT (the source text says "nominal
 //     voltage" for these two, which cannot give a percentage of current).
-//   * FCSV integrates current ABOVE nominal (the source text drops "above").
+//   * FVSV / FCSV integrate only what is ABOVE THE HIGH LIMIT (v_hi_pct /
+//     i_hi_pct of nominal), not above nominal: the source text says "V - Vnom
+//     while V > Vnom", but that makes a healthy feeder at 103% pile up
+//     millions of V-min a week. Measured from the limit, a feeder inside its
+//     band reads 0 and the value is the overvoltage / overload actually seen.
 //   * Voltage sag (FVSM): residual voltage between DEAD_PCT and v_sag_pct of
 //     nominal (IEC 61000-4-30 sag/interruption thresholds). Reported as the
 //     DEEPEST residual voltage in % of nominal. null = no sag in the period.
@@ -175,13 +179,13 @@ export function computeFeederKpis(samples, rating, opts) {
     for (const p of PHASES) {
       const v = s.v[p], i = s.i[p];
       if (v != null) {
-        if (v > R.v_nominal_v) stressV[p] += (v - R.v_nominal_v) * dtMin;
+        if (v > vHi) stressV[p] += (v - vHi) * dtMin;
         mx.v[p] = Math.max(mx.v[p] ?? -Infinity, pctV(v));
         mn.v[p] = Math.min(mn.v[p] ?? Infinity, pctV(v));
         if (v >= vDead && v < vSag) sagV[p] = Math.min(sagV[p] ?? Infinity, pctV(v));
       }
       if (i != null) {
-        if (i > R.i_nominal_a) stressI[p] += (i - R.i_nominal_a) * dtMin;
+        if (i > iHi) stressI[p] += (i - iHi) * dtMin;
         mx.i[p] = Math.max(mx.i[p] ?? -Infinity, pctI(i));
         mn.i[p] = Math.min(mn.i[p] ?? Infinity, pctI(i));
         const pi = continuous && !isDead(prev) ? prev.i[p] : null;

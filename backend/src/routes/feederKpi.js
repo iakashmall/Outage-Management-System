@@ -12,7 +12,7 @@ import { feederKpisForPeriod, feederKpiSeries, feederKpiChildSeries, ingestSampl
 //   GET  /analytics/feeder-kpi/child-series?period=&date=[&from&to][&substation=]
 //   GET  /analytics/feeder-kpi/export?...&format=csv
 //   GET  /analytics/feeder-kpi/ratings
-//   PUT  /analytics/feeder-kpi/ratings/:feeder       system_admin, configuration_engineer
+//   PUT  /analytics/feeder-kpi/ratings/:feeder       system_admin, oms_operator, configuration_engineer
 //   POST /analytics/feeder-kpi/rollup {from,to}      system_admin   (recompute stored days)
 //   POST /telemetry/feeders {samples:[...]}          scada_operator, system_admin
 export const feederKpiRoutes = Router();
@@ -65,7 +65,7 @@ feederKpiRoutes.get('/analytics/feeder-kpi/export', wrap(async (req, res, next) 
 
 feederKpiRoutes.get('/analytics/feeder-kpi/ratings', wrap(async (req, res) => res.json(await repo.feederRatings())));
 
-feederKpiRoutes.put('/analytics/feeder-kpi/ratings/:feeder', requireRole('system_admin', 'configuration_engineer'), wrap(async (req, res) => {
+feederKpiRoutes.put('/analytics/feeder-kpi/ratings/:feeder', requireRole('system_admin', 'oms_operator', 'configuration_engineer'), wrap(async (req, res) => {
   const patch = {};
   for (const [k, v] of Object.entries(req.body || {})) {
     if (k === 'substation') { patch[k] = v; continue; }
@@ -86,7 +86,7 @@ feederKpiRoutes.put('/analytics/feeder-kpi/ratings/:feeder', requireRole('system
 }));
 
 // Thresholds changed, or late data loaded by hand: recompute stored days.
-feederKpiRoutes.post('/analytics/feeder-kpi/rollup', requireRole('system_admin'), wrap(async (req, res) => {
+feederKpiRoutes.post('/analytics/feeder-kpi/rollup', requireRole('system_admin', 'oms_operator'), wrap(async (req, res) => {
   const { from, to } = req.body || {};
   if (!/^\d{4}-\d{2}-\d{2}$/.test(from || '') || !/^\d{4}-\d{2}-\d{2}$/.test(to || '') || to < from) {
     return res.status(400).json({ error: 'from and to (YYYY-MM-DD, from <= to) are required' });

@@ -92,6 +92,7 @@ export const api = {
   feederKpiChildSeries: (params) => req('GET', `/analytics/feeder-kpi/child-series?${new URLSearchParams(params)}`),
   feederKpiSeries: (params) => req('GET', `/analytics/feeder-kpi/series?${new URLSearchParams(params)}`),
   updateFeederKpiRating: (feeder, patch) => req('PUT', `/analytics/feeder-kpi/ratings/${encodeURIComponent(feeder)}`, patch),
+  feederKpiRollup: (range) => req('POST', '/analytics/feeder-kpi/rollup', range),
   exportFeederKpi,
   audit: () => req('GET', '/audit'),
   network: () => req('GET', '/network'),

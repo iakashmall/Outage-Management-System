@@ -19,8 +19,8 @@ a total `_T`, except FLIF.
 | h | FCLD | Current low duration | min |
 | i | FVSM | Voltage sag magnitude, 24 h | % of nominal |
 | j | FCSM | Current sag magnitude, 24 h | % of nominal |
-| k | FVSV | Voltage stress = sum of (V - Vnom) x minutes while V > Vnom | V-min |
-| l | FCSV | Current stress = sum of (I - Inom) x minutes while I > Inom | A-min |
+| k | FVSV | Voltage stress = sum of (V - Vhigh) x minutes while V > Vhigh (high limit, default 110 %) | V-min |
+| l | FCSV | Current stress = sum of (I - Ihigh) x minutes while I > Ihigh (high limit, default 100 %) | A-min |
 | m | FMXV | Max voltage / nominal x 100 | % |
 | n | FMNV | Min voltage / nominal x 100 | % |
 | o | FMXC | Max current / nominal current x 100 | % |
@@ -45,7 +45,10 @@ Only GOOD and SUBSTITUTED samples are used.
 ## Interpretation decisions (confirm with UPCL / PFC)
 
 1. **FMXC / FMNC** divide by nominal *current* (the source text says "nominal voltage").
-2. **FCSV** integrates current *above* nominal (the source text omits "above").
+2. **FVSV / FCSV** integrate only what is above the feeder's *high limit*, not above nominal.
+   The source text says "V - Vnom while V > Vnom"; read literally, a healthy feeder at 103 %
+   adds about 1.4 million V-min a day. From the limit, a feeder inside its band reads 0.
+   After upgrading, recompute stored days: `POST /api/analytics/feeder-kpi/rollup {from, to}`.
 3. **_T (total)**: incidents/durations = any phase in breach; stress = R+Y+B;
    max = highest phase; min and sag = lowest phase.
 4. **Voltage sag (FVSM)**: residual voltage between 10 % and `v_sag_pct` (90 %) of

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
 import { Icon, timeAgo, useConnection, useLiveRefresh } from '../lib/ui.jsx';
+import FeederRatingsCard from '../components/FeederRatingsCard.jsx';
 
 const USERS = [
   { name: 'A. Kulkarni', role: 'Control Room Operator', zone: 'Dehradun', active: true },
@@ -88,6 +89,8 @@ export default function Admin() {
           </div>
         </div>
       </div>
+
+      <FeederRatingsCard />
 
       <div className="card" style={{ marginTop: 16 }}>
         <div className="card-h"><h3>Audit log</h3><span className="eyebrow">{audit.length} entries</span></div>

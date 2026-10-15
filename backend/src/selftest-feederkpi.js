@@ -41,14 +41,14 @@ t('every key present with the right suffixes (16 x 4 + FLIF = 65)', () => {
   assert.ok(!('FLIF_T' in kpis));
 });
 
-t('voltage high: two excursions on R (3 min + 2 min), stress = sum of (V-Vn) x minutes', () => {
+t('voltage high: two excursions on R (3 min + 2 min), stress = sum of (V-Vhi) x minutes', () => {
   // R at 1120 V for minutes 10-12 and 1150 V for 20-21
   const s = series(30, (n) => (n >= 10 && n <= 12 ? { v_r: 1120 } : n >= 20 && n <= 21 ? { v_r: 1150 } : {}));
   const { kpis } = run(s);
   assert.equal(kpis.FVHI_R, 2); assert.equal(kpis.FVHD_R, 5);
   assert.equal(kpis.FVHI_Y, 0); assert.equal(kpis.FVHI_T, 2); assert.equal(kpis.FVHD_T, 5);
-  assert.equal(kpis.FVSV_R, 120 * 3 + 150 * 2); // 660 V-min
-  assert.equal(kpis.FVSV_T, 660);
+  assert.equal(kpis.FVSV_R, 20 * 3 + 50 * 2); // 160 V-min above the 1100 V limit
+  assert.equal(kpis.FVSV_T, 160);
   assert.equal(kpis.FMXV_R, 115); assert.equal(kpis.FMXV_T, 115);
 });
 
@@ -122,12 +122,18 @@ t('FLIF ignores a nearly unloaded feeder (< 5% of nominal)', () => {
   assert.equal(run(s).kpis.FLIF, null);
 });
 
+t('stress: a feeder above nominal but inside its band reads 0', () => {
+  const s = series(30, () => ({ v_r: 1080, v_y: 1080, v_b: 1080, i_r: 95, i_y: 95, i_b: 95 }));
+  const { kpis } = run(s);
+  assert.equal(kpis.FVSV_T, 0); assert.equal(kpis.FCSV_T, 0);
+});
+
 t('aggregate: sums incidents/durations/stress, max of max, min of min/sag', () => {
   const a = run(series(30, (n) => (n < 2 ? { v_r: 1150 } : n === 10 ? { v_b: 700 } : {})));
   const b = run(series(30, (n) => (n < 3 ? { v_r: 1200 } : {})));
   const g = aggregateKpis([a, b]);
   assert.equal(g.kpis.FVHI_R, 2); assert.equal(g.kpis.FVHD_R, 5);
-  assert.equal(g.kpis.FVSV_R, 150 * 2 + 200 * 3);
+  assert.equal(g.kpis.FVSV_R, 50 * 2 + 100 * 3);
   assert.equal(g.kpis.FMXV_R, 120); assert.equal(g.kpis.FMNV_B, 70);
   assert.equal(g.kpis.FVSM_T, 70);
   assert.equal(g.coverage.periodMinutes, 60);
