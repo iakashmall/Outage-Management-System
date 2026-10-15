@@ -1,5 +1,6 @@
 # Full OMS stack for a server: database, cache, backend and web app, all in Docker.
 # Web app on http://<server>:8080  (set OMS_WEB_PORT to change).
+# Required in the environment (no defaults): OMS_DB_PASSWORD, OMS_KC_ADMIN_PASSWORD. See deploy/ubuntu/DEPLOY.md.
 #   docker compose -f docker-compose.deploy.yml up -d --build
 #   docker compose -f docker-compose.deploy.yml run --rm oms-backend node src/infra/seed.js   # first time only
 name: oms
@@ -10,7 +11,7 @@ services:
     environment:
       POSTGRES_DB: oms
       POSTGRES_USER: oms
-      POSTGRES_PASSWORD: ${OMS_DB_PASSWORD:-oms}
+      POSTGRES_PASSWORD: ${OMS_DB_PASSWORD:?set a strong password in the environment}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d
@@ -26,24 +27,26 @@ services:
     volumes:
       - redisdata:/data
 
-  # Login server. The browser talks to it directly, so it is published on 18080 and the web app is built with
-  # VITE_KEYCLOAK_URL=http://${OMS_HOST}:18080 (OMS_HOST = the address users type; replace-old-oms.sh sets it).
+  # Login server. Browsers reach its login pages through Caddy (https://${OMS_HOST}:8443); 18080 is published on
+  # this server only (127.0.0.1), so the admin console is not reachable from the network.
   keycloak:
     image: quay.io/keycloak/keycloak:24.0
     restart: unless-stopped
     command: ["start-dev", "--http-port=8080", "--import-realm"]
     environment:
       KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: ${OMS_KC_ADMIN_PASSWORD:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${OMS_KC_ADMIN_PASSWORD:?set a strong password in the environment}
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
       KC_DB_USERNAME: oms
-      KC_DB_PASSWORD: ${OMS_DB_PASSWORD:-oms}
+      KC_DB_PASSWORD: ${OMS_DB_PASSWORD:?set a strong password in the environment}
       KC_HOSTNAME_STRICT: "false"
       KC_HTTP_ENABLED: "true"
       KC_PROXY_HEADERS: xforwarded   # login pages are reached through Caddy (https)
     ports:
-      - "18080:8080"
+      # The crew app signs in on http://<server>:18080. For phones to reach it, change this to "18080:8080"
+      # (and allow 18080 in the firewall only for the crew devices' network if you can).
+      - "127.0.0.1:18080:8080"
     volumes:
       - ./infra/keycloak-realm.deploy.json:/opt/keycloak/data/import/realm.json:ro
       - ./infra/keycloak-theme/gridq:/opt/keycloak/themes/gridq:ro
@@ -70,13 +73,14 @@ services:
       keycloak: { condition: service_started }
     environment:
       PORT: "4000"
-      DATABASE_URL: postgres://oms:${OMS_DB_PASSWORD:-oms}@postgres:5432/oms
+      DATABASE_URL: postgres://oms:${OMS_DB_PASSWORD:?set a strong password in the environment}@postgres:5432/oms
       REDIS_URL: redis://redis:6379
       KEYCLOAK_JWKS_URI: http://keycloak:8080/realms/oms-upcl/protocol/openid-connect/certs
       EVENT_BUS_DRIVER: memory
       CORS_ORIGIN: "*"
       CUSTOMERS_SERVED: "18500"
       ENABLE_SCADA_SIMULATION: "false"
+      SIMULATOR: "off"   # the simulator mixes fake crew GPS, alarms and calls into real data
       MAP_SERVER_URL: http://map-tunnel:8095
       OMS_PUBLIC_URL: https://${OMS_HOST:-localhost}:8443
     extra_hosts:

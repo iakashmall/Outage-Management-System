@@ -3,6 +3,9 @@
 Everything runs in Docker: Postgres/PostGIS/TimescaleDB, Redis, the backend and the web app (nginx).
 Other apps on the server (HRMS, Caddy on ports 80/443, tile server) are not touched, and no volumes are deleted.
 
+0. Export the required passwords (see **Required settings** below). `replace-old-oms.sh` checks both before it
+   does anything else, so a missing password stops it before the old OMS is removed. Without them `docker compose`
+   also stops, with "set a strong password in the environment".
 1. Copy `OMS-deploy.zip` to the server and unzip it (e.g. `~/Desktop/OMS-deploy`).
 2. `cd` into that folder and run:
    ```bash
@@ -22,7 +25,35 @@ Other apps on the server (HRMS, Caddy on ports 80/443, tile server) are not touc
 
 Optional settings (map server, e-mail, reports): create `backend/.env.deploy` with `MAP_*`, `BREVO_*`, `NOTIFY_*`,
 `REPORT_*` lines, then run the update command. The map falls back to OpenStreetMap (needs internet).
-Demo-grade: HTTP only, database not exposed outside Docker. Set `OMS_DB_PASSWORD` before first start to change it.
+The database is not exposed outside Docker.
+
+## Required settings
+`docker-compose.deploy.yml` has no default passwords. Export both before any `docker compose` command (or put them in a
+`.env` file next to `docker-compose.deploy.yml`, readable only by you; `replace-old-oms.sh` still needs them exported
+in the shell, it does not read `.env`):
+```bash
+export OMS_DB_PASSWORD='<strong password>'        # Postgres user "oms" (backend and Keycloak use it)
+export OMS_KC_ADMIN_PASSWORD='<strong password>'  # Keycloak "admin" user
+```
+- **Both only take effect on a fresh start.** Postgres sets its password when the `pgdata` volume is first created,
+  and Keycloak creates `admin` only once. On a server that already ran with the old defaults (`oms` / `admin`),
+  either set the variables to the current passwords, or change them first (`ALTER USER oms PASSWORD '...'` in
+  Postgres, and the admin password in Keycloak). Otherwise the backend and Keycloak can no longer log in to the database.
+- The backend runs with `SIMULATOR=off`: no fake crew GPS, alarms or calls are mixed into real data.
+- Keep `backend/.env.deploy` and `infra/keycloak-realm.deploy.json` on the server only (both are in `.gitignore`).
+
+## Crew app (phones)
+The crew app talks to the server over **plain HTTP** on two ports:
+- **4000**: the OMS backend API.
+- **18080**: Keycloak, for sign-in.
+
+**This compose does not publish 4000**, and it publishes 18080 on `127.0.0.1` only, so phones can reach neither
+as shipped. The web app is not affected: it goes through Caddy on 8443. To use the crew app against this
+server:
+- In `docker-compose.deploy.yml`, add `ports: ["4000:4000"]` to `oms-backend` and change Keycloak's port to
+  `"18080:8080"`.
+- Limit both in the firewall to the crew devices' network if you can. Traffic on these ports is not encrypted, and
+  18080 also serves Keycloak's admin console.
 
 ## Map server (in-house map on this same server)
 The map server listens on 127.0.0.1:8095 only, so the OMS reaches it through the tunnel-only login `mapdev`, as other

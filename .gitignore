@@ -38,3 +38,7 @@ photo-export/
 
 # SSH key for the map tunnel (never commit)
 deploy/map-tunnel/keys/
+
+# Server-specific deploy files (secrets; the realm is written by deploy/ubuntu/patch-realm.py)
+backend/.env.deploy
+infra/keycloak-realm.deploy.json

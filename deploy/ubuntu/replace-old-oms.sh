@@ -3,6 +3,8 @@
 # Does NOT touch other apps (sel-hrms, caddy, tileserver) and does NOT delete any volumes.
 # Run from the project root:   bash deploy/ubuntu/replace-old-oms.sh
 set -euo pipefail
+: "${OMS_DB_PASSWORD:?set OMS_DB_PASSWORD before running this script}"
+: "${OMS_KC_ADMIN_PASSWORD:?set OMS_KC_ADMIN_PASSWORD before running this script}"
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 DC="docker compose -f docker-compose.deploy.yml"
 

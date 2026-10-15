@@ -33,7 +33,9 @@ RUN rm -f package-lock.json && npm install --legacy-peer-deps --workspace=fronte
 COPY frontend ./frontend
 ARG VITE_KEYCLOAK_URL
 ENV VITE_KEYCLOAK_URL=$VITE_KEYCLOAK_URL
-ARG VITE_BASEMAP_FALLBACK=osm
+# Empty by default: no OpenStreetMap fallback unless the build asks for it
+# (docker-compose.deploy.yml passes osm).
+ARG VITE_BASEMAP_FALLBACK=
 ENV VITE_BASEMAP_FALLBACK=$VITE_BASEMAP_FALLBACK
 RUN npm run build --workspace=frontend
 
