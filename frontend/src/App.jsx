@@ -12,6 +12,8 @@ import Complaints from './screens/Complaints.jsx';
 import Analytics from './screens/Analytics.jsx';
 import Admin from './screens/Admin.jsx';
 import PlannedOutages from './screens/PlannedOutages.jsx';
+import WorkOrders from './screens/WorkOrders.jsx';
+import { currentUser } from './lib/auth.js';
 import IncidentSearch from './components/IncidentSearch.jsx';
 import ProfileMenu from './components/ProfileMenu.jsx';
 import AboutOverlay from './components/AboutOverlay.jsx';
@@ -35,12 +37,15 @@ class ScreenBoundary extends Component {
   }
 }
 
+// [id, label, icon, Screen, roles?]: with roles, only logins holding one of
+// them see the entry (match the roles its API requires).
 const NAV = [
   ['dashboard', 'Dashboard', 'dashboard', Dashboard],
   ['map', 'Network Map', 'map', NetworkMap],
   ['incidents', 'Incidents', 'bolt', Incidents],
   ['dispatch', 'Dispatch', 'users', Dispatch],
   ['planned', 'Planned outages', 'clock', PlannedOutages],
+  ['workorders', 'Work orders', 'clipboard', WorkOrders, ['oms_operator', 'system_admin', 'field_crew_coordinator']],
   ['alarms', 'Alarms', 'bell', Alarms],
   ['tcs', 'TCS / IVR', 'phone', TCS],
   ['complaints', 'Complaints', 'inbox', Complaints],
@@ -151,14 +156,16 @@ export default function App() {
     return () => { socket.off('oms.switching.rejected', onRejected); socket.off('oms.permit.changed', onPermit); socket.off('oms.planned.crew_report', onCrewReport); };
   }, []);
 
-  const active = NAV.find((n) => n[0] === tab);
+  const roles = currentUser().roles;
+  const nav = NAV.filter((n) => !n[4] || n[4].some((r) => roles.includes(r)));
+  const active = nav.find((n) => n[0] === tab) || nav[0];
   const Screen = active[3];
 
   return (
     <div className="shell">
       <nav className="rail" aria-label="Primary">
         <div className="brand" title="GridQ"><img src="/gridq-mark.png" alt="GridQ" className="brand-img" /></div>
-        {NAV.map(([id, label, icon]) => (
+        {nav.map(([id, label, icon]) => (
           <button key={id} className={`navbtn ${tab === id ? 'on' : ''}`}
             onClick={() => setTab(id)} aria-current={tab === id} aria-label={label}>
             <Icon name={icon} />
