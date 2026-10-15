@@ -10,7 +10,13 @@
 https://{$OMS_HOST}:8443 {
 	tls internal
 
-	@keycloak path /realms/* /resources/* /js/* /admin/* /robots.txt
+	# Keycloak's master realm (its own admin login) and admin console are not served here.
+	@kcmaster path /realms/master /realms/master/*
+	respond @kcmaster 404
+
+	# What the oms-upcl login pages need. An allowlist, not /realms/*: a path such as /realms/master;x=1/ (a ';'
+	# path parameter) slips past the 404 above but Keycloak still serves it as the master realm.
+	@keycloak path /realms/oms-upcl /realms/oms-upcl/* /resources/* /js/* /robots.txt
 	reverse_proxy @keycloak keycloak:8080
 
 	reverse_proxy oms-web:80

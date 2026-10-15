@@ -13,6 +13,9 @@ import { api } from './routes/api.js';
 import { repo } from './infra/repo.js';
 import { initBus } from './domain/bus.js';
 import { decideStatus, isLocked, undoOpenUntil } from './domain/jobWorkflow.js';
+// The crew app's own rules (src/lib/jobFlow.js has no React Native imports).
+import * as crewApp from '../../src/lib/jobFlow.js';
+import { readFileSync } from 'node:fs';
 
 if (!process.env.DATABASE_URL) {
   console.error('selftest-jobs: set DATABASE_URL to a scratch database (this test reseeds it)');
@@ -81,6 +84,31 @@ const server = app.listen(0, async () => {
     check('locked once the incident leaves pending', isLocked(done, 'resolved'));
     check('locked once the window is over', isLocked({ ...done, completed_at: minsAgo(11) }, 'pending'));
 
+    console.log('-- crew app rules (src/lib/jobFlow.js)');
+    const soon = new Date(Date.now() + 5 * 60000).toISOString();
+    const fault = { id: 'J', status: 'Work Complete', planned: false, locked: false, undoUntil: soon };
+    const plannedJob = { ...fault, planned: true };
+    check('app: planned job never sends the completion form', crewApp.canSendCompletion(plannedJob) === false && crewApp.canSendCompletion(fault) === true);
+    check('app: planned job never offers Reopen', crewApp.canReopen(plannedJob) === false && crewApp.canReopen(fault) === true);
+    check('app: planned job is never shown read-only by these rules', crewApp.isReadOnly({ ...plannedJob, locked: true }) === false);
+    check('app: no Reopen once locked or after the window', !crewApp.canReopen({ ...fault, locked: true }) && !crewApp.canReopen({ ...fault, undoUntil: minsAgo(1) }));
+    check('app: read-only when locked, or completed with the window over', crewApp.isReadOnly({ ...fault, locked: true }) && crewApp.isReadOnly({ ...fault, undoUntil: minsAgo(1) }) && !crewApp.isReadOnly(fault));
+    const payload = crewApp.completionPayload({ jobId: 'J', diagnosis: { cause: 'c', action: 'a' }, partsUsed: [{ name: 'fuse', qty: 2, extra: 1 }], restored: 'partial', signOff: { name: 'N', signedAt: minsAgo(1) }, at: new Date(0) });
+    check('app: completion payload matches the server contract', payload.restored === 'partial' && payload.partsUsed[0].extra === undefined
+      && payload.clientRequestId === 'J-0' && payload.submittedAt === new Date(0).toISOString());
+    check('app: a not-delivered form may be resent only once the job is Work Started or later (fault jobs)',
+      crewApp.canResendCompletion({ ...fault, status: 'Work Started' }) && crewApp.canResendCompletion(fault)
+      && !crewApp.canResendCompletion({ ...fault, status: 'On Site' }) && !crewApp.canResendCompletion({ ...plannedJob, status: 'Work Started' })
+      && !crewApp.canResendCompletion({ ...fault, locked: true }));
+    check('app: unknown restored value is not sent', crewApp.completionPayload({ jobId: 'J', restored: 'maybe' }).restored === null);
+    // Source check: the app calls the completion/reopen routes only behind these guards.
+    const appSrc = readFileSync(new URL('../../src/NativeApp.jsx', import.meta.url), 'utf8');
+    const callsOf = (name) => (appSrc.match(new RegExp(`\\b${name}\\(`, 'g')) || []).length;
+    check('app source: completion sent only from sendCompletion, guarded by canSendCompletion',
+      callsOf('postJobCompletion') === 1 && callsOf('queueCompletion') === 1 && /const sendCompletion = async \(form\) => \{\s*if \(!canSendCompletion\(job\)\) return;/.test(appSrc));
+    check('app source: reopen called only from reopen(), guarded by canReopen',
+      callsOf('reopenJob') === 1 && /const reopen = async \(\) => \{\s*if \(!canReopen\(job\)\) return;/.test(appSrc));
+
     console.log('-- POST /incidents role guard');
     for (const as of ['coord', 'c3', 'noClaim']) {
       const r = await call(as, 'POST', '/incidents', { zone: 'Mayapur', severity: 'low' });
@@ -143,6 +171,8 @@ const server = app.listen(0, async () => {
     const replay = [];
     for (const [s, ts] of [...seq, ...seq.slice().reverse()]) replay.push(await appStatus(A.job, s, ts));
     check('every replayed update -> 200 applied:false', replay.every((r) => r.status === 200 && r.body.applied === false), replay.map((r) => r.body.reason).join(' | '));
+    check('app: an identical resend ("already ...") gives no notice, a late one does',
+      crewApp.serverJobUpdate(replay[3].body).notice === null && /not applied/.test(crewApp.serverJobUpdate(replay[0].body).notice || ''));
     check('state unchanged (Work Complete, no new history rows)', (await repo.job(A.job)).status === 'Work Complete' && (await updatesOf(A.job)).length === before);
     const lateA = await lateEvents(A.inc);
     check('one timeline event per (job, status, client time), not per replay', lateA.length === 3, `${lateA.length}: ${lateA.map((e) => e.note).join(' / ')}`);
@@ -180,6 +210,15 @@ const server = app.listen(0, async () => {
     check('bad restored value -> 400', (await call('c3', 'POST', `/mobile/jobs/${A.job}/completion`, { restored: 'maybe' })).status === 400);
     const early = await call('c3', 'POST', `/mobile/jobs/${C.job}/completion`, { restored: 'no' });
     check('completion before Work Started -> applied:false', early.status === 200 && early.body.applied === false, early.body.reason);
+    // The app keeps such a form ("not delivered") and resends the SAME form once the job is Work Started.
+    const heldForm = crewApp.completionPayload({ jobId: C.job, diagnosis: { cause: 'x', action: 'y' }, restored: 'partial', signOff: { name: 'N', signedAt: minsAgo(1) } });
+    const first = await call('c3', 'POST', `/mobile/jobs/${C.job}/completion`, heldForm);
+    check('form sent while the job is On Site -> applied:false, nothing stored', first.body.applied === false && (await repo.jobCompletions(C.job)).length === 0);
+    await appStatus(C.job, 'Work Started', minsAgo(0));
+    const resent = await call('c3', 'POST', `/mobile/jobs/${C.job}/completion`, heldForm);
+    const resent2 = await call('c3', 'POST', `/mobile/jobs/${C.job}/completion`, heldForm);
+    check('same form resent after Work Started -> stored once, under its clientRequestId', resent.status === 201 && resent2.status === 200
+      && (await repo.jobCompletions(C.job)).length === 1 && resent.body.completion.client_request_id === heldForm.clientRequestId);
 
     console.log('-- undo inside the window');
     const reopen = await call('c3', 'POST', `/mobile/jobs/${A.job}/reopen`, {});
@@ -198,6 +237,8 @@ const server = app.listen(0, async () => {
     check('reopen after the window -> applied:false job locked', late.status === 200 && late.body.applied === false && late.body.reason === 'job locked' && late.body.locked === true);
     const lockedStatus = await appStatus(A.job, 'Work Started', minsAgo(0));
     check('status on a locked job -> 200 applied:false job locked', lockedStatus.status === 200 && lockedStatus.body.applied === false && lockedStatus.body.reason === 'job locked');
+    const seen = crewApp.serverJobUpdate(lockedStatus.body);
+    check('app reads the locked answer: server status, locked, a notice', seen.fields?.status === 'Work Complete' && seen.fields.locked === true && /job locked/.test(seen.notice || ''));
     const lp = { dataUrl: photoUrl, lat: 29.9, lon: 78.1, capturedAt: minsAgo(1), sentAt: minsAgo(0) };
     const lockedPhoto = await call('c3', 'POST', `/mobile/jobs/${A.job}/photos`, lp);
     check('photo on a locked job -> 200 applied:false', lockedPhoto.status === 200 && lockedPhoto.body.applied === false);

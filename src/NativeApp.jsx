@@ -33,14 +33,15 @@ import {
 import { biometricUnlock } from './lib/biometric';
 import { getLockoutStatus, recordFailedAttempt, resetAttempts as resetLoginAttempts, MAX_ATTEMPTS, LOCKOUT_MS } from './lib/lockout';
 import { API_PORT, CLIENT_ID, KEYCLOAK_PORT, JOB_POLL_INTERVAL_MS } from './config';
-import { reportTrackingState, getCurrentCrew, fetchMyJobs, clearJobCache, updateJobStatus, getJobsLastSyncedAt, getJobMessages, getJobPhotos, getCrewMessages, saveAssetScan, getAssetScans, isNotYourJob } from './lib/api.js';
+import { reportTrackingState, getCurrentCrew, fetchMyJobs, clearJobCache, updateJobStatus, getJobsLastSyncedAt, getJobMessages, getJobPhotos, getCrewMessages, saveAssetScan, getAssetScans, isNotYourJob, postJobCompletion, reopenJob } from './lib/api.js';
 import { getLocation, getLastKnownLocation } from './lib/location';
 import { uploadCapturedPhoto } from './lib/photos';
 import { navigateTo } from './lib/navigate';
 import { isOnlineState, distanceAndDirection } from './lib/offlineNavigation';
 import { getRoadRoute, preloadRoadGraph, formatDistance, formatDuration } from './lib/roadRouting';
 import { openMultiJobRoute } from './lib/routing';
-import { queueUpdate, queueScan, isRetryable, isRefusal, flushQueue, getQueueLength, getQueueItems } from './lib/offlineQueue';
+import { queueUpdate, queueScan, queueCompletion, keepUndeliveredCompletion, getUndeliveredCompletion, clearUndeliveredCompletion, isRetryable, isRefusal, flushQueue, getQueueLength, getQueueItems } from './lib/offlineQueue';
+import { SUBMITTED_LABEL, RESTORED_CHOICES, isCompleted, canSendCompletion, canResendCompletion, canReopen, isReadOnly, completionPayload, serverJobUpdate } from './lib/jobFlow';
 import { startCrewTracking, stopCrewTracking, autoStartCrewTracking, setTrackingPausedByCrew, isLocationServiceOn } from './lib/backgroundLocation';
 import { flushLocations, getPendingLocationCount } from './lib/locationQueue';
 import { downloadPack, cancelPackDownload, getInstalledPack, getPackStatus, subscribePackStatus } from './lib/offlineMap/areaStore';
@@ -74,6 +75,9 @@ const NEXT_STATUS = {
   'On Site': 'Work Started',
   'Work Started': 'Work Finished',
   'Work Finished': null,
+  'Work Complete': null,
+  // OMS-03: returned for correction by the control room; the crew starts again.
+  'Requires Revisit': 'En Route',
 };
 
 // The app's last step is 'Work Finished'; the server stores it as
@@ -107,8 +111,11 @@ function jobPlanLine(job) {
 }
 
 // Why a status update was dropped instead of retried.
+const itemLabel = (item) => (item.type === 'photo' ? `${item.id} photo` : item.type === 'scan' ? `${item.id} QR scan`
+  : item.type === 'completion' ? `${item.id} completion form` : `${item.id} → ${item.status}`);
+
 function droppedUpdateNotice(item) {
-  const what = item.type === 'photo' ? `${item.id} photo` : item.type === 'scan' ? `${item.id} QR scan` : `${item.id} → ${item.status}`;
+  const what = itemLabel(item);
   return isNotYourJob(item)
     ? `${what} was not sent: this job was reassigned to another crew.`
     : `${what} was refused by the server: ${item.message || 'unknown reason'}`;
@@ -490,7 +497,17 @@ function NativeAppScreen() {
     const fresh = jobs.find((j) => j.id === activeJob.id);
     const me = isAuthenticated() ? myCrewId() : null;
     const movedAway = !!(fresh && me && fresh.assignedCrewId && fresh.assignedCrewId !== me);
-    if (fresh && !movedAway) return;
+    if (fresh && !movedAway) {
+      // OMS-03: the open job screen follows the server's lock state, and the
+      // status the control room set (returned for correction, locked).
+      setActiveJob((current) => {
+        if (!current || current.id !== fresh.id) return current;
+        const serverDriven = fresh.locked || fresh.status === 'Requires Revisit';
+        if (current.locked === fresh.locked && current.undoUntil === fresh.undoUntil && (!serverDriven || current.status === fresh.status)) return current;
+        return { ...current, locked: fresh.locked, undoUntil: fresh.undoUntil, ...(serverDriven ? { status: fresh.status } : {}) };
+      });
+      return;
+    }
     pageRef.current = { ...pageRef.current, jobId: null };
     setActiveJob(null);
     addNotice(`This job was reassigned: ${activeJob.id} is no longer assigned to your crew.`);
@@ -537,6 +554,8 @@ function NativeAppScreen() {
     return flushQueue()
       .then((result) => {
         (result?.dropped ?? []).forEach((item) => addNotice(droppedUpdateNotice(item)));
+        // OMS-03: accepted by the server but not applied (late, or the job is locked).
+        (result?.notApplied ?? []).forEach((item) => addNotice(`${itemLabel(item)} ${item.reason}`));
         return reloadPending();
       })
       .then(refresh)
@@ -590,6 +609,17 @@ function NativeAppScreen() {
       .catch(() => {});
   }, [authenticated]);
 
+  // OMS-03: the server decides. Take over its status, lock and undo window
+  // from an answer, and say so when an update was not applied.
+  const applyServerJob = useCallback((jobId, res) => {
+    const { fields, notice } = serverJobUpdate(res);
+    if (fields) {
+      setJobs((current) => current.map((j) => (j.id === jobId ? { ...j, ...fields } : j)));
+      setActiveJob((current) => (current?.id === jobId ? { ...current, ...fields } : current));
+    }
+    if (notice) addNotice(`${jobId} ${notice}`);
+  }, [addNotice]);
+
   const handleAdvance = useCallback(async (job, nextStatus, opts = {}) => {
     const location = await getLocation();
     // OMS-01: a gated planned-outage status change (Work Started / Work
@@ -632,7 +662,7 @@ function NativeAppScreen() {
       return;
     }
     try {
-      await updateJobStatus(job.id, nextStatus, location);
+      applyServerJob(job.id, await updateJobStatus(job.id, nextStatus, location));
     } catch (err) {
       if (isRefusal(err)) {
         // Refused (e.g. 409 NOT_YOUR_JOB): queueing would only be refused
@@ -646,7 +676,7 @@ function NativeAppScreen() {
       // Network or server error: keep it and retry.
       await enqueue();
     }
-  }, [refresh, addNotice, reloadPending, syncPending]);
+  }, [refresh, addNotice, reloadPending, syncPending, applyServerJob]);
 
   if (checkingSession) {
     return (
@@ -873,6 +903,7 @@ function NativeAppScreen() {
             crew={crew}
             onClose={goBack}
             onAdvance={handleAdvance}
+            onServerJob={applyServerJob}
             notice={notice}
             onDismissNotice={() => setNotice('')}
             onQueued={reloadPending}
@@ -1244,7 +1275,7 @@ function PhotoCamera({ onCapture, onClose }) {
   );
 }
 
-function JobDetail({ job, crew, onClose, onAdvance, onQueued, onNavigate, onNavigateNative, notice, onDismissNotice }) {
+function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNavigate, onNavigateNative, notice, onDismissNotice }) {
   const [showSafety, setShowSafety] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
   const [showPhotoCamera, setShowPhotoCamera] = useState(false);
@@ -1272,6 +1303,23 @@ function JobDetail({ job, crew, onClose, onAdvance, onQueued, onNavigate, onNavi
   const [diagnosis, setDiagnosis] = useState(null);
   const [partsUsed, setPartsUsed] = useState(null);
   const [signOff, setSignOff] = useState(null);
+  // OMS-03: "Supply restored?" goes with the completion form.
+  const [restored, setRestored] = useState(null);
+  const [reopening, setReopening] = useState(false);
+  // A completion form the server did not apply, kept on the phone: { form, reason }.
+  const [undelivered, setUndelivered] = useState(null);
+  const loadUndelivered = () => getUndeliveredCompletion(job.id).then(setUndelivered).catch(() => {});
+  useEffect(() => { loadUndelivered(); }, [job.id, job.status]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Locked (completed, undo window over): the job is shown read-only.
+  // Re-checked when the undo window ends while the screen is open.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const until = job.undoUntil ? Date.parse(job.undoUntil) : 0;
+    if (!until || until <= Date.now()) return undefined;
+    const t = setTimeout(() => setTick((n) => n + 1), until - Date.now() + 50);
+    return () => clearTimeout(t);
+  }, [job.undoUntil]);
+  const readOnly = isReadOnly(job);
 
   useEffect(() => {
     // Photos still waiting in Pending sync count too, so a crew with no
@@ -1331,15 +1379,73 @@ function JobDetail({ job, crew, onClose, onAdvance, onQueued, onNavigate, onNavi
     }
   };
 
-  const finishCompletion = (finalSignOff) => {
+  // OMS-03: the completion form goes to the server before Work Finished
+  // (fault jobs only; a planned job closes out through its permit). No
+  // signal: it waits in Pending sync ahead of the status change, so the
+  // server gets them in that order.
+  const sendCompletion = async (form) => {
+    if (!canSendCompletion(job)) return;
+    try {
+      const res = await postJobCompletion(job.id, form);
+      if (res?.applied === false) {
+        // Not lost: kept on the phone as "not delivered" (same clientRequestId).
+        await keepUndeliveredCompletion(job.id, form, res.reason);
+        setMessage(`Completion form not delivered: ${res.reason || 'not applied'}. It is kept on the phone; send it again below.`);
+      } else if (res) {
+        await clearUndeliveredCompletion(job.id);
+      }
+      loadUndelivered();
+    } catch (err) {
+      if (!isRetryable(err)) {
+        setMessage(`Completion form refused by the server: ${err?.message || 'unknown reason'}`);
+        return;
+      }
+      await queueCompletion(job.id, form);
+      onQueued?.();
+    }
+  };
+
+  const finishCompletion = async (finalSignOff) => {
     setSignOff(finalSignOff);
     setCompletionStep(null);
-    // Diagnosis / parts / sign-off aren't sent to the backend yet — the
-    // OMS mobile contract only defines status + photo endpoints. They're
-    // captured here and shown in-app; ask the integration track for a
-    // completion-details endpoint if this should be persisted server-side.
     setAdvancing(true);
-    advance().finally(() => setAdvancing(false));
+    try {
+      await sendCompletion(completionPayload({ jobId: job.id, diagnosis, partsUsed, restored, signOff: finalSignOff }));
+      await advance();
+    } finally {
+      setAdvancing(false);
+    }
+  };
+
+  const resendCompletion = async () => {
+    if (!undelivered || !canResendCompletion(job)) return;
+    setAdvancing(true);
+    try {
+      await sendCompletion(undelivered.form);
+    } finally {
+      setAdvancing(false);
+    }
+  };
+
+  // Undo Work Complete while the server's window is open. Online only: a
+  // reopen that arrived later than the window would be refused anyway.
+  const reopen = async () => {
+    if (!canReopen(job)) return;
+    setReopening(true);
+    try {
+      const res = await reopenJob(job.id);
+      onServerJob?.(job.id, res);
+      if (res?.applied) {
+        setSignOff(null);
+        setMessage('Job reopened. The control room has been told; finish it again when the work is done.');
+      }
+    } catch (err) {
+      setMessage(isRetryable(err)
+        ? 'No signal: the job could not be reopened. Try again once there is signal.'
+        : `Reopen refused by the server: ${err?.message || 'unknown reason'}`);
+    } finally {
+      setReopening(false);
+    }
   };
 
   const takePhoto = () => {
@@ -1355,6 +1461,11 @@ function JobDetail({ job, crew, onClose, onAdvance, onQueued, onNavigate, onNavi
     setUploading(true);
     try {
       const result = await uploadCapturedPhoto(job.id, photo, assetId ? `Asset: ${assetId}` : undefined, crew);
+      if (result?.applied === false) {
+        setMessage(`Photo not added to the job: ${result.reason || 'not applied'}. The control room can still see it.`);
+        setShowPhotoCamera(false);
+        return;
+      }
       setPhotoCount((count) => count + 1);
       if (result?.queued) {
         onQueued?.();
@@ -1417,6 +1528,11 @@ function JobDetail({ job, crew, onClose, onAdvance, onQueued, onNavigate, onNavi
         onQueued?.();
         queued = true;
         saved = { id: `pending-${Date.now()}`, asset_id: scan.assetId, asset_details: parsedDetails, lat: scan.lat, lon: scan.lon, scanned_at: new Date().toISOString(), pending: true };
+      }
+      if (saved?.applied === false) {
+        setShowScanner(false);
+        setMessage(`Asset scan not added to the job: ${saved.reason || 'not applied'}. The control room can still see it.`);
+        return;
       }
       setAssetId(saved.asset_id || saved.assetId || rawValue);
       setAssetDetails(saved.asset_details || parsedDetails);
@@ -1507,6 +1623,20 @@ function JobDetail({ job, crew, onClose, onAdvance, onQueued, onNavigate, onNavi
           />
         )}
 
+        {checklistDone && completionStep === 'signoff' && !job.planned && (
+          <View style={styles.restoredBox}>
+            <Text style={styles.sectionSmall}>SUPPLY RESTORED?</Text>
+            <View style={styles.restoredRow}>
+              {RESTORED_CHOICES.map((c) => (
+                <Pressable key={c.value} onPress={() => setRestored(c.value)}
+                  style={[styles.restoredChoice, restored === c.value && styles.restoredChoiceOn]}
+                  accessibilityState={{ selected: restored === c.value }}>
+                  <Text style={[styles.restoredChoiceText, restored === c.value && styles.restoredChoiceTextOn]}>{c.label}</Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+        )}
         {checklistDone && completionStep === 'signoff' && (
           <CrewLeadSignOff
             onComplete={finishCompletion}
@@ -1515,9 +1645,31 @@ function JobDetail({ job, crew, onClose, onAdvance, onQueued, onNavigate, onNavi
         )}
         </View>
 
-        {checklistDone && signOff && (
+        {undelivered && !job.planned && (
+          <View style={styles.checklistLock}>
+            <Text style={styles.checklistLockText}>
+              Completion form not delivered: {undelivered.reason}. It is kept on this phone.
+            </Text>
+            {canResendCompletion(job) ? (
+              <Pressable style={styles.secondaryBtn} onPress={resendCompletion} disabled={advancing}>
+                <Text style={styles.secondaryBtnText}>Send completion form again</Text>
+              </Pressable>
+            ) : (
+              <Text style={styles.checklistLockText}>
+                {job.locked ? 'The job is locked; tell the control room.' : 'It can be sent again once the job is Work Started.'}
+              </Text>
+            )}
+          </View>
+        )}
+
+        {(checklistDone || readOnly) && (signOff || (isCompleted(job) && !job.planned)) && (
           <View style={styles.completionSummary}>
-            <Text style={styles.completionSummaryTitle}>Job closed out</Text>
+            <Text style={styles.completionSummaryTitle}>{readOnly ? `${SUBMITTED_LABEL} (locked)` : SUBMITTED_LABEL}</Text>
+            {readOnly && (
+              <Text style={styles.completionSummaryLine}>
+                The job is locked. Anything else goes through the control room (they can return it for correction).
+              </Text>
+            )}
             {diagnosis && (
               <Text style={styles.completionSummaryLine}>
                 Cause: {diagnosis.cause} · Action: {diagnosis.action}
@@ -1528,9 +1680,23 @@ function JobDetail({ job, crew, onClose, onAdvance, onQueued, onNavigate, onNavi
                 Parts: {partsUsed.map((p) => `${p.name} ×${p.qty}`).join(', ')}
               </Text>
             )}
-            <Text style={styles.completionSummaryLine}>
-              Signed off by {signOff.name} at {new Date(signOff.signedAt).toLocaleTimeString()}
-            </Text>
+            {restored && (
+              <Text style={styles.completionSummaryLine}>
+                Supply restored: {RESTORED_CHOICES.find((c) => c.value === restored)?.label}
+              </Text>
+            )}
+            {signOff && (
+              <Text style={styles.completionSummaryLine}>
+                Signed off by {signOff.name} at {new Date(signOff.signedAt).toLocaleTimeString()}
+              </Text>
+            )}
+            {canReopen(job) && (
+              <Pressable style={styles.secondaryBtn} onPress={reopen} disabled={reopening}>
+                <Text style={styles.secondaryBtnText}>
+                  {reopening ? 'Reopening…' : `Reopen job (undo, until ${new Date(job.undoUntil).toLocaleTimeString()})`}
+                </Text>
+              </Pressable>
+            )}
           </View>
         )}
 
@@ -1577,7 +1743,7 @@ function JobDetail({ job, crew, onClose, onAdvance, onQueued, onNavigate, onNavi
           {assetId ? <Text style={styles.assetValue}>Attached asset: {assetId}</Text> : null}
           {assetDetails ? <Text style={styles.assetValue}>QR details: {JSON.stringify(assetDetails)}</Text> : null}
           <Text style={styles.assetValue}>Saved scans: {assetScans.length}</Text>
-          <Pressable style={styles.secondaryBtn} onPress={() => setShowScanner(true)} disabled={assetScanSaving}>
+          <Pressable style={[styles.secondaryBtn, readOnly && { opacity: 0.5 }]} onPress={() => setShowScanner(true)} disabled={assetScanSaving || readOnly}>
             <Text style={styles.secondaryBtnText}>Scan QR asset tag</Text>
           </Pressable>
         </View>
@@ -1593,7 +1759,7 @@ function JobDetail({ job, crew, onClose, onAdvance, onQueued, onNavigate, onNavi
         )}
 
         {checklistDone && (
-        <Pressable style={styles.secondaryBtn} onPress={takePhoto} disabled={uploading || photoCount >= MAX_JOB_PHOTOS}>
+        <Pressable style={[styles.secondaryBtn, readOnly && { opacity: 0.5 }]} onPress={takePhoto} disabled={uploading || photoCount >= MAX_JOB_PHOTOS || readOnly}>
           <Text style={styles.secondaryBtnText}>{uploading ? 'Compressing and storing…' : `Open camera (${photoCount}/${MAX_JOB_PHOTOS})`}</Text>
         </Pressable>
         )}
@@ -1610,7 +1776,7 @@ function JobDetail({ job, crew, onClose, onAdvance, onQueued, onNavigate, onNavi
           </View>
         )}
 
-        {checklistDone && next && !completionStep && (
+        {checklistDone && next && !completionStep && !readOnly && (
           <Pressable
             style={[styles.primaryBtn, job.status === 'On Site' && photoCount < 1 && { opacity: 0.5 }]}
             onPress={requestAdvance}
@@ -2134,6 +2300,12 @@ const styles = StyleSheet.create({
   photoCameraPermission: { backgroundColor: '#eef5fb', borderRadius: 12, padding: 14, gap: 10 },
   primaryBtn: { backgroundColor: '#1F3864', borderRadius: 10, padding: 14, alignItems: 'center' },
   completionSummary: { backgroundColor: '#eafaf1', borderRadius: 12, padding: 14, borderWidth: 1, borderColor: '#a9e3c4', gap: 4 },
+  restoredBox: { marginTop: 12 },
+  restoredRow: { flexDirection: 'row', gap: 8, marginTop: 6 },
+  restoredChoice: { flex: 1, paddingVertical: 10, borderRadius: 8, borderWidth: 1, borderColor: '#c9d3e0', alignItems: 'center', backgroundColor: '#fff' },
+  restoredChoiceOn: { backgroundColor: '#1F3864', borderColor: '#1F3864' },
+  restoredChoiceText: { fontWeight: '600', color: '#1F3864' },
+  restoredChoiceTextOn: { color: '#fff' },
   completionSummaryTitle: { color: '#1b7a4a', fontSize: 13, fontWeight: '800' },
   completionSummaryLine: { color: '#2f5d47', fontSize: 12 },
   primaryBtnText: { color: '#fff', fontWeight: '800' },
