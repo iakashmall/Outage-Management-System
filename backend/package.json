@@ -14,6 +14,8 @@
     "test:feederkpi": "node src/selftest-feederkpi.js",
     "test:oms03": "node --test src/domain/rebalance.test.js",
     "test:oms03:db": "node src/selftest-oms03.js",
+    "telemetry:load": "node scripts/load-telemetry.mjs",
+    "telemetry:convert": "node scripts/convert-feeder-snapshot.mjs",
     "tiles:fetch": "node scripts/fetch-tiles.mjs",
     "map:test-server": "node map-test-server/server.mjs",
     "keycloak:mobile": "node scripts/setup-mobile-keycloak.mjs",

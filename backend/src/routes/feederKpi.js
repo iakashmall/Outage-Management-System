@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireRole } from './auth.js';
 import { repo } from '../infra/repo.js';
 import { KPI_DEFS, PERIODS, SUFFIXES } from '../domain/feederKpi.js';
+import { buildFeederKpiPdf } from '../domain/feederKpiPdf.js';
 import { feederKpisForPeriod, feederKpiSeries, feederKpiChildSeries, ingestSamples, rollupDay, clearKpiCache, feederCatalog, maxGapMs, fyStartMonth } from '../realtime/feederKpi.js';
 
 // PFC feeder-wise KPIs (FVHI ... FLIF). Mounted on the authenticated /api router.
@@ -11,6 +12,7 @@ import { feederKpisForPeriod, feederKpiSeries, feederKpiChildSeries, ingestSampl
 //   GET  /analytics/feeder-kpi/series?period=&date=[&from&to][&feeder=]
 //   GET  /analytics/feeder-kpi/child-series?period=&date=[&from&to][&substation=]
 //   GET  /analytics/feeder-kpi/export?...&format=csv
+//   GET  /analytics/feeder-kpi/export.pdf?feeders=A,B  summary + trend charts per feeder (max 25)
 //   GET  /analytics/feeder-kpi/ratings
 //   PUT  /analytics/feeder-kpi/ratings/:feeder       system_admin, oms_operator, configuration_engineer
 //   POST /analytics/feeder-kpi/rollup {from,to}      system_admin   (recompute stored days)
@@ -61,6 +63,34 @@ feederKpiRoutes.get('/analytics/feeder-kpi/export', wrap(async (req, res, next) 
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="feeder-kpi-${out.range.period}-${out.range.label.replace(/[^\w-]+/g, '_')}.csv"`);
   res.send(lines.join('\n'));
+}));
+
+// PDF: summary table + a trend chart per index, for each requested feeder.
+//   GET /analytics/feeder-kpi/export.pdf?period=...&feeders=UPCL-AN-A,UPCL-AN-B
+const PDF_MAX_FEEDERS = 25;
+feederKpiRoutes.get('/analytics/feeder-kpi/export.pdf', wrap(async (req, res, next) => {
+  const known = new Set(feederCatalog().map((c) => c.feeder));
+  const list = [...new Set(String(req.query.feeders || '').split(',').map((s) => s.trim()).filter(Boolean))];
+  if (!list.length) return res.status(400).json({ error: 'feeders is required (comma-separated feeder codes)' });
+  if (list.length > PDF_MAX_FEEDERS) return res.status(400).json({ error: `at most ${PDF_MAX_FEEDERS} feeders per PDF` });
+  const unknown = list.filter((f) => !known.has(f));
+  if (unknown.length) return res.status(400).json({ error: `unknown feeder: ${unknown.join(', ')}` });
+  const q = periodQuery(req.query);
+  let feeders, range;
+  try {
+    feeders = [];
+    for (const f of list) {
+      const [period, series] = await Promise.all([feederKpisForPeriod(q, f), feederKpiSeries(q, f)]);
+      range = period.range;
+      const row = period.feeders[0] || {};
+      feeders.push({ feeder: f, substation: row.substation, kpis: row.kpis, coverage: row.coverage, rating: series.rating, granularity: series.granularity, points: series.points });
+    }
+  } catch (e) { return e.status === 400 ? bad(res, e) : next(e); }
+  const pdf = await buildFeederKpiPdf({ range, defs: KPI_DEFS, feeders, generatedAt: new Date().toISOString().slice(0, 16).replace('T', ' ') + ' UTC' });
+  const name = `feeder-kpi-${list.length === 1 ? list[0] : `${list.length}-feeders`}-${range.label.replace(/[^\w-]+/g, '_')}.pdf`;
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+  res.send(pdf);
 }));
 
 feederKpiRoutes.get('/analytics/feeder-kpi/ratings', wrap(async (req, res) => res.json(await repo.feederRatings())));

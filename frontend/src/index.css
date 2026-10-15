@@ -963,3 +963,18 @@ button.kh-more:hover{text-decoration:underline}
 .fr-in{width:72px;border:1px solid var(--line);border-radius:4px;padding:3px 6px;font-size:12px;text-align:right;background:var(--surface);color:var(--fg)}
 .fr-ok{color:#22b06b;font-size:11.5px}
 .fr-err{color:#e23b2e;font-size:11.5px;white-space:normal;max-width:220px}
+
+/* Feeder KPI: PDF export picker */
+.fp{position:relative;display:inline-block}
+.fp-pop{position:absolute;right:0;top:calc(100% + 6px);z-index:1200;width:320px;background:var(--surface);border:1px solid var(--line);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.16);padding:10px;display:grid;gap:8px;font-size:12.5px}
+.fp-head{display:flex;justify-content:space-between;align-items:baseline}
+.fp-over{color:#e23b2e;font-weight:600}
+.fp-search{border:1px solid var(--line);border-radius:6px;padding:5px 8px;font:inherit;background:var(--surface);color:var(--fg)}
+.fp-list{max-height:300px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;padding:4px 6px}
+.fp-group{padding:2px 0}
+.fp-sub{display:flex;align-items:center;gap:6px;font-weight:600;padding:3px 0;cursor:pointer}
+.fp-item{display:flex;align-items:center;gap:6px;padding:2px 0 2px 20px;cursor:pointer}
+.fp-none{padding:8px}
+.fp-err{color:#e23b2e;font-size:12px}
+.fp-foot{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.fp-foot .muted{font-size:11.5px}

@@ -92,3 +92,11 @@ TimescaleDB hypertable; 1-5 minute polling from SCADA is enough.
 ## Tests
 
 `npm run test:feederkpi` (pure maths, hand-worked examples).
+
+## Loading your own data
+
+`npm --workspace backend run telemetry:load -- <file.csv|file.json>` checks each reading like the SCADA
+ingest, inserts it (source `TEST` by default) and recalculates the past days it touches.
+`--dry-run` checks only; `--remove` deletes source `TEST` again; `--sample out.csv` writes a 24 h test
+file with known events and prints the values the dashboard should show. Turn the simulator off and
+delete its rows first: a reading for a feeder and minute that already exists is skipped.

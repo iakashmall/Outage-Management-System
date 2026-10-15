@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
 import { TrendChart, WorstBars, allZeroMessage } from './KpiCharts.jsx';
+import FeederPdfPicker from './FeederPdfPicker.jsx';
 
 // PFC feeder-wise KPIs (FVHI ... FLIF) for the Analytics screen.
 // Two views:
@@ -67,6 +68,7 @@ export default function FeederKpiPanel() {
   const [code, setCode] = useState('FVLD'); // index shown in the chart
   const [series, setSeries] = useState(null);
   const dataRef = useRef(null); // the refresh timer reads the latest range from here
+  const [treeScope, setTreeScope] = useState([]); // feeders under the hierarchy's current drill-down
 
   useEffect(() => {
     api.feederKpiDefs().then((d) => { setDefs(d); setFeeder((f) => f || d.feeders[0]?.feeder || ''); })
@@ -124,6 +126,8 @@ export default function FeederKpiPanel() {
 
   const one = mode === 'one' ? data?.feeders?.[0] : null;
   const exportCsv = () => api.exportFeederKpi(params).catch((e) => alert('Export failed: ' + e.message));
+  // The PDF picker opens with the feeder(s) in view ticked.
+  const pdfInitial = mode === 'one' ? (feeder ? [feeder] : []) : mode === 'tree' ? treeScope : [];
   const openFeeder = (f) => { setFeeder(f); setMode('one'); };
   const clickSort = (c) => { setCode(c); setSort((s) => ({ code: c, dir: s.code === c && s.dir === 'worst' ? 'best' : 'worst' })); };
   const chartDef = defs?.defs.find((d) => d.code === code);
@@ -172,6 +176,8 @@ export default function FeederKpiPanel() {
         )}
         <div className="grow" />
         <button className="btn sm" onClick={exportCsv} disabled={!data}>Export CSV</button>
+        <FeederPdfPicker feeders={defs?.feeders || []} initial={pdfInitial} disabled={!defs}
+          onExport={(list) => api.exportFeederKpiPdf(params, list)} />
       </div>
 
       <div className="fk-range">
@@ -187,7 +193,7 @@ export default function FeederKpiPanel() {
       </div>
 
       {mode === 'tree' && data && defs && (
-        <KpiHierarchy feeders={data.feeders} defs={defs.defs} phase={phase} params={params} onOpenFeeder={openFeeder} />
+        <KpiHierarchy feeders={data.feeders} defs={defs.defs} phase={phase} params={params} onOpenFeeder={openFeeder} onScope={setTreeScope} />
       )}
 
       {mode === 'all' && data && chartDef && (
@@ -392,7 +398,7 @@ function MiniLines({ labels: allLabels, granularity, lines: allLines, def, unit 
   );
 }
 
-function KpiHierarchy({ feeders, defs, phase, params, onOpenFeeder }) {
+function KpiHierarchy({ feeders, defs, phase, params, onOpenFeeder, onScope }) {
   const [sub, setSub] = useState(null);
   const [fdr, setFdr] = useState(null);
   const [loaded, setLoaded] = useState(null); // { scope, data }
@@ -415,6 +421,8 @@ function KpiHierarchy({ feeders, defs, phase, params, onOpenFeeder }) {
     () => (fdr ? feeders.filter((f) => f.feeder === fdr) : sub ? (bySub.get(sub) || []) : feeders),
     [feeders, bySub, sub, fdr],
   );
+  // Tell the panel which feeders are in view (none at region level), for the PDF picker.
+  useEffect(() => { onScope?.(sub || fdr ? scopeFeeders.map((f) => f.feeder) : []); }, [scopeFeeders, sub, fdr]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Time series of the children of the current scope. Tagged with the scope
   // it was fetched for: right after a drill, the previous scope's data (a
