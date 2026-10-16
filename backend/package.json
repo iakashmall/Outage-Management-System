@@ -18,6 +18,7 @@
     "tiles:fetch": "node scripts/fetch-tiles.mjs",
     "map:test-server": "node map-test-server/server.mjs",
     "keycloak:mobile": "node scripts/setup-mobile-keycloak.mjs",
+    "keycloak:session-limit": "node scripts/setup-crew-session-limit.mjs",
     "roads:build": "node scripts/build-road-graph.mjs",
     "photos:export": "node scripts/export-photos.mjs",
     "test-jobs": "node scripts/test-jobs.mjs",

@@ -52,6 +52,14 @@ The crew app talks to the server over **plain HTTP** on two ports:
 - Limit both in the firewall to the crew devices' network if you can. Traffic on these ports is not encrypted, and
   18080 also serves Keycloak's admin console.
 - Build the APK with `EXPO_PUBLIC_OMS_SERVER=<server-ip>`, or type the server IP on the app's sign-in screen.
+- One crew login works on one phone at a time: signing in on a second phone signs the first one out (within 5
+  minutes). Set it up once (and again only if the realm is re-imported):
+  ```bash
+  docker run --rm --network host -v "$PWD/backend:/app" -w /app \
+    -e KEYCLOAK_URL=http://127.0.0.1:18080 -e KEYCLOAK_ADMIN_PASSWORD="$OMS_KC_ADMIN_PASSWORD" \
+    node:20-alpine node scripts/setup-crew-session-limit.mjs
+  ```
+  It only changes the sign-in flow for `field_crew` users; operators and passwords are not touched.
 - Photos and QR scans go straight into the `oms` database (table `job_photos`, about 100-200 KB per photo, and
   `asset_scans`). Taken offline, they wait on the phone and upload when it is back online.
 
