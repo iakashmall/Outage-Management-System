@@ -617,8 +617,11 @@ function NativeAppScreen() {
       setActiveJob((current) => {
         if (!current || current.id !== fresh.id) return current;
         const serverDriven = fresh.locked || fresh.status === 'Requires Revisit';
-        if (current.locked === fresh.locked && current.undoUntil === fresh.undoUntil && (!serverDriven || current.status === fresh.status)) return current;
-        return { ...current, locked: fresh.locked, undoUntil: fresh.undoUntil, ...(serverDriven ? { status: fresh.status } : {}) };
+        // The site position can change (dispatch corrects the incident's
+        // location); the On Site check must measure against the new one.
+        const samePlace = current.coordinates?.lat === fresh.coordinates?.lat && current.coordinates?.lon === fresh.coordinates?.lon;
+        if (samePlace && current.locked === fresh.locked && current.undoUntil === fresh.undoUntil && (!serverDriven || current.status === fresh.status)) return current;
+        return { ...current, coordinates: fresh.coordinates, locked: fresh.locked, undoUntil: fresh.undoUntil, ...(serverDriven ? { status: fresh.status } : {}) };
       });
       return;
     }
