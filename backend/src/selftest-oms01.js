@@ -684,8 +684,10 @@ const server = app.listen(PORT, async () => {
     const fa = await call('op', 'POST', `/incidents/${fault.id}/assign`, { crewId: 'C005' });
     check('fault assign -> dispatched', fa.body.incident?.status === 'dispatched');
     const fj = fa.body.job.id;
-    check('fault job On Site -> incident in_progress (existing route)', (await call('c5', 'PATCH', `/mobile/jobs/${fj}/status`, { status: 'On Site' })).status === 200 && (await repo.incident(fault.id)).status === 'in_progress');
-    check('fault job Work Started needs no permit', (await call('c5', 'PATCH', `/mobile/jobs/${fj}/status`, { status: 'Work Started' })).status === 200);
+    // From the site itself (fault jobs: On Site / Work Started only within the site radius).
+    const at = await repo.incident(fault.id);
+    check('fault job On Site -> incident in_progress (existing route)', (await call('c5', 'PATCH', `/mobile/jobs/${fj}/status`, { status: 'On Site', lat: at.lat, lon: at.lon })).status === 200 && (await repo.incident(fault.id)).status === 'in_progress');
+    check('fault job Work Started needs no permit', (await call('c5', 'PATCH', `/mobile/jobs/${fj}/status`, { status: 'Work Started', lat: at.lat, lon: at.lon })).status === 200);
     check('fault job Work Complete -> incident pending', (await call('c5', 'PATCH', `/mobile/jobs/${fj}/status`, { status: 'Work Finished' })).status === 200 && (await repo.incident(fault.id)).status === 'pending');
     const fr = await call('op', 'PATCH', `/incidents/${fault.id}/status`, { status: 'resolved' });
     check('fault PATCH /incidents/:id/status still works', fr.status === 200 && fr.body.status === 'resolved');

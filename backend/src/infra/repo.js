@@ -503,6 +503,41 @@ export const repo = {
      WHERE j.incident_id = $1 ORDER BY s.scanned_at DESC`,
     [incidentId]
   ),
+  recentAssetScans: (days) => db.any(
+    `SELECT s.*, j.incident_id FROM asset_scans s JOIN jobs j ON s.job_id = j.id
+     WHERE s.not_applied_reason IS NULL AND s.lat IS NOT NULL AND s.lon IS NOT NULL
+       AND s.scanned_at > now() - make_interval(days => $1)
+     ORDER BY s.scanned_at DESC LIMIT 2000`,
+    [days]
+  ),
+
+  // ---- crew reassignment requests
+  addReassignRequest: (r) => db.one(
+    `INSERT INTO reassign_requests (id, job_id, incident_id, crew_id, reason) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+    ['RRQ-' + nanoid(10), r.job_id, r.incident_id ?? null, r.crew_id, r.reason]
+  ),
+  openReassignRequestForJob: (jobId) =>
+    db.oneOrNone(`SELECT * FROM reassign_requests WHERE job_id=$1 AND status='open' ORDER BY created_at DESC LIMIT 1`, [jobId]),
+  latestReassignRequestForJob: (jobId) =>
+    db.oneOrNone(`SELECT * FROM reassign_requests WHERE job_id=$1 ORDER BY created_at DESC LIMIT 1`, [jobId]),
+  // status null = every request (newest first), else only that status.
+  reassignRequests: (status) => db.any(
+    `SELECT r.*, j.status AS job_status, c.name AS crew_name FROM reassign_requests r
+     LEFT JOIN jobs j ON j.id = r.job_id LEFT JOIN crews c ON c.id = r.crew_id
+     WHERE ($1::text IS NULL OR r.status = $1) ORDER BY r.created_at DESC LIMIT 200`,
+    [status]
+  ),
+  resolveReassignRequest: (id, status, by, resolution) => db.oneOrNone(
+    `UPDATE reassign_requests SET status=$2, resolved_at=now(), resolved_by=$3, resolution=$4
+     WHERE id=$1 AND status='open' RETURNING *`,
+    [id, status, by, resolution ?? null]
+  ),
+  resolveReassignRequestsForJob: (jobId, status, by, resolution) => db.any(
+    `UPDATE reassign_requests SET status=$2, resolved_at=now(), resolved_by=$3, resolution=$4
+     WHERE job_id=$1 AND status='open' RETURNING *`,
+    [jobId, status, by, resolution ?? null]
+  ),
+
   addCrewLocation: async (crewId, lat, lon) =>
     db.one(
       `INSERT INTO crew_locations (crew_id, lat, lon) VALUES ($1, $2, $3)

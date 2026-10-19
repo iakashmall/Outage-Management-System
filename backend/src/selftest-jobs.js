@@ -58,8 +58,14 @@ const server = app.listen(0, async () => {
     return { status: r.status, body: await r.json().catch(() => ({})) };
   };
   // What the crew app sends for a status change (src/lib/api.js updateJobStatus).
-  const appStatus = (jobId, status, ts, as = 'c3') => call(as, 'PATCH', `/mobile/jobs/${jobId}/status`,
-    { status, lat: 29.94, lon: 78.15, crewId: USERS[as].crewId, ts, sentAt: new Date().toISOString() });
+  // Sent from the incident's own position: On Site / Work Started are only
+  // accepted at the site (selftest-crewfeatures.js tests that rule).
+  const sitePos = async (jobId) => {
+    const inc = await repo.incident((await repo.job(jobId))?.incident_id);
+    return inc?.lat != null ? { lat: inc.lat, lon: inc.lon } : { lat: 29.94, lon: 78.15 };
+  };
+  const appStatus = async (jobId, status, ts, as = 'c3') => call(as, 'PATCH', `/mobile/jobs/${jobId}/status`,
+    { status, ...(await sitePos(jobId)), crewId: USERS[as].crewId, ts, sentAt: new Date().toISOString() });
   const events = async (incId) => (await call('op', 'GET', `/incidents/${incId}`)).body.events || [];
   const lateEvents = async (incId) => (await events(incId)).filter((e) => /late update from crew not applied/.test(e.note));
   const updatesOf = async (jobId) => db.any('SELECT * FROM job_updates WHERE job_id=$1 ORDER BY ts', [jobId]);

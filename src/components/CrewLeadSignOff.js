@@ -1,5 +1,5 @@
 // src/components/CrewLeadSignOff.js
-// Final gate before a job can be marked complete: the crew lead types
+// Final gate before a job can be marked complete: a crew member types
 // their name and confirms the work was done safely and correctly.
 import { useState } from "react";
 import { View, Text, TextInput, Pressable, StyleSheet } from "react-native";
@@ -19,8 +19,8 @@ export default function CrewLeadSignOff({
 
   return (
     <View style={s.card}>
-      <Text style={s.title}>Crew-lead sign-off</Text>
-      <Text style={s.label}>Crew lead name</Text>
+      <Text style={s.title}>Crew sign-off</Text>
+      <Text style={s.label}>Crew member name</Text>
       <TextInput
         style={s.input}
         value={name}

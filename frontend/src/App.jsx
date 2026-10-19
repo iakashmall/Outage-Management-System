@@ -67,6 +67,7 @@ const TAPE_LABEL = {
   'crew.job.updated': ['JOB', 'ok'],
   'crew.tracking.changed': ['TRACKING', ''],
   'crew.location.stale': ['NO GPS', 'crit'],
+  'oms.message.posted': ['MESSAGE', ''],
 };
 
 function LiveTape() {
@@ -84,7 +85,8 @@ function LiveTape() {
       else if (topic.startsWith('scada')) detail = `${p.tag} . ${p.condition}`;
       else if (topic === 'tcs.call.received') detail = `${p.customer} . ${p.category}`;
       else if (topic === 'crew.updated') detail = `${p.name} . ${p.status}`;
-      else if (topic === 'crew.job.updated') detail = `${p.id} . ${p.status}`;
+      else if (topic === 'crew.job.updated') detail = `${p.id} . ${p.reassignRequest ? 'crew asks for REASSIGNMENT' : p.status}`;
+      else if (topic === 'oms.message.posted') detail = `${p.sender_role === 'field_crew' ? 'crew ' : ''}${p.sender} . ${String(p.body || '').slice(0, 60)}`;
       else if (topic === 'crew.tracking.changed') detail = `${p.crewName} . ${p.state === 'on' ? 'tracking on' : 'tracking OFF'}`;
       else if (topic === 'crew.location.stale') detail = `${p.crewName} . ${p.stale ? `no position for ${p.minutes} min` : 'positions resumed'}`;
       setEvents((e) => [{ id: Math.random(), label, cls, detail, t: hhmm(new Date().toISOString()) }, ...e].slice(0, 14));
@@ -140,6 +142,18 @@ export default function App() {
   // used by the Alarms table so an operator can go straight from "this alarm
   // fired" to "here's the incident it created" in one click.
   const openIncident = (id) => { setFocusIncidentId(id); setTab('incidents'); };
+  // Jump to the Network Map on a point (e.g. a crew's QR asset scan).
+  const [mapFocus, setMapFocus] = useState(null);
+  const showOnMap = (point) => { setMapFocus({ ...point, at: Date.now() }); setTab('map'); };
+
+  // Crew messages and reassignment requests must be seen on every screen.
+  useEffect(() => {
+    const onMessage = (m) => { if (m?.sender_role === 'field_crew') toast(`Message from crew ${m.crew_id || m.sender}${m.job_id ? ` (${m.job_id})` : ''}: ${m.body}`, 'err', 15000); };
+    const onJob = (j) => { if (j?.reassignRequest) toast(`Crew ${j.reassignRequest.crew_id} asks to be taken off ${j.id}: "${j.reassignRequest.reason}" - open the incident to reassign`, 'err', 20000); };
+    socket.on('oms.message.posted', onMessage);
+    socket.on('crew.job.updated', onJob);
+    return () => { socket.off('oms.message.posted', onMessage); socket.off('crew.job.updated', onJob); };
+  }, []);
 
   // OMS-01: switching attempted out of order, or a permit waiting for the
   // control room, must be seen on every screen.
@@ -227,7 +241,8 @@ export default function App() {
               transition={{ duration: 0.18, ease: [0.22, 0.61, 0.36, 1] }}
             >
               <ScreenBoundary key={tab}>
-                <Screen go={setTab} openIncident={openIncident} focusIncidentId={tab === 'incidents' ? focusIncidentId : null} clearFocus={() => setFocusIncidentId(null)} />
+                <Screen go={setTab} openIncident={openIncident} focusIncidentId={tab === 'incidents' ? focusIncidentId : null} clearFocus={() => setFocusIncidentId(null)}
+                  showOnMap={showOnMap} mapFocus={tab === 'map' ? mapFocus : null} clearMapFocus={() => setMapFocus(null)} />
               </ScreenBoundary>
             </motion.div>
           </AnimatePresence>

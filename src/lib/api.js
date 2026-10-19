@@ -139,6 +139,12 @@ function normalizeOmsJob(job) {
     completedAt: job.completed_at ?? job.completedAt ?? null,
     updatedAt: job.updated_at ?? job.updatedAt ?? null,
     coordinates: Number.isFinite(lat) && Number.isFinite(lon) ? { lat, lon } : null,
+    // Cancelled by the control room (the job, or its incident): the app lists
+    // it under Pending Sync instead of My Jobs.
+    cancelled: job.status === "Cancelled" || job.incident?.status === "cancelled",
+    // When the phone first received it / the crew first opened it (server time).
+    deliveredAt: job.delivered_at ?? null,
+    openedAt: job.opened_at ?? null,
   };
 }
 
@@ -237,6 +243,31 @@ export async function getJobMessages(jobId) {
 
 export async function getCrewMessages(crewId) {
   return req(`/mobile/crews/${crewId}/messages`);
+}
+
+// POST /api/mobile/jobs/:id/messages { body } — the crew writes to the control
+// room on that job's incident thread. Online only (the crew sees it failed).
+export async function sendJobMessage(jobId, body) {
+  if (!(await isSignedIn())) throw Object.assign(new Error("Sign in to message the control room"), { status: 401 });
+  return req(`/mobile/jobs/${jobId}/messages`, "POST", { body });
+}
+
+// POST /api/mobile/jobs/:id/seen { event: 'delivered' | 'opened' } — first time only on the server.
+export async function reportJobSeen(jobId, event) {
+  if (!(await isSignedIn())) return null;
+  return req(`/mobile/jobs/${jobId}/seen`, "POST", { event, at: new Date().toISOString(), sentAt: new Date().toISOString() });
+}
+
+// The crew asks the control room to give this job to another crew.
+// POST /api/mobile/jobs/:id/reassign-request { reason } -> { request }
+export async function requestReassignment(jobId, reason) {
+  if (!(await isSignedIn())) throw Object.assign(new Error("Sign in to ask for a reassignment"), { status: 401 });
+  return req(`/mobile/jobs/${jobId}/reassign-request`, "POST", { reason });
+}
+
+export async function getReassignRequest(jobId) {
+  if (!(await isSignedIn())) return { request: null };
+  return req(`/mobile/jobs/${jobId}/reassign-request`);
 }
 
 export async function getJobPhotos(jobId) {

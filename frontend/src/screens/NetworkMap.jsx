@@ -26,7 +26,7 @@ const LAYER_GROUPS = [
   ['Network', [['htLines', 'HT network', true], ['feeders', 'Feeder lines', true], ['substations', 'Substations', true],
     ['powerTx', 'Power transformers', false], ['distTx', 'Distribution txr', false],
     ['switches', 'Switches', false], ['rmus', 'RMUs', false], ['fuses', 'Drop-out fuses', false]]],
-  ['Operations', [['incidents', 'Incidents', true], ['crews', 'Crews', true], ['trails', 'Crew trails', false]]],
+  ['Operations', [['incidents', 'Incidents', true], ['crews', 'Crews', true], ['trails', 'Crew trails', false], ['scans', 'Asset scans (crew QR, 7 days)', true]]],
 ];
 // CIM topology (network.* PostGIS schema) -- real connectivity data, imported
 // from a CIM RDF/XML export. Separate from the Haridwar layers above, which
@@ -48,7 +48,11 @@ const SECTION_COLOR = '#ff6a00';
 const TRAIL_COLORS = ['#e11d48', '#7c3aed', '#0891b2', '#ca8a04', '#16a34a', '#db2777', '#2563eb', '#ea580c'];
 const trailColor = (id) => { let h = 0; for (let i = 0; i < String(id).length; i++) h = (h * 31 + String(id).charCodeAt(i)) >>> 0; return TRAIL_COLORS[h % TRAIL_COLORS.length]; };
 
-export default function NetworkMap() {
+// A crew QR asset scan: a small purple diamond.
+const SCAN_ICON = () => L.divIcon({ className: '', html: '<div style="width:11px;height:11px;background:#6b3fa0;border:2px solid #fff;transform:rotate(45deg);box-shadow:0 1px 4px rgba(15,27,45,.45)"></div>', iconSize: [14, 14], iconAnchor: [7, 7] });
+
+// mapFocus: { kind: 'scan', id, lat, lon, at } from another screen (Incidents' asset scans).
+export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
   const [net, setNet] = useState(null);
   const [inc, setInc] = useState([]);
   const [crews, setCrews] = useState([]);
@@ -69,6 +73,7 @@ export default function NetworkMap() {
   const [trails, setTrails] = useState({});                 // crew id -> normalised GPS fixes
   const [trailBusy, setTrailBusy] = useState(false);
   const [trailFailed, setTrailFailed] = useState(false);
+  const [scans, setScans] = useState([]);                   // crew QR asset scans (last 7 days)
 
   const boxRef = useRef();
   const mapRef = useRef(null);
@@ -88,6 +93,9 @@ export default function NetworkMap() {
   const loadLive = () => { api.incidents().then(setInc); api.crews().then(setCrews); };
   useEffect(() => { loadLive(); }, []);
   useLiveRefresh(['oms.incident.updated', 'oms.incident.created'], () => api.incidents().then(setInc));
+  const loadScans = () => api.recentAssetScans(7).then(setScans).catch(() => {});
+  useEffect(() => { loadScans(); }, []);
+  useLiveRefresh(['crew.job.updated'], loadScans); // a new scan publishes its job
   // A crew.updated event carries the full crew row; merge it in place rather
   // than refetching everything, so position fixes reach the map immediately.
   useEffect(() => {
@@ -245,6 +253,7 @@ export default function NetworkMap() {
     groups.current.incidents = mk();
     groups.current.crews = mk();
     groups.current.trails = mk();
+    groups.current.scans = mk();
     crewMarkers.current.clear();
     groups.current.built = true;
     // add the default-on layers
@@ -324,6 +333,31 @@ export default function NetworkMap() {
       m.on('click', () => select('incident', i, i.id)); m.addTo(g);
     });
   }, [inc, ready]);
+
+  // crew QR asset scans: where each asset was scanned (lat/long from the crew's phone)
+  useEffect(() => {
+    const g = groups.current.scans; if (!g) return;
+    g.clearLayers();
+    scans.filter((s) => Number.isFinite(s.lat) && Number.isFinite(s.lon)).forEach((s) => {
+      L.marker([s.lat, s.lon], { icon: SCAN_ICON(), zIndexOffset: 800 })
+        .bindTooltip(`Asset ${s.asset_id || s.raw_value}`)
+        .on('click', () => select('scan', s, `Asset ${s.asset_id || s.raw_value}`))
+        .addTo(g);
+    });
+  }, [scans, ready]);
+
+  // Opened from another screen on a point: show the scans layer, fly there, mark it.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!mapFocus || !ready || !map) return;
+    setLayers((l) => ({ ...l, scans: true }));
+    map.flyTo([mapFocus.lat, mapFocus.lon], 18, { duration: 0.6 });
+    highlight(mapFocus.lat, mapFocus.lon);
+    const s = scans.find((x) => x.id === mapFocus.id);
+    if (s) select('scan', s, `Asset ${s.asset_id || s.raw_value}`);
+    else if (!scans.length) return; // scans still loading: try again when they arrive
+    clearMapFocus?.();
+  }, [mapFocus, ready, scans]); // eslint-disable-line
 
   // Crew markers persist per crew id and glide to each new fix (Uber-style)
   // instead of being rebuilt, with the arrow turned to the direction of travel.
@@ -661,6 +695,8 @@ export default function NetworkMap() {
                       <button className="trace-btn ghost" onClick={() => setTrace(null)}>Clear trace</button>
                     </div>)}
                 </>}
+                {sel.kind === 'scan' && <><span className="chip chip-soft">Crew QR asset scan</span><KV k="Asset" v={sel.asset_id || sel.raw_value} mono /><KV k="Crew" v={sel.crew_id} mono /><KV k="Job" v={sel.job_id} mono /><KV k="Incident" v={sel.incident_id} mono />
+                  <KV k="Scanned" v={sel.scanned_at ? new Date(sel.scanned_at).toLocaleString() : '—'} /><KV k="Lat / Long" v={`${Number(sel.lat).toFixed(6)}, ${Number(sel.lon).toFixed(6)}`} mono /></>}
                 {sel.kind === 'crew' && <><span className="chip chip-soft">Field crew</span><KV k="Lead" v={sel.lead} /><KV k="Status" v={sel.status ? sel.status.replace('_', ' ') : ''} /><KV k="Location" v={sel.location} /><KV k="Skills" v={sel.skills} />
                   <CrewTrailInfo pts={trails[sel.id]} win={trailWin} lastFix={sel.location_updated_at} onShow={() => focusTrail(sel.id)} /></>}
               </div>

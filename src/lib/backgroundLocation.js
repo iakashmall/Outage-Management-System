@@ -11,7 +11,9 @@
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { AppState } from "react-native";
 import { enqueueLocations, flushLocations } from "./locationQueue";
+import { backgroundCheck } from "./alerts";
 
 const TASK_NAME = "oms-crew-location-task";
 const CREW_ID_KEY = "oms-tracking-crew-id";
@@ -73,6 +75,8 @@ TaskManager.defineTask(TASK_NAME, async ({ data, error }) => {
   // Best-effort upload; if offline or it fails, the fixes stay queued and
   // go out on a later wake-up or when the app sees the network return.
   await flushLocations().catch(() => {});
+  // New jobs / messages while the app is in the background: notify with sound.
+  await backgroundCheck(crewId, AppState.currentState === "active").catch(() => {});
 });
 
 // Call once the crew member has a real session. Asks for location permission

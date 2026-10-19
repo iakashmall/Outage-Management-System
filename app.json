@@ -72,7 +72,13 @@
       "expo-font",
       "expo-task-manager",
       "expo-sqlite",
-      "@maplibre/maplibre-react-native"
+      "@maplibre/maplibre-react-native",
+      [
+        "expo-notifications",
+        {
+          "color": "#173355"
+        }
+      ]
     ],
     "extra": {
       "eas": {

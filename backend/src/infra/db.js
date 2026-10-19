@@ -570,6 +570,27 @@ export async function migrate() {
       close_client_id TEXT UNIQUE,
       UNIQUE (crew_id, work_date)
     );
+
+    -- When the assigned crew's phone first received a job, and when the crew
+    -- first opened it: the dashboard shows the crew has seen a new assignment.
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS opened_at TIMESTAMPTZ;
+
+    -- A crew asking the control room to give its job to another crew. The
+    -- crew can't move the job itself; the operator reassigns or dismisses.
+    CREATE TABLE IF NOT EXISTS reassign_requests (
+      id          TEXT PRIMARY KEY,
+      job_id      TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      incident_id TEXT,
+      crew_id     TEXT NOT NULL,
+      reason      TEXT NOT NULL,
+      status      TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'reassigned', 'dismissed')),
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+      resolved_at TIMESTAMPTZ,
+      resolved_by TEXT,
+      resolution  TEXT
+    );
+    CREATE INDEX IF NOT EXISTS reassign_requests_open_idx ON reassign_requests(status, created_at DESC);
   `);
 
   // ID sequences for incidents.id / complaints.qid. These replace the old
