@@ -528,11 +528,14 @@ export async function migrate() {
       parts_used        JSONB,
       restored          TEXT CHECK (restored IN ('yes', 'partial', 'no')),
       sign_off          JSONB,
+      checklist         JSONB,
       submitted_at      TIMESTAMPTZ NOT NULL,
       received_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
       submitted_by      TEXT
     );
     CREATE INDEX IF NOT EXISTS job_completions_job_idx ON job_completions(job_id, received_at DESC);
+    -- The safety checklist the crew ticked: [{ label, checked, at }].
+    ALTER TABLE job_completions ADD COLUMN IF NOT EXISTS checklist JSONB;
 
     -- One "late update from crew not applied" timeline event per (job, what,
     -- status, client time), however often a phone resends it.

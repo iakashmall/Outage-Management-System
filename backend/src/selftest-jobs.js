@@ -226,6 +226,25 @@ const server = app.listen(0, async () => {
     check('same form resent after Work Started -> stored once, under its clientRequestId', resent.status === 201 && resent2.status === 200
       && (await repo.jobCompletions(C.job)).length === 1 && resent.body.completion.client_request_id === heldForm.clientRequestId);
 
+    console.log('-- checklists');
+    const ticks = [{ label: 'Area isolated', checked: true, at: minsAgo(3) }, { label: 'Earthing applied', checked: true, at: minsAgo(2) }];
+    const pre = await call('c3', 'POST', `/mobile/jobs/${C.job}/checklist`, { items: ticks, passedAt: minsAgo(2), sentAt: minsAgo(0) });
+    check('priority checklist recorded -> 201 applied', pre.status === 201 && pre.body.applied === true && pre.body.event?.kind === 'checklist', `(${pre.status})`);
+    const clEvents = (await events(C.inc)).filter((e) => e.kind === 'checklist');
+    const [clSummary, clJson] = (clEvents[0]?.note || '').split('\n');
+    check('... on the incident timeline, by the crew, items readable back', clEvents.length === 1 && clEvents[0].actor === 'crew03'
+      && clSummary === `Priority checklist passed (2/2) for job ${C.job}` && JSON.stringify(JSON.parse(clJson || 'null')) === JSON.stringify(ticks));
+    const preAgain = await call('c3', 'POST', `/mobile/jobs/${C.job}/checklist`, { items: ticks, passedAt: minsAgo(2), sentAt: minsAgo(0) });
+    check('... the same ticks resent -> 200 duplicate, still one event', preAgain.status === 200 && preAgain.body.duplicate === true
+      && (await events(C.inc)).filter((e) => e.kind === 'checklist').length === 1);
+    check('... items without a boolean checked -> 400', (await call('c3', 'POST', `/mobile/jobs/${C.job}/checklist`, { items: [{ label: 'x', checked: 'yes' }] })).status === 400);
+    check("... another crew's job -> 403", (await call('c4', 'POST', `/mobile/jobs/${C.job}/checklist`, { items: ticks })).status === 403);
+    check('completion with a bad checklist -> 400', (await call('c3', 'POST', `/mobile/jobs/${C.job}/completion`, { checklist: { label: 'x' } })).status === 400);
+    const withList = await call('c3', 'POST', `/mobile/jobs/${C.job}/completion`, { restored: 'yes', checklist: ticks, clientRequestId: 'cr-C-checklist' });
+    const stored = (await call('op', 'GET', `/mobile/jobs/${C.job}/completion`)).body.find((x) => x.client_request_id === 'cr-C-checklist');
+    check('completion with a checklist -> stored and read back', withList.status === 201 && stored?.checklist?.length === 2
+      && stored.checklist.every((x, i) => x.label === ticks[i].label && x.checked === ticks[i].checked && x.at === ticks[i].at)); // JSONB reorders keys
+
     console.log('-- undo inside the window');
     const reopen = await call('c3', 'POST', `/mobile/jobs/${A.job}/reopen`, {});
     check('crew reopens -> Work Started', reopen.body.applied === true && (await repo.job(A.job)).status === 'Work Started', reopen.body.reason || '');

@@ -124,6 +124,8 @@ function IncidentDrawer({ inc, onClose, onChange, showOnMap }) {
   const canReturn = inc.status === 'pending' && !isPlanned && isControlRoom() && report.some((r) => r.job.status === 'Work Complete');
   const [returning, setReturning] = useState(false);
   const [reason, setReason] = useState('');
+  // Timeline events whose checklist is shown; collapsed again on every open.
+  const [expanded, setExpanded] = useState({});
   const doReturn = async () => {
     if (!reason.trim()) { toast('Say what needs correcting', 'err'); return; }
     setBusy(true);
@@ -257,14 +259,35 @@ function IncidentDrawer({ inc, onClose, onChange, showOnMap }) {
 
           <div style={{ margin: '20px 0 10px' }} className="eyebrow">Status timeline</div>
           <ul className="timeline">
-            {(inc.events || []).map((e) => (
-              <li key={e.id} className={e.actor === 'SCADA' ? 'scada' : e.actor === 'Crew' ? 'crew' : ''}>
-                <span className="node" />
-                <div className="k">{e.actor} - {e.kind}</div>
-                <div className="n">{e.note}</div>
-                <div className="t">{hhmm(e.ts)}</div>
-              </li>
-            ))}
+            {(inc.events || []).map((e) => {
+              const { text, items } = eventChecklist(e, report);
+              const isOpen = !!expanded[e.id];
+              return (
+                <li key={e.id} className={e.actor === 'SCADA' ? 'scada' : e.actor === 'Crew' ? 'crew' : ''}>
+                  <span className="node" />
+                  <div className="k">{e.actor} - {e.kind}</div>
+                  <div className="n">
+                    {text}
+                    {items && (
+                      <button type="button" className="caret" aria-expanded={isOpen} onClick={() => setExpanded((x) => ({ ...x, [e.id]: !x[e.id] }))}>
+                        {isOpen ? '▾' : '▸'} {items.length} item{items.length === 1 ? '' : 's'}
+                      </button>
+                    )}
+                  </div>
+                  {items && isOpen && (
+                    <ul className="sub">
+                      {items.map((x, i) => (
+                        <li key={i} className={x.checked ? 'ok' : 'no'}>
+                          <span className="mark">{x.checked ? '✓' : '✗'}</span>{x.label}
+                          {x.at && <span className="t">{hhmm(x.at)}</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <div className="t">{hhmm(e.ts)}</div>
+                </li>
+              );
+            })}
           </ul>
           <MessagePanel incidentId={inc.id} />
         </div>
@@ -273,6 +296,30 @@ function IncidentDrawer({ inc, onClose, onChange, showOnMap }) {
       </DrawerContent>
     </Drawer>
   );
+}
+
+// The checklist behind a timeline event, if it has one: { text, items }.
+// A 'checklist' event (pre-work priority checklist) carries it in its note:
+// a summary line, a newline, then the items as JSON. A completion-form event
+// takes it from that form in the field report (same job, same submitted time).
+function eventChecklist(e, report) {
+  const note = e.note || '';
+  if (e.kind === 'checklist') {
+    const cut = note.indexOf('\n');
+    if (cut < 0) return { text: note, items: null };
+    try {
+      const items = JSON.parse(note.slice(cut + 1));
+      return { text: note.slice(0, cut), items: Array.isArray(items) && items.length ? items : null };
+    } catch {
+      return { text: note.slice(0, cut), items: null };
+    }
+  }
+  const m = /^Field completion report submitted for job (\S+?)(,|$)/.exec(note);
+  if (m) {
+    const form = report.find((r) => r.job.id === m[1])?.completions.find((c) => Date.parse(c.submitted_at) === Date.parse(e.ts));
+    if (Array.isArray(form?.checklist) && form.checklist.length) return { text: note, items: form.checklist };
+  }
+  return { text: note, items: null };
 }
 
 // Lock state of the incident's crew job (OMS-03): while the crew can still
