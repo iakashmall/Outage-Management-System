@@ -17,8 +17,8 @@ import { SafeAreaView, SafeAreaProvider, useSafeAreaInsets } from 'react-native-
 import * as AuthSession from 'expo-auth-session';
 import * as WebBrowser from 'expo-web-browser';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import * as Location from 'expo-location';
 import * as Network from 'expo-network';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   getDiscovery,
   redirectUri,
@@ -33,20 +33,20 @@ import {
 import { biometricUnlock } from './lib/biometric';
 import { getLockoutStatus, recordFailedAttempt, resetAttempts as resetLoginAttempts, MAX_ATTEMPTS, LOCKOUT_MS } from './lib/lockout';
 import { API_PORT, CLIENT_ID, KEYCLOAK_PORT, JOB_POLL_INTERVAL_MS } from './config';
-import { reportTrackingState, getCurrentCrew, fetchMyJobs, clearJobCache, updateJobStatus, getJobsLastSyncedAt, getJobMessages, getJobPhotos, getCrewMessages, saveAssetScan, getAssetScans, isNotYourJob, postJobCompletion, reopenJob } from './lib/api.js';
-import { getLocation, getLastKnownLocation } from './lib/location';
+import { reportTrackingState, getCurrentCrew, fetchMyJobs, clearJobCache, updateJobStatus, getJobMessages, getJobPhotos, getCrewMessages, saveAssetScan, getAssetScans, isNotYourJob, postJobCompletion, reopenJob, getWorkOrder, startWorkOrder, closeWorkOrder, sendJobMessage, requestReassignment, getReassignRequest, reportJobSeen } from './lib/api.js';
+import { getLocation } from './lib/location';
 import { uploadCapturedPhoto } from './lib/photos';
-import { navigateTo } from './lib/navigate';
-import { isOnlineState, distanceAndDirection } from './lib/offlineNavigation';
-import { getRoadRoute, preloadRoadGraph, formatDistance, formatDuration } from './lib/roadRouting';
-import { openMultiJobRoute } from './lib/routing';
-import { queueUpdate, queueScan, queueCompletion, keepUndeliveredCompletion, getUndeliveredCompletion, clearUndeliveredCompletion, isRetryable, isRefusal, flushQueue, getQueueLength, getQueueItems } from './lib/offlineQueue';
+import { siteBlock, SITE_STATUSES } from './lib/siteCheck';
+import { setupAlerts, findNewJobs, findNewMessages, alertNewJobs, alertNewMessages, reportDelivered, isOwnMessage } from './lib/alerts';
+import { queueUpdate, queueScan, queueCompletion, queueWorkOrder, keepUndeliveredCompletion, getUndeliveredCompletion, clearUndeliveredCompletion, isRetryable, isRefusal, flushQueue, getQueueLength, getQueueItems } from './lib/offlineQueue';
+import { localDate, workOrderId, viewWorkOrder, dayJobs, summarize, startPayload, closePayload, cleanMembers } from './lib/workOrder';
+import { getCachedWorkOrder, cacheWorkOrder, getPendingWorkOrder, setPendingWorkOrder, getLastMembers, saveLastMembers, clearWorkOrderCache } from './lib/workOrderStore';
+import DailyWorkOrder from './components/DailyWorkOrder';
 import { SUBMITTED_LABEL, RESTORED_CHOICES, isCompleted, canSendCompletion, canResendCompletion, canReopen, isReadOnly, completionPayload, serverJobUpdate } from './lib/jobFlow';
 import { startCrewTracking, stopCrewTracking, autoStartCrewTracking, setTrackingPausedByCrew, isLocationServiceOn } from './lib/backgroundLocation';
 import { flushLocations, getPendingLocationCount } from './lib/locationQueue';
-import { downloadPack, cancelPackDownload, getInstalledPack, getPackStatus, subscribePackStatus } from './lib/offlineMap/areaStore';
-import OfflineMap from './components/OfflineMap';
-import NativeMapSpike from './components/NativeMapSpike'; // SPIKE: native vector map test (Profile tab)
+import { downloadPack } from './lib/offlineMap/areaStore';
+import CrewMap from './components/CrewMap';
 import { usingMapTestServer } from './lib/mapServer';
 import { checkServer, getServer, setServer } from './lib/server';
 import SafetyChecklist from './components/SafetyChecklist';
@@ -85,6 +85,23 @@ const NEXT_STATUS = {
 const DONE_STATUSES = ['work finished', 'work complete', 'completed', 'closed'];
 const isJobDone = (job) => DONE_STATUSES.includes(String(job.status).toLowerCase());
 
+// Jobs the control room cancelled: listed under Pending Sync until the crew
+// dismisses them (ids kept on the phone), never under My Jobs.
+const DISMISSED_CANCELLED_KEY = 'oms-dismissed-cancelled';
+// When the crew last opened the Messages screen (for the unread count).
+const MESSAGES_READ_KEY = 'oms-messages-read-at';
+const MESSAGE_POLL_MS = 5000;
+const GLIMPSE_MS = 8000;
+
+// Which watermark a photo gets: before work starts it is the "work started"
+// photo, from then on the "work finished" one.
+const photoStage = (job) => (['Work Started', 'Work Finished', 'Work Complete'].includes(job.status) ? 'work_finished' : 'work_started');
+const PHOTO_STAGE_LABEL = { work_started: 'Work started photo', work_finished: 'Work finished photo' };
+const fmtLatLon = (loc) => (Number.isFinite(loc?.lat) && Number.isFinite(loc?.lon) ? `${loc.lat.toFixed(6)}, ${loc.lon.toFixed(6)}` : null);
+
+// Fault diagnosis answer, with the typed reason when "Other" was picked.
+const diagText = (diagnosis, key) => (diagnosis?.[key] === 'Other' && diagnosis[`${key}Other`] ? `Other: ${diagnosis[`${key}Other`]}` : diagnosis?.[key]);
+
 // Pending = still to do, so Total = Pending + Done.
 const JOB_FILTERS = {
   all: { section: 'ALL JOBS', empty: 'No jobs assigned.', test: () => true },
@@ -112,7 +129,8 @@ function jobPlanLine(job) {
 
 // Why a status update was dropped instead of retried.
 const itemLabel = (item) => (item.type === 'photo' ? `${item.id} photo` : item.type === 'scan' ? `${item.id} QR scan`
-  : item.type === 'completion' ? `${item.id} completion form` : `${item.id} → ${item.status}`);
+  : item.type === 'completion' ? `${item.id} completion form` : item.type === 'wo-start' ? `${item.id} start of day`
+  : item.type === 'wo-close' ? `${item.id} end of day` : `${item.id} → ${item.status}`);
 
 function droppedUpdateNotice(item) {
   const what = itemLabel(item);
@@ -134,6 +152,23 @@ function NoticeBanner({ notice, onDismiss }) {
     <Pressable style={styles.noticeBanner} onPress={onDismiss} accessibilityLabel="Dismiss notice">
       <Text style={styles.noticeText}>{notice}</Text>
       <Text style={styles.noticeDismiss}>Tap to dismiss</Text>
+    </Pressable>
+  );
+}
+
+// A short heads-up at the top of the screen for a new job or a message from
+// the control room (the phone notification plays the sound). Tap opens it.
+function GlimpseBanner({ glimpse, onPress, onDismiss }) {
+  if (!glimpse) return null;
+  return (
+    <Pressable style={[styles.glimpse, glimpse.kind === 'job' && styles.glimpseJob]} onPress={onPress} accessibilityRole="button" accessibilityLabel={`${glimpse.title}. ${glimpse.text}`}>
+      <View style={{ flex: 1 }}>
+        <Text style={styles.glimpseTitle} numberOfLines={1}>{glimpse.title}</Text>
+        <Text style={styles.glimpseText} numberOfLines={2}>{glimpse.text}</Text>
+      </View>
+      <Pressable onPress={onDismiss} hitSlop={10} accessibilityLabel="Dismiss">
+        <Text style={styles.glimpseClose}>×</Text>
+      </Pressable>
     </Pressable>
   );
 }
@@ -204,21 +239,51 @@ function NativeAppScreen() {
   const [tab, setTab] = useState('Dashboard');
   const [jobFilter, setJobFilter] = useState('all');
   const [activeJob, setActiveJob] = useState(null);
-  const [mapJobId, setMapJobId] = useState(null);
-  // Set by a job's "Navigate to site": the Map tab then guides to that one
-  // incident instead of showing every job. Cleared from the Map tab or nav bar.
-  const [navJobId, setNavJobId] = useState(null);
-  // SPIKE: the new native map, opened from Profile (no job) or a job's
-  // "Navigate (new map)" (navigates straight to that job).
-  const [nativeMap, setNativeMap] = useState(null); // null | { jobId }
+  // Set by a job's "Navigate to site" ({ jobId, at }) or an asset scan's
+  // "Show on map" ({ lat, lon, title, at }): the Map tab opens on it.
+  // Cleared from the nav bar.
+  const [mapNav, setMapNav] = useState(null);
+  const [mapFocus, setMapFocus] = useState(null);
   const [pendingCount, setPendingCount] = useState(0);
   const [pendingItems, setPendingItems] = useState([]);
   const [crewMessages, setCrewMessages] = useState([]);
   const [messagesVisible, setMessagesVisible] = useState(false);
+  const [messagesReadAt, setMessagesReadAt] = useState(0);
+  const [glimpse, setGlimpse] = useState(null); // { kind: 'job' | 'message', title, text, jobId }
+  const [dismissedCancelled, setDismissedCancelled] = useState([]);
   // Short notice for things done to the crew's work by someone else, e.g. a
   // job reassigned to another crew (OMS-03).
   const [notice, setNotice] = useState('');
+  // OMS-03 daily work order: the server's last answer and a start / end of
+  // day still waiting in pending sync (see lib/workOrder.js viewWorkOrder).
+  const [workDate, setWorkDate] = useState(() => localDate());
+  const [workOrderServer, setWorkOrderServer] = useState(null);
+  const [workOrderLocal, setWorkOrderLocal] = useState(null);
+  const [lastMembers, setLastMembers] = useState([]);
+  const [workOrderBusy, setWorkOrderBusy] = useState(false);
   const addNotice = useCallback((msg) => setNotice((prev) => appendNotice(prev, msg)), []);
+  // Cancelled jobs leave My Jobs (and every count) for Pending Sync.
+  const liveJobs = useMemo(() => jobs.filter((j) => !j.cancelled), [jobs]);
+  const cancelledJobs = useMemo(() => jobs.filter((j) => j.cancelled && !dismissedCancelled.includes(j.id)), [jobs, dismissedCancelled]);
+  const glimpseTimer = useRef(null);
+  const showGlimpse = useCallback((g) => {
+    setGlimpse(g);
+    clearTimeout(glimpseTimer.current);
+    glimpseTimer.current = setTimeout(() => setGlimpse(null), GLIMPSE_MS);
+  }, []);
+  useEffect(() => () => clearTimeout(glimpseTimer.current), []);
+  useEffect(() => {
+    AsyncStorage.getItem(DISMISSED_CANCELLED_KEY).then((raw) => setDismissedCancelled(raw ? JSON.parse(raw) : [])).catch(() => {});
+    AsyncStorage.getItem(MESSAGES_READ_KEY).then((raw) => setMessagesReadAt(Number(raw) || 0)).catch(() => {});
+  }, []);
+  const dismissCancelled = useCallback((jobId) => {
+    setDismissedCancelled((cur) => {
+      // Only ids of jobs still on the list are worth keeping.
+      const next = [...cur.filter((id) => jobs.some((j) => j.id === id)), jobId];
+      AsyncStorage.setItem(DISMISSED_CANCELLED_KEY, JSON.stringify(next)).catch(() => {});
+      return next;
+    });
+  }, [jobs]);
   // True while the job list is the server's answer (not the FALLBACK_JOBS
   // placeholder or the offline cache), so a missing job really means it was
   // taken away rather than that the network is down.
@@ -459,6 +524,9 @@ function NativeAppScreen() {
     applyTracking(false, 'signed_out');
     await authLogout();
     await clearJobCache();
+    await clearWorkOrderCache();
+    setWorkOrderServer(null);
+    setLastMembers([]);
     // Nothing of this crew's session may carry over to the next sign-in on
     // the same phone (a stale notice, or an open job closed as "reassigned").
     jobsSyncedRef.current = false;
@@ -469,9 +537,30 @@ function NativeAppScreen() {
     setAuthenticated(false);
   }, [applyTracking]);
 
+  // OMS-03: today's work order. The date is the phone's, so the screen moves
+  // to the new day by itself after midnight. Offline, the last answer stays.
+  const loadWorkOrder = useCallback(async () => {
+    const date = localDate();
+    setWorkDate(date);
+    const [cached, pending, members] = await Promise.all([getCachedWorkOrder(), getPendingWorkOrder(), getLastMembers()]);
+    setWorkOrderLocal(pending);
+    setLastMembers(members);
+    if (cached) setWorkOrderServer((current) => current || cached);
+    try {
+      const { workOrder } = await getWorkOrder(date);
+      if (workOrder) {
+        setWorkOrderServer(workOrder);
+        cacheWorkOrder(workOrder);
+      }
+    } catch {
+      // no signal: keep showing the cached work order
+    }
+  }, []);
+
   const refresh = useCallback(() => {
     if (!authenticated) return;
     getCurrentCrew().then(setCrew).catch(() => {});
+    loadWorkOrder().catch(() => {});
     fetchMyJobs()
       .then(({ jobs: items, fromServer }) => {
         if (!Array.isArray(items)) return;
@@ -481,8 +570,27 @@ function NativeAppScreen() {
         if (!fromServer && !items.length) return;
         jobsSyncedRef.current = fromServer;
         setJobs(items);
+        if (fromServer && isAuthenticated()) {
+          // The dashboard sees the phone got each job; a new one rings.
+          reportDelivered(items);
+          findNewJobs(myCrewId(), items).then((fresh) => {
+            if (!fresh.length) return;
+            alertNewJobs(fresh);
+            showGlimpse({
+              kind: 'job',
+              title: fresh.length === 1 ? `New job assigned: ${fresh[0].id}` : `${fresh.length} new jobs assigned`,
+              text: fresh.length === 1 ? [fresh[0].severity, fresh[0].title, fresh[0].address].filter(Boolean).join(' · ') : fresh.map((j) => j.id).join(', '),
+              jobId: fresh[0].id,
+            });
+          }).catch(() => {});
+        }
       })
       .catch(() => {});
+  }, [authenticated, loadWorkOrder, showGlimpse]);
+
+  // Phone notifications (sound) need a channel and the crew's permission.
+  useEffect(() => {
+    if (authenticated && isAuthenticated()) setupAlerts();
   }, [authenticated]);
 
   useEffect(() => {
@@ -497,14 +605,23 @@ function NativeAppScreen() {
     const fresh = jobs.find((j) => j.id === activeJob.id);
     const me = isAuthenticated() ? myCrewId() : null;
     const movedAway = !!(fresh && me && fresh.assignedCrewId && fresh.assignedCrewId !== me);
+    if (fresh?.cancelled) {
+      pageRef.current = { ...pageRef.current, jobId: null };
+      setActiveJob(null);
+      addNotice(`${fresh.id} was cancelled by the control room. It is listed under Pending Sync.`);
+      return;
+    }
     if (fresh && !movedAway) {
       // OMS-03: the open job screen follows the server's lock state, and the
       // status the control room set (returned for correction, locked).
       setActiveJob((current) => {
         if (!current || current.id !== fresh.id) return current;
         const serverDriven = fresh.locked || fresh.status === 'Requires Revisit';
-        if (current.locked === fresh.locked && current.undoUntil === fresh.undoUntil && (!serverDriven || current.status === fresh.status)) return current;
-        return { ...current, locked: fresh.locked, undoUntil: fresh.undoUntil, ...(serverDriven ? { status: fresh.status } : {}) };
+        // The site position can change (dispatch corrects the incident's
+        // location); the On Site check must measure against the new one.
+        const samePlace = current.coordinates?.lat === fresh.coordinates?.lat && current.coordinates?.lon === fresh.coordinates?.lon;
+        if (samePlace && current.locked === fresh.locked && current.undoUntil === fresh.undoUntil && (!serverDriven || current.status === fresh.status)) return current;
+        return { ...current, coordinates: fresh.coordinates, locked: fresh.locked, undoUntil: fresh.undoUntil, ...(serverDriven ? { status: fresh.status } : {}) };
       });
       return;
     }
@@ -523,18 +640,54 @@ function NativeAppScreen() {
     let cancelled = false;
     const loadMessages = () => {
       getCrewMessages(crew.id)
-        .then((items) => {
-          if (!cancelled) setCrewMessages(Array.isArray(items) ? items : []);
+        .then(async (items) => {
+          if (cancelled || !Array.isArray(items)) return;
+          setCrewMessages(items);
+          const fresh = await findNewMessages(crew.id, items);
+          if (cancelled || !fresh.length) return;
+          alertNewMessages(fresh);
+          const last = fresh[fresh.length - 1];
+          showGlimpse({
+            kind: 'message',
+            title: fresh.length === 1 ? `Message from ${last.sender || 'control room'}` : `${fresh.length} new messages from the control room`,
+            text: `${last.job_id ? last.job_id + ': ' : ''}${last.body}`,
+            jobId: last.job_id || null,
+          });
         })
         .catch(() => {});
     };
     loadMessages();
-    const interval = setInterval(loadMessages, 15000);
+    const interval = setInterval(loadMessages, MESSAGE_POLL_MS);
     return () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [authenticated, crew.id]);
+  }, [authenticated, crew.id, showGlimpse]);
+
+  const unreadMessages = crewMessages.filter((m) => !isOwnMessage(m) && Date.parse(m.ts) > messagesReadAt).length;
+  const openMessages = useCallback(() => {
+    const now = Date.now();
+    setMessagesReadAt(now);
+    AsyncStorage.setItem(MESSAGES_READ_KEY, String(now)).catch(() => {});
+    setMessagesVisible(true);
+  }, []);
+  const reloadMessages = useCallback(() => {
+    if (!crew.id || !isAuthenticated()) return Promise.resolve();
+    return getCrewMessages(crew.id).then((items) => Array.isArray(items) && setCrewMessages(items)).catch(() => {});
+  }, [crew.id]);
+
+  // The glimpse opens what it is about: the job, or the messages.
+  const openGlimpse = useCallback(() => {
+    const g = glimpse;
+    setGlimpse(null);
+    if (!g) return;
+    if (g.kind === 'job' && g.jobId && jobs.some((j) => j.id === g.jobId)) {
+      setMessagesVisible(false);
+      openPage({ tab: 'Dashboard', jobId: g.jobId });
+    } else {
+      openMessages();
+    }
+  }, [glimpse, jobs, openPage, openMessages]);
 
   const reloadPending = useCallback(() => getQueueItems()
     .then((items) => {
@@ -678,6 +831,63 @@ function NativeAppScreen() {
     }
   }, [refresh, addNotice, reloadPending, syncPending, applyServerJob]);
 
+  // OMS-03: start or end the crew's day. Sent at once when there is signal
+  // and nothing older is waiting; otherwise queued behind the waiting items
+  // (so the day ends after the job updates it reports on). Returns true when
+  // the Today screen can go back to the work order view.
+  const sendWorkOrder = useCallback(async (kind, payload) => {
+    const crewId = isAuthenticated() ? myCrewId() : crew.id;
+    const woId = workOrderId(crewId, payload.date);
+    const what = kind === 'start' ? 'start of day' : 'end of day';
+    const keepOffline = async () => {
+      if (!(await queueWorkOrder(kind, woId, crewId, payload))) return false;
+      await setPendingWorkOrder(crewId, payload.date, kind, payload);
+      setWorkOrderLocal(await getPendingWorkOrder());
+      await reloadPending();
+      addNotice(`No signal: the ${what} is saved on the phone and will be sent automatically.`);
+      return true;
+    };
+    setWorkOrderBusy(true);
+    try {
+      if (isAuthenticated() && (await getQueueLength()) > 0) {
+        const queued = await keepOffline();
+        syncPending();
+        return queued;
+      }
+      const res = await (kind === 'start' ? startWorkOrder : closeWorkOrder)(payload, crewId);
+      if (res?.workOrder) {
+        setWorkOrderServer(res.workOrder);
+        cacheWorkOrder(res.workOrder);
+      }
+      if (res?.applied === false) addNotice(`${woId}: ${what} not applied: ${res.reason}`);
+      return true;
+    } catch (err) {
+      if (isRefusal(err)) {
+        addNotice(`${woId}: ${what} refused: ${err.message}`);
+        return false;
+      }
+      return keepOffline();
+    } finally {
+      setWorkOrderBusy(false);
+    }
+  }, [crew.id, addNotice, reloadPending, syncPending]);
+
+  const startDay = useCallback(async ({ members, checks, note }) => {
+    const location = await getLocation().catch(() => null);
+    const crewId = isAuthenticated() ? myCrewId() : crew.id;
+    const payload = startPayload({ crewId, date: localDate(), members, checks, note, location });
+    saveLastMembers(payload.members);
+    setLastMembers(payload.members);
+    return sendWorkOrder('start', payload);
+  }, [crew.id, sendWorkOrder]);
+
+  const endDay = useCallback(({ open, reasons, notes, remarks, signOff }) => {
+    const crewId = isAuthenticated() ? myCrewId() : crew.id;
+    return sendWorkOrder('close', closePayload({ crewId, date: workDate, open, reasons, notes, remarks, signOff }));
+  }, [crew.id, workDate, sendWorkOrder]);
+
+  const workOrder = viewWorkOrder({ crewId: isAuthenticated() ? myCrewId() : crew.id, date: workDate, server: workOrderServer, local: workOrderLocal });
+
   if (checkingSession) {
     return (
       <SafeAreaView style={[styles.safe, styles.center]}>
@@ -751,8 +961,8 @@ function NativeAppScreen() {
           {isAuthenticated() && (
             <HeaderAction
               label="Messages"
-              count={crewMessages.length}
-              onPress={() => setMessagesVisible(true)}
+              count={unreadMessages}
+              onPress={openMessages}
               accessibilityLabel="Open OMS messages"
             />
           )}
@@ -808,37 +1018,60 @@ function NativeAppScreen() {
           </Pressable>
         );
       })()}
+      <GlimpseBanner glimpse={glimpse} onPress={openGlimpse} onDismiss={() => setGlimpse(null)} />
+      {tab === 'Map' ? (
+        // The map fills the screen between the header and the bottom bar.
+        <View style={{ flex: 1, paddingBottom: 46 + insets.bottom }}>
+          {notice ? <View style={styles.mapNotice}><NoticeBanner notice={notice} onDismiss={() => setNotice('')} /></View> : null}
+          <CrewMap jobs={liveJobs} crew={crew} navRequest={mapNav} focus={mapFocus} />
+        </View>
+      ) : (
       <ScrollView contentContainerStyle={[styles.content, { paddingBottom: 100 + insets.bottom }]}>
         <NoticeBanner notice={notice} onDismiss={() => setNotice('')} />
         {tab === 'Dashboard' ? (
           <>
             <Text style={styles.title}>Today&apos;s field work</Text>
             <Text style={styles.subtitle}>Priority outages assigned to your crew.</Text>
+            <WorkOrderCard workOrder={workOrder} jobs={liveJobs} date={workDate} onPress={() => openPage({ tab: 'Today', jobId: null })} />
             <JobStats
-              jobs={jobs}
+              jobs={liveJobs}
               onSelect={(filter) => {
                 setJobFilter(filter);
                 openPage({ tab: 'Jobs' });
               }}
             />
 
-            {pendingItems.length > 0 && (
+            {(pendingItems.length > 0 || cancelledJobs.length > 0) && (
               <View style={styles.pendingSection}>
                 <View style={styles.pendingSectionHeader}>
                   <Text style={styles.pendingSectionTitle}>PENDING SYNC</Text>
                   <View style={styles.pendingCountPill}>
-                    <Text style={styles.pendingCountPillText}>{pendingItems.length}</Text>
+                    <Text style={styles.pendingCountPillText}>{pendingItems.length + cancelledJobs.length}</Text>
                   </View>
                 </View>
+                {pendingItems.length > 0 && (
                 <Text style={styles.pendingSectionSubtitle}>
                   Saved on the phone with no signal. They're sent automatically, with the time you made them, once there is signal.
                 </Text>
+                )}
+                {cancelledJobs.map((job) => (
+                  <View key={`cancelled-${job.id}`} style={styles.pendingItemRow}>
+                    <View style={[styles.pendingDot, styles.cancelledDot]} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.pendingItemTitle}>{job.id} · Cancelled by control room</Text>
+                      <Text style={styles.pendingItemMeta}>{job.title} · {job.address}. No more updates are sent for it.</Text>
+                    </View>
+                    <Pressable style={styles.pendingDismiss} onPress={() => dismissCancelled(job.id)} accessibilityLabel={`Dismiss cancelled job ${job.id}`}>
+                      <Text style={styles.pendingDismissText}>OK</Text>
+                    </Pressable>
+                  </View>
+                ))}
                 {pendingItems.map((item, i) => (
                   <View key={`${item.id}-${item.queuedAt ?? i}`} style={styles.pendingItemRow}>
                     <View style={styles.pendingDot} />
                     <View style={{ flex: 1 }}>
                       <Text style={styles.pendingItemTitle}>
-                        {item.type === 'photo' ? `${item.id} · Photo` : item.type === 'scan' ? `${item.id} · QR scan ${item.scan?.assetId ?? ''}` : `${item.id} → ${item.status}`}
+                        {item.type === 'photo' ? `${item.id} · Photo` : item.type === 'scan' ? `${item.id} · QR scan ${item.scan?.assetId ?? ''}` : item.type === 'completion' ? `${item.id} · Completion form` : item.type === 'wo-start' ? `${item.id} · Start of day` : item.type === 'wo-close' ? `${item.id} · End of day` : `${item.id} → ${item.status}`}
                       </Text>
                       <Text style={styles.pendingItemMeta}>
                         {item.queuedAt ? `Queued ${timeAgo(item.queuedAt)}` : 'Queued offline'}
@@ -850,28 +1083,32 @@ function NativeAppScreen() {
             )}
 
             <Text style={styles.section}>MY JOBS</Text>
-            {jobs.map((job) => (
+            {!liveJobs.length ? <Text style={styles.mapEmpty}>No jobs assigned.</Text> : null}
+            {liveJobs.map((job) => (
               <JobCard key={job.id} job={job} onPress={() => openPage({ tab: 'Dashboard', jobId: job.id })} />
             ))}
           </>
+        ) : tab === 'Today' ? (
+          <DailyWorkOrder
+            crew={crew}
+            jobs={liveJobs}
+            date={workDate}
+            workOrder={workOrder}
+            lastMembers={lastMembers}
+            busy={workOrderBusy}
+            onStart={startDay}
+            onEnd={endDay}
+            onOpenJob={(job) => openPage({ tab: 'Today', jobId: job.id })}
+          />
         ) : tab === 'Jobs' ? (
           <NativeJobsPage
-            jobs={jobs}
+            jobs={liveJobs}
             filter={jobFilter}
             onFilter={setJobFilter}
             onPressJob={(job) => openPage({ tab: 'Jobs', jobId: job.id })}
           />
-        ) : tab === 'Map' ? (
-          <MapScreen
-            jobs={jobs}
-            selectedJobId={mapJobId}
-            onSelect={setMapJobId}
-            crew={crew}
-            navJobId={navJobId}
-            onExitNav={() => setNavJobId(null)}
-          />
         ) : tab === 'Profile' ? (
-          <ProfileScreen crew={crew} jobs={jobs} onLogout={signOut} onOpenNativeMap={() => setNativeMap({ jobId: null })} />
+          <ProfileScreen crew={crew} jobs={liveJobs} onLogout={signOut} />
         ) : (
           <View style={styles.empty}>
             <Text style={styles.title}>{tab}</Text>
@@ -879,12 +1116,14 @@ function NativeAppScreen() {
           </View>
         )}
       </ScrollView>
+      )}
       <View style={[styles.nav, { paddingBottom: 12 + insets.bottom }]}>
-        {['Dashboard', 'Jobs', 'Map', 'Profile'].map((item) => (
+        {['Dashboard', 'Today', 'Jobs', 'Map', 'Profile'].map((item) => (
           <Pressable
             key={item}
             onPress={() => {
-              setNavJobId(null);
+              setMapNav(null);
+              setMapFocus(null);
               openPage({ tab: item, jobId: null });
             }}
             style={styles.navItem}
@@ -907,17 +1146,22 @@ function NativeAppScreen() {
             notice={notice}
             onDismissNotice={() => setNotice('')}
             onQueued={reloadPending}
-            onNavigateNative={(job) => setNativeMap({ jobId: job.id })}
+            onMessageSent={reloadMessages}
+            glimpse={glimpse}
+            onGlimpse={openGlimpse}
+            onDismissGlimpse={() => setGlimpse(null)}
             onNavigate={(job) => {
-              setMapJobId(job.id);
-              setNavJobId(job.id);
+              setMapFocus(null);
+              setMapNav({ jobId: job.id, at: Date.now() });
+              openPage({ tab: 'Map', jobId: null });
+            }}
+            onShowOnMap={(point) => {
+              setMapNav(null);
+              setMapFocus({ ...point, at: Date.now() });
               openPage({ tab: 'Map', jobId: null });
             }}
           />
         )}
-      </Modal>
-      <Modal visible={!!nativeMap} animationType="slide" onRequestClose={() => setNativeMap(null)}>
-        {nativeMap ? <NativeMapSpike jobs={jobs} crew={crew} initialJobId={nativeMap.jobId} onClose={() => setNativeMap(null)} /> : null}
       </Modal>
       <Modal visible={messagesVisible} animationType="slide" onRequestClose={() => setMessagesVisible(false)}>
         <SafeAreaView style={styles.detailSafe}>
@@ -927,19 +1171,102 @@ function NativeAppScreen() {
               <Text style={styles.detailBack}>Close</Text>
             </Pressable>
           </View>
-          <ScrollView contentContainerStyle={styles.detailContent}>
+          <ScrollView contentContainerStyle={styles.detailContent} keyboardShouldPersistTaps="handled">
             <Text style={styles.subtitle}>Messages for {crew.name}&apos;s assigned jobs.</Text>
             {!crewMessages.length ? <Text style={styles.mapEmpty}>No OMS messages yet.</Text> : null}
             {crewMessages.map((item) => (
-              <View key={item.id} style={styles.messageRow}>
+              <View key={item.id} style={[styles.messageRow, isOwnMessage(item) && styles.messageRowOwn]}>
                 <Text style={styles.messageBody}>{item.body}</Text>
-                <Text style={styles.messageMeta}>{item.sender} · {item.job_id} · {new Date(item.ts).toLocaleString()}</Text>
+                <Text style={styles.messageMeta}>{isOwnMessage(item) ? 'You' : item.sender} · {item.job_id} · {new Date(item.ts).toLocaleString()}</Text>
               </View>
             ))}
+            {isAuthenticated() && <MessageComposer jobs={liveJobs.filter((j) => !isJobDone(j))} onSent={reloadMessages} />}
           </ScrollView>
         </SafeAreaView>
       </Modal>
     </SafeAreaView>
+  );
+}
+
+// The crew writes to the control room. A message belongs to a job (the
+// operator reads it on that incident); with several jobs the crew picks one.
+// Online only: if it can't be sent the crew is told and the text stays.
+function MessageComposer({ jobs, jobId: fixedJobId, onSent }) {
+  const [jobId, setJobId] = useState(fixedJobId || jobs[0]?.id || null);
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState('');
+  useEffect(() => {
+    if (!fixedJobId && !jobs.some((j) => j.id === jobId)) setJobId(jobs[0]?.id || null);
+  }, [jobs, jobId, fixedJobId]);
+  if (!fixedJobId && !jobs.length) return <Text style={styles.assetValue}>Messages to the control room go with a job; you have no open job.</Text>;
+  const send = async () => {
+    const body = text.trim();
+    if (!body || !jobId || busy) return;
+    setBusy(true);
+    setStatus('');
+    try {
+      const res = await sendJobMessage(jobId, body);
+      if (res?.applied === false) {
+        setStatus(`Not sent: ${res.reason || 'not applied'}`);
+      } else {
+        setText('');
+        setStatus('Sent to the control room.');
+        onSent?.();
+      }
+    } catch (err) {
+      setStatus(isRetryable(err) ? 'No signal: message not sent. Try again once there is signal.' : `Not sent: ${err?.message || 'refused'}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <View style={styles.composer}>
+      <Text style={styles.sectionSmall}>MESSAGE THE CONTROL ROOM</Text>
+      {!fixedJobId && jobs.length > 1 && (
+        <View style={styles.composerJobs}>
+          {jobs.map((j) => (
+            <Pressable key={j.id} onPress={() => setJobId(j.id)} style={[styles.composerJob, jobId === j.id && styles.composerJobOn]}>
+              <Text style={[styles.composerJobText, jobId === j.id && styles.composerJobTextOn]}>{j.id}</Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
+      {!fixedJobId && jobs.length === 1 && <Text style={styles.messageMeta}>About {jobs[0].id} · {jobs[0].title}</Text>}
+      <TextInput
+        style={styles.composerInput}
+        value={text}
+        onChangeText={setText}
+        placeholder="Type a message to the OMS operator"
+        placeholderTextColor="#9aa8bb"
+        multiline
+        maxLength={1000}
+      />
+      <Pressable style={[styles.primaryBtn, (!text.trim() || busy) && { opacity: 0.5 }]} onPress={send} disabled={!text.trim() || busy}>
+        <Text style={styles.primaryBtnText}>{busy ? 'Sending…' : 'Send message'}</Text>
+      </Pressable>
+      {status ? <Text style={styles.assetValue}>{status}</Text> : null}
+    </View>
+  );
+}
+
+// OMS-03: the day's work order at a glance on the Dashboard; opens Today.
+function WorkOrderCard({ workOrder, jobs, date, onPress }) {
+  const summary = summarize(dayJobs(jobs, date));
+  const status = workOrder?.status || 'not_started';
+  const text = status === 'not_started'
+    ? 'Day not started. Tap to start your day.'
+    : status === 'started'
+      ? `${summary.done} of ${summary.total} jobs done today`
+      : 'Day ended.';
+  return (
+    <Pressable style={[styles.woCard, status === 'not_started' && styles.woCardTodo]} onPress={onPress} accessibilityRole="button" accessibilityLabel={`Today's work order. ${text}`}>
+      <View style={{ flex: 1 }}>
+        <Text style={styles.woCardTitle}>TODAY&apos;S WORK ORDER{workOrder?.pendingSync ? ' · WAITING TO SYNC' : ''}</Text>
+        <Text style={styles.woCardText}>{text}</Text>
+      </View>
+      <Text style={styles.woCardArrow}>›</Text>
+    </Pressable>
   );
 }
 
@@ -1224,7 +1551,7 @@ function JobCard({ job, onPress }) {
   );
 }
 
-function PhotoCamera({ onCapture, onClose }) {
+function PhotoCamera({ tag, onCapture, onClose }) {
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef(null);
   const [busy, setBusy] = useState(false);
@@ -1261,7 +1588,10 @@ function PhotoCamera({ onCapture, onClose }) {
 
   return (
     <View style={styles.photoCamera}>
-      <CameraView ref={cameraRef} style={styles.photoCameraPreview} facing="back" />
+      <View>
+        <CameraView ref={cameraRef} style={styles.photoCameraPreview} facing="back" />
+        {tag ? <Text style={styles.photoCameraTag} pointerEvents="none">{tag.toUpperCase()} · lat/long added</Text> : null}
+      </View>
       {error ? <Text style={styles.photoCameraError}>{error}</Text> : null}
       <View style={styles.photoCameraActions}>
         <Pressable style={styles.secondaryBtn} onPress={onClose} disabled={busy}>
@@ -1275,7 +1605,7 @@ function PhotoCamera({ onCapture, onClose }) {
   );
 }
 
-function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNavigate, onNavigateNative, notice, onDismissNotice }) {
+function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNavigate, onShowOnMap, onMessageSent, glimpse, onGlimpse, onDismissGlimpse, notice, onDismissNotice }) {
   const [showSafety, setShowSafety] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
   const [showPhotoCamera, setShowPhotoCamera] = useState(false);
@@ -1292,6 +1622,13 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
   const [advancing, setAdvancing] = useState(false);
   const [checklistDone, setChecklistDone] = useState(false);
   const [plannedMessage, setPlannedMessage] = useState('');
+  // Asking the control room to give this job to another crew.
+  const [reassign, setReassign] = useState(null); // the latest request from the server
+  const [reassignOpen, setReassignOpen] = useState(false);
+  const [reassignReason, setReassignReason] = useState('');
+  const [reassignBusy, setReassignBusy] = useState(false);
+  // Shown while the crew is too far from the site for On Site / Work Started.
+  const [siteMessage, setSiteMessage] = useState('');
   // The status button is at the bottom but the safety checklist / completion
   // steps it opens render near the top, so scroll them into view.
   const scrollRef = useRef(null);
@@ -1331,11 +1668,34 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
     getAssetScans(job.id).then((scans) => setAssetScans(Array.isArray(scans) ? scans : [])).catch(() => {});
   }, [job.id]);
 
+  // The crew opened the job: the dashboard shows they have seen it.
+  useEffect(() => {
+    if (!job.openedAt && isAuthenticated()) reportJobSeen(job.id, 'opened').catch(() => {});
+    getReassignRequest(job.id).then((r) => setReassign(r?.request || null)).catch(() => {});
+  }, [job.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const next = NEXT_STATUS[job.status];
 
   useEffect(() => {
     if (showSafety || completionStep) scrollRef.current?.scrollTo({ y: Math.max(0, flowY.current - 12), animated: true });
   }, [showSafety, completionStep]);
+
+  const sendReassign = async () => {
+    const reason = reassignReason.trim();
+    if (reason.length < 3 || reassignBusy) return;
+    setReassignBusy(true);
+    try {
+      const res = await requestReassignment(job.id, reason);
+      setReassign(res?.request || null);
+      setReassignOpen(false);
+      setReassignReason('');
+      setMessage(res?.duplicate ? 'You already asked; the control room has your request.' : 'Request sent. Keep working on the job until the control room reassigns it.');
+    } catch (err) {
+      setMessage(isRetryable(err) ? 'No signal: the request was not sent. Try again once there is signal.' : `Request refused: ${err?.message || 'unknown reason'}`);
+    } finally {
+      setReassignBusy(false);
+    }
+  };
 
   // OMS-01 gates for planned-outage jobs: Work Started needs the crew's own
   // isolation steps confirmed and the permit issued; Work Finished needs the
@@ -1349,6 +1709,15 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
 
   const requestAdvance = async () => {
     if (!next || !checklistDone) return;
+    // On Site / Work Started only at the site (the server checks it too).
+    if (SITE_STATUSES.includes(next) && !job.planned && job.coordinates) {
+      setAdvancing(true);
+      const here = await getLocation({ allowCached: false }).catch(() => ({}));
+      setAdvancing(false);
+      const blocked = siteBlock(job, next, here);
+      setSiteMessage(blocked || '');
+      if (blocked) return;
+    }
     if (plannedGated) {
       setPlannedMessage('');
       const view = await getPlannedOutage(job.id).catch(() => null);
@@ -1457,10 +1826,13 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
     setShowPhotoCamera(true);
   };
 
+  const stage = photoStage(job);
   const saveCapturedPhoto = async (photo) => {
     setUploading(true);
     try {
-      const result = await uploadCapturedPhoto(job.id, photo, assetId ? `Asset: ${assetId}` : undefined, crew);
+      const result = await uploadCapturedPhoto(job.id, photo, assetId ? `Asset: ${assetId}` : undefined, crew, stage);
+      const where = fmtLatLon(result?.location);
+      const tagged = `${PHOTO_STAGE_LABEL[stage]}${where ? ` · Lat/Long ${where}` : ''}`;
       if (result?.applied === false) {
         setMessage(`Photo not added to the job: ${result.reason || 'not applied'}. The control room can still see it.`);
         setShowPhotoCamera(false);
@@ -1469,9 +1841,9 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
       setPhotoCount((count) => count + 1);
       if (result?.queued) {
         onQueued?.();
-        setMessage(`No signal: photo ${photoCount + 1} of ${MAX_JOB_PHOTOS} saved on the phone. It uploads by itself once there is signal (see Pending sync).`);
+        setMessage(`No signal: photo ${photoCount + 1} of ${MAX_JOB_PHOTOS} saved on the phone (${tagged}). It uploads by itself once there is signal (see Pending sync).`);
       } else {
-        setMessage(`Photo ${photoCount + 1} of ${MAX_JOB_PHOTOS} stored as compressed WebP.`);
+        setMessage(`Photo ${photoCount + 1} of ${MAX_JOB_PHOTOS} stored (${tagged}).`);
       }
       setShowPhotoCamera(false);
     } catch (err) {
@@ -1562,6 +1934,7 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
       >
+        <GlimpseBanner glimpse={glimpse} onPress={onGlimpse} onDismiss={onDismissGlimpse} />
         <NoticeBanner notice={notice} onDismiss={onDismissNotice} />
         <Text style={[styles.jobTitle, { fontSize: 22 }]}>{job.title}</Text>
         <Text style={styles.address}>📍 {job.address}</Text>
@@ -1672,9 +2045,10 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
             )}
             {diagnosis && (
               <Text style={styles.completionSummaryLine}>
-                Cause: {diagnosis.cause} · Action: {diagnosis.action}
+                Symptom: {diagText(diagnosis, 'symptom')} · Cause: {diagText(diagnosis, 'cause')} · Action: {diagText(diagnosis, 'action')}
               </Text>
             )}
+            {diagnosis?.remarks ? <Text style={styles.completionSummaryLine}>Remarks: {diagnosis.remarks}</Text> : null}
             {partsUsed && partsUsed.length > 0 && (
               <Text style={styles.completionSummaryLine}>
                 Parts: {partsUsed.map((p) => `${p.name} ×${p.qty}`).join(', ')}
@@ -1707,15 +2081,9 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
           <Text style={styles.secondaryBtnText}>Navigate to site</Text>
         </Pressable>
         )}
-        {checklistDone && onNavigateNative && (
-        <Pressable style={styles.secondaryBtn} onPress={() => onNavigateNative(job)}>
-          <Text style={styles.secondaryBtnText}>Navigate (new map)</Text>
-        </Pressable>
-        )}
-
         {checklistDone && (
         <Pressable style={styles.secondaryBtn} onPress={loadMessages}>
-          <Text style={styles.secondaryBtnText}>Messages from OMS server</Text>
+          <Text style={styles.secondaryBtnText}>Messages with the control room</Text>
         </Pressable>
         )}
         {checklistDone && messagesOpen && (
@@ -1729,11 +2097,53 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
             {messagesLoading ? <Text style={styles.assetValue}>Fetching messages…</Text> : null}
             {!messagesLoading && !omsMessages.length ? <Text style={styles.assetValue}>No messages from OMS yet.</Text> : null}
             {omsMessages.map((item) => (
-              <View key={item.id} style={styles.messageRow}>
+              <View key={item.id} style={[styles.messageRow, isOwnMessage(item) && styles.messageRowOwn]}>
                 <Text style={styles.messageBody}>{item.body}</Text>
-                <Text style={styles.messageMeta}>{item.sender} · {new Date(item.ts).toLocaleString()}</Text>
+                <Text style={styles.messageMeta}>{isOwnMessage(item) ? 'You' : item.sender} · {new Date(item.ts).toLocaleString()}</Text>
               </View>
             ))}
+            {isAuthenticated() && !readOnly && (
+              <MessageComposer jobs={[job]} jobId={job.id} onSent={() => { loadMessages(); onMessageSent?.(); }} />
+            )}
+          </View>
+        )}
+
+        {checklistDone && isAuthenticated() && !readOnly && !isJobDone(job) && (
+          <View style={styles.reassignBox}>
+            {reassign?.status === 'open' ? (
+              <Text style={styles.assetValue}>
+                Reassignment requested {new Date(reassign.created_at).toLocaleTimeString()}: "{reassign.reason}". Waiting for the control room; keep working on the job until it is moved.
+              </Text>
+            ) : reassign?.status === 'dismissed' && !reassignOpen ? (
+              <Text style={styles.assetValue}>Your last reassignment request was declined{reassign.resolution ? `: ${reassign.resolution}` : ''}.</Text>
+            ) : null}
+            {reassign?.status !== 'open' && !reassignOpen && (
+              <Pressable style={styles.secondaryBtn} onPress={() => setReassignOpen(true)}>
+                <Text style={styles.secondaryBtnText}>Request reassignment</Text>
+              </Pressable>
+            )}
+            {reassignOpen && (
+              <>
+                <Text style={styles.sectionSmall}>ASK THE CONTROL ROOM TO GIVE THIS JOB TO ANOTHER CREW</Text>
+                <TextInput
+                  style={styles.composerInput}
+                  value={reassignReason}
+                  onChangeText={setReassignReason}
+                  placeholder="Reason (e.g. no ladder for this pole, vehicle breakdown)"
+                  placeholderTextColor="#9aa8bb"
+                  multiline
+                  maxLength={500}
+                />
+                <View style={styles.reassignRow}>
+                  <Pressable style={[styles.secondaryBtn, { flex: 1 }]} onPress={() => setReassignOpen(false)} disabled={reassignBusy}>
+                    <Text style={styles.secondaryBtnText}>Cancel</Text>
+                  </Pressable>
+                  <Pressable style={[styles.primaryBtn, { flex: 2 }, (reassignReason.trim().length < 3 || reassignBusy) && { opacity: 0.5 }]} onPress={sendReassign} disabled={reassignReason.trim().length < 3 || reassignBusy}>
+                    <Text style={styles.primaryBtnText}>{reassignBusy ? 'Sending…' : 'Send request'}</Text>
+                  </Pressable>
+                </View>
+              </>
+            )}
           </View>
         )}
 
@@ -1743,6 +2153,22 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
           {assetId ? <Text style={styles.assetValue}>Attached asset: {assetId}</Text> : null}
           {assetDetails ? <Text style={styles.assetValue}>QR details: {JSON.stringify(assetDetails)}</Text> : null}
           <Text style={styles.assetValue}>Saved scans: {assetScans.length}</Text>
+          {assetScans.map((scan) => {
+            const where = fmtLatLon({ lat: Number(scan.lat), lon: Number(scan.lon) });
+            return (
+              <View key={scan.id} style={styles.scanRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.scanTitle}>{scan.asset_id || scan.assetId}{scan.pending ? ' · waiting to sync' : ''}</Text>
+                  <Text style={styles.messageMeta}>{where ? `Lat/Long ${where}` : 'No position'}{scan.scanned_at ? ` · ${new Date(scan.scanned_at).toLocaleString()}` : ''}</Text>
+                </View>
+                {where && onShowOnMap ? (
+                  <Pressable style={styles.scanMapBtn} onPress={() => onShowOnMap({ lat: Number(scan.lat), lon: Number(scan.lon), title: `Asset ${scan.asset_id || scan.assetId}`, lines: [`Scanned for ${job.id}`] })}>
+                    <Text style={styles.scanMapBtnText}>Show on map</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            );
+          })}
           <Pressable style={[styles.secondaryBtn, readOnly && { opacity: 0.5 }]} onPress={() => setShowScanner(true)} disabled={assetScanSaving || readOnly}>
             <Text style={styles.secondaryBtnText}>Scan QR asset tag</Text>
           </Pressable>
@@ -1760,14 +2186,22 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
 
         {checklistDone && (
         <Pressable style={[styles.secondaryBtn, readOnly && { opacity: 0.5 }]} onPress={takePhoto} disabled={uploading || photoCount >= MAX_JOB_PHOTOS || readOnly}>
-          <Text style={styles.secondaryBtnText}>{uploading ? 'Compressing and storing…' : `Open camera (${photoCount}/${MAX_JOB_PHOTOS})`}</Text>
+          <Text style={styles.secondaryBtnText}>{uploading ? 'Compressing and storing…' : `Open camera · ${PHOTO_STAGE_LABEL[stage]} (${photoCount}/${MAX_JOB_PHOTOS})`}</Text>
         </Pressable>
         )}
-        {checklistDone && showPhotoCamera && <PhotoCamera onCapture={saveCapturedPhoto} onClose={() => setShowPhotoCamera(false)} />}
+        {checklistDone && showPhotoCamera && <PhotoCamera tag={PHOTO_STAGE_LABEL[stage]} onCapture={saveCapturedPhoto} onClose={() => setShowPhotoCamera(false)} />}
         {message ? <Text style={styles.assetValue}>{message}</Text> : null}
 
         {checklistDone && job.planned && <PlannedOutagePanel job={job} />}
         {plannedMessage ? <Text style={styles.plannedGate}>{plannedMessage}</Text> : null}
+        {siteMessage ? (
+          <View style={styles.siteBlock}>
+            <Text style={styles.siteBlockText}>{siteMessage}</Text>
+            <Pressable style={styles.secondaryBtn} onPress={() => onNavigate(job)}>
+              <Text style={styles.secondaryBtnText}>Navigate to site</Text>
+            </Pressable>
+          </View>
+        ) : null}
         {checklistDone && job.status === 'On Site' && photoCount < 1 && (
           <View style={styles.checklistLock}>
             <Text style={styles.checklistLockText}>
@@ -1792,352 +2226,7 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
   );
 }
 
-function formatMb(bytes) {
-  return `${Math.max(1, Math.round((bytes || 0) / 1048576))} MB`;
-}
-
-function MapScreen({ jobs, selectedJobId, onSelect, crew, navJobId, onExitNav }) {
-  // Navigation mode: only the job being navigated to is shown and selected.
-  const navJob = navJobId ? jobs.find((job) => job.id === navJobId) || null : null;
-  const visibleJobs = navJob ? [navJob] : jobs;
-  const selectedJob = navJob || jobs.find((job) => job.id === selectedJobId);
-  const selectedId = selectedJob?.id;
-  const mapRef = useRef(null);
-  const [lastSyncedAt, setLastSyncedAt] = useState(null);
-  const [mapLocation, setMapLocation] = useState(null);
-  const [pack, setPack] = useState(null);
-  const [packStatus, setPackStatus] = useState(getPackStatus);
-  const [routing, setRouting] = useState(false);
-  const [online, setOnline] = useState(true);
-
-  useEffect(() => {
-    Network.getNetworkStateAsync().then((state) => setOnline(isOnlineState(state))).catch(() => {});
-    const subscription = Network.addNetworkStateListener((state) => setOnline(isOnlineState(state)));
-    return () => subscription.remove();
-  }, []);
-
-  useEffect(() => {
-    getJobsLastSyncedAt().then(setLastSyncedAt).catch(() => {});
-    getInstalledPack().then(setPack).catch(() => {});
-    let lastPhase = getPackStatus().phase;
-    return subscribePackStatus((next) => {
-      setPackStatus(next);
-      // Re-read on phase changes so the map picks up a newly-activated pack
-      // (first tiles of a fresh install, or a completed upgrade).
-      if (next.phase !== lastPhase) getInstalledPack().then(setPack).catch(() => {});
-      lastPhase = next.phase;
-    });
-  }, []);
-
-  // Live GPS dot while the map is open. GPS needs no internet; falls back
-  // to the last cached fix, then the crew record from the server.
-  useEffect(() => {
-    let sub = null;
-    let cancelled = false;
-    getLastKnownLocation().then((cached) => {
-      if (cancelled) return;
-      if (Number.isFinite(cached.lat) && Number.isFinite(cached.lon)) setMapLocation((cur) => cur || cached);
-      else if (Number.isFinite(Number(crew?.lat)) && Number.isFinite(Number(crew?.lon))) {
-        setMapLocation((cur) => cur || { lat: Number(crew.lat), lon: Number(crew.lon) });
-      }
-    }).catch(() => {});
-    Location.requestForegroundPermissionsAsync()
-      .then(({ status }) => {
-        if (cancelled || status !== 'granted') return null;
-        return Location.watchPositionAsync(
-          { accuracy: Location.Accuracy.High, timeInterval: 5000, distanceInterval: 10 },
-          (pos) => setMapLocation({
-            lat: pos.coords.latitude,
-            lon: pos.coords.longitude,
-            accuracy: pos.coords.accuracy,
-            // lets the map point the crew arrow the way they are driving
-            heading: pos.coords.heading,
-            speed: pos.coords.speed,
-          })
-        );
-      })
-      .then((subscription) => {
-        if (cancelled) subscription?.remove();
-        else sub = subscription;
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-      sub?.remove();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const mapJobs = useMemo(
-    () => visibleJobs
-      .filter((job) => Number.isFinite(job.coordinates?.lat) && Number.isFinite(job.coordinates?.lon))
-      .map((job) => ({
-        id: job.id,
-        title: `${job.title} · ${job.id}`,
-        lat: job.coordinates.lat,
-        lon: job.coordinates.lon,
-        color: severityColors[job.severity] || severityColors.Critical,
-        selected: job.id === selectedId,
-      })),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [jobs, navJobId, selectedId]
-  );
-
-  const hasLocation = Number.isFinite(mapLocation?.lat) && Number.isFinite(mapLocation?.lon);
-  const downloading = packStatus.phase === 'downloading' || packStatus.phase === 'checking';
-  const canDownload = canUseMapServer() && !downloading;
-
-  // In navigation mode the map follows the crew, keeping both them and the
-  // site in view, until they pan the map themselves ("Show route" resumes).
-  const [following, setFollowing] = useState(Boolean(navJobId));
-  useEffect(() => {
-    setFollowing(Boolean(navJobId));
-  }, [navJobId]);
-
-  // A marker tap or arriving from "Navigate to site": frame both the crew and
-  // the job so the dashed guide line shows the whole way there.
-  useEffect(() => {
-    if (selectedId) mapRef.current?.fit('guide');
-  }, [selectedId]);
-
-  useEffect(() => {
-    if (navJob && following && hasLocation) mapRef.current?.fit('guide');
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mapLocation, following]);
-
-  const showRoute = () => {
-    setFollowing(Boolean(navJob));
-    mapRef.current?.fit('guide');
-  };
-
-  const guide = selectedJob ? distanceAndDirection(mapLocation, selectedJob.coordinates) : null;
-
-  // Road route to the selected job: from the server when online, else from
-  // the road graph on the phone. Recomputed when the crew has moved ~75 m,
-  // the job changes, or connectivity changes.
-  const [route, setRoute] = useState(null);
-  // Metres left along the road from where the map draws the crew arrow, so the
-  // readout counts down while driving (null when off the route or none yet).
-  const [routeLeft, setRouteLeft] = useState(null);
-  const routeRequest = useRef({ seq: 0, key: null, from: null });
-  useEffect(() => {
-    preloadRoadGraph(pack?.roadsUri);
-  }, [pack?.roadsUri]);
-  const target = selectedJob?.coordinates;
-  useEffect(() => {
-    const req = routeRequest.current;
-    if (!selectedId || !hasLocation || !Number.isFinite(target?.lat) || !Number.isFinite(target?.lon)) {
-      req.key = null;
-      setRoute(null);
-      return;
-    }
-    const key = `${selectedId}|${online}|${pack?.roadsUri || ''}`;
-    const moved = req.from ? distanceAndDirection(req.from, mapLocation)?.meters ?? Infinity : Infinity;
-    if (key === req.key && moved < 75) return;
-    if (key !== req.key) setRoute(null); // never show another job's route
-    req.key = key;
-    req.from = { lat: mapLocation.lat, lon: mapLocation.lon };
-    const seq = ++req.seq;
-    getRoadRoute(req.from, target, { online, roadsUri: pack?.roadsUri })
-      .then((next) => {
-        if (seq === routeRequest.current.seq) setRoute(next);
-      })
-      .catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, target?.lat, target?.lon, mapLocation, online, pack?.roadsUri]);
-
-  // Live "x km to go": the map's figure while the crew is on the route, else
-  // the length of the whole route as last computed.
-  const roadLeft = route ? (Number.isFinite(routeLeft) ? routeLeft : route.meters) : null;
-  const arrived = Boolean(selectedJob) && ((route && Number.isFinite(routeLeft) && routeLeft < 30) || (guide && guide.meters < 40));
-
-  // Frame the route the first time it arrives for a job.
-  const framedRouteFor = useRef(null);
-  useEffect(() => {
-    if (route && framedRouteFor.current !== selectedId) {
-      framedRouteFor.current = selectedId;
-      mapRef.current?.fit('guide');
-    }
-  }, [route, selectedId]);
-
-  const startDownload = () => {
-    downloadPack().catch(() => {}); // errors surface through packStatus
-  };
-
-  const startMultiJobRoute = async () => {
-    setRouting(true);
-    try {
-      await openMultiJobRoute(jobs);
-    } finally {
-      setRouting(false);
-    }
-  };
-
-  let packLine;
-  if (pack?.web) {
-    packLine = 'Online map · needs internet (the offline map is in the phone app)';
-  } else if (downloading) {
-    packLine = packStatus.total
-      ? `Downloading offline map · ${Math.floor((packStatus.done / packStatus.total) * 100)}% (${packStatus.done}/${packStatus.total} tiles)`
-      : 'Checking for offline map…';
-  } else if (packStatus.phase === 'error') {
-    packLine = packStatus.error;
-  } else if (pack?.complete) {
-    packLine = `Offline map ready · ${(pack.regions || []).filter((r) => r.id !== 'corridor').map((r) => r.name).join(', ') || 'service area'} · works without internet`;
-  } else if (pack) {
-    packLine = 'Offline map partially downloaded — resume to finish.';
-  } else {
-    packLine = canUseMapServer()
-      ? 'Offline map not downloaded yet. Download it on Wi-Fi before heading out.'
-      : 'Sign in to download the offline map.';
-  }
-
-  return (
-    <View>
-      <Text style={styles.title}>{navJob ? 'Navigating to site' : 'Outage map'}</Text>
-      <Text style={styles.subtitle}>
-        {hasLocation
-          ? `Your position ${mapLocation.lat.toFixed(4)}, ${mapLocation.lon.toFixed(4)}`
-          : lastSyncedAt
-            ? `Job locations cached ${timeAgo(lastSyncedAt)}`
-            : 'Waiting for GPS fix…'}
-      </Text>
-
-      <View style={styles.offlineBadgeRow}>
-        <View style={[styles.offlineDot, pack?.complete ? styles.offlineDotOn : styles.offlineDotOff]} />
-        <Text style={styles.offlineBadgeText}>{packLine}</Text>
-      </View>
-      {downloading && packStatus.total > 0 && (
-        <View style={styles.packProgressTrack}>
-          <View style={[styles.packProgressFill, { width: `${(packStatus.done / packStatus.total) * 100}%` }]} />
-        </View>
-      )}
-      {!pack?.complete && canDownload && (
-        <Pressable style={styles.routeAllBtn} onPress={startDownload}>
-          <Text style={styles.routeAllBtnText}>
-            {pack ? 'Resume offline map download' : 'Download offline map (Dehradun · Rishikesh · Haridwar)'}
-          </Text>
-        </Pressable>
-      )}
-      {downloading && (
-        <Pressable style={[styles.mapControlButton, styles.packPauseBtn]} onPress={cancelPackDownload}>
-          <Text style={styles.mapControlText}>Pause download</Text>
-        </Pressable>
-      )}
-
-      {pack?.complete && !pack.web && !pack.roadsUri && canDownload && (
-        <Pressable style={styles.routeAllBtn} onPress={startDownload}>
-          <Text style={styles.routeAllBtnText}>Download offline road directions</Text>
-        </Pressable>
-      )}
-
-      {!navJob && jobs.length > 1 && (
-        <Pressable style={styles.routeAllBtn} disabled={routing} onPress={startMultiJobRoute}>
-          <Text style={styles.routeAllBtnText}>
-            {routing ? 'Opening route…' : `Route all ${jobs.length} jobs (turn-by-turn)`}
-          </Text>
-        </Pressable>
-      )}
-
-      <View style={styles.mapPanel}>
-        <OfflineMap
-          ref={mapRef}
-          pack={pack}
-          crew={mapLocation}
-          jobs={mapJobs}
-          route={route}
-          onSelectJob={onSelect}
-          onUserGesture={() => setFollowing(false)}
-          onRouteProgress={setRouteLeft}
-        />
-        <Text style={styles.mapLegend}>
-          ● You  ● {navJob ? (route ? 'Site  ━ Road route' : 'Site  - - Straight line to site') : 'Incidents (by severity)'}{pack?.complete && pack.totalBytes ? ` · ${formatMb(pack.totalBytes)} on device` : ''}
-        </Text>
-      </View>
-      <View style={styles.mapControls}>
-        <Pressable
-          style={styles.mapControlButton}
-          onPress={() => {
-            setFollowing(false);
-            mapRef.current?.fit('crew');
-          }}
-          disabled={!hasLocation}
-        >
-          <Text style={[styles.mapControlText, !hasLocation && styles.mapControlDisabled]}>Center on me</Text>
-        </Pressable>
-        {navJob ? (
-          <Pressable style={styles.mapControlButton} onPress={showRoute}>
-            <Text style={styles.mapControlText}>{following ? 'Following route' : 'Show route'}</Text>
-          </Pressable>
-        ) : (
-          <Pressable style={styles.mapControlButton} onPress={() => mapRef.current?.fit('jobs')} disabled={!mapJobs.length}>
-            <Text style={[styles.mapControlText, !mapJobs.length && styles.mapControlDisabled]}>Fit jobs</Text>
-          </Pressable>
-        )}
-      </View>
-      {selectedJob ? (
-        <View style={styles.mapSelectedCard}>
-          <Text style={styles.mapSelectedTitle}>{selectedJob.title}</Text>
-          <Text style={styles.mapSelectedMeta}>{selectedJob.id} · {selectedJob.address}</Text>
-          {arrived ? (
-            <Text style={[styles.mapGuideText, styles.mapArrivedText]}>You have reached the site</Text>
-          ) : route ? (
-            <Text style={styles.mapGuideText}>
-              {formatDistance(roadLeft)} to go · about {formatDuration(route.meters > 0 ? (route.seconds * roadLeft) / route.meters : route.seconds)}
-              {route.source === 'device' ? ' · offline directions' : ''}
-            </Text>
-          ) : guide ? (
-            <Text style={styles.mapGuideText}>
-              {guide.label} {guide.direction} of you (straight line{hasLocation && !pack?.roadsUri && !online ? ' — download road directions for a road route' : ''})
-            </Text>
-          ) : null}
-          {navJob ? (
-            <>
-              {!online && (
-                <View style={styles.mapOfflineNote}>
-                  <Text style={styles.mapOfflineNoteTitle}>No internet — the offline map still works</Text>
-                  <Text style={styles.mapOfflineNoteText}>Your position keeps updating without signal.</Text>
-                </View>
-              )}
-              <Pressable style={styles.secondaryBtn} onPress={() => navigateTo(selectedJob.address, selectedJob.coordinates)}>
-                <Text style={styles.secondaryBtnText}>
-                  {online ? 'Turn-by-turn in Google Maps' : 'Try Google Maps (works if this area is downloaded offline)'}
-                </Text>
-              </Pressable>
-              <Pressable style={styles.secondaryBtn} onPress={onExitNav}>
-                <Text style={styles.secondaryBtnText}>Show all incidents</Text>
-              </Pressable>
-            </>
-          ) : online ? (
-            <Pressable style={styles.primaryBtn} onPress={() => navigateTo(selectedJob.address, selectedJob.coordinates)}>
-              <Text style={styles.primaryBtnText}>Start turn-by-turn navigation</Text>
-            </Pressable>
-          ) : (
-            <>
-              <View style={styles.mapOfflineNote}>
-                <Text style={styles.mapOfflineNoteTitle}>No internet — follow the offline map</Text>
-                <Text style={styles.mapOfflineNoteText}>
-                  {hasLocation
-                    ? route
-                      ? 'Follow the blue road route to the site; your position keeps updating without signal.'
-                      : 'The dashed line points from you to the site. Use the streets on the map to get there; your position keeps updating without signal.'
-                    : 'Waiting for a GPS fix to show the way from you to the site.'}
-                </Text>
-              </View>
-              <Pressable style={styles.secondaryBtn} onPress={() => navigateTo(selectedJob.address, selectedJob.coordinates)}>
-                <Text style={styles.secondaryBtnText}>Try Google Maps (works if this area is downloaded offline)</Text>
-              </Pressable>
-            </>
-          )}
-        </View>
-      ) : (
-        <Text style={styles.mapEmpty}>Tap an incident marker to view its site.</Text>
-      )}
-    </View>
-  );
-}
-
-function ProfileScreen({ crew, jobs, onLogout, onOpenNativeMap }) {
+function ProfileScreen({ crew, jobs, onLogout }) {
   const activeJobs = jobs.filter((job) => !isJobDone(job));
   return (
     <View>
@@ -2161,9 +2250,6 @@ function ProfileScreen({ crew, jobs, onLogout, onOpenNativeMap }) {
         <Text style={styles.profileDetailLine}>Status: Ready for assignment</Text>
         <Text style={styles.profileDetailLine}>Session: Offline capable</Text>
       </View>
-      <Pressable style={styles.logoutBtn} onPress={onOpenNativeMap}>
-        <Text style={styles.logoutBtnText}>New map (test)</Text>
-      </Pressable>
       <Pressable style={styles.logoutBtn} onPress={onLogout}>
         <Text style={styles.logoutBtnText}>Sign out</Text>
       </Pressable>
@@ -2172,6 +2258,11 @@ function ProfileScreen({ crew, jobs, onLogout, onOpenNativeMap }) {
 }
 
 const styles = StyleSheet.create({
+  woCard: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 14, borderRadius: 12, backgroundColor: '#fff', borderWidth: 1, borderColor: '#e6ecf3', marginBottom: 12 },
+  woCardTodo: { borderColor: '#e0a33a', backgroundColor: '#fff8ec' },
+  woCardTitle: { fontSize: 11, fontWeight: '800', color: '#7c8da3', letterSpacing: 0.5 },
+  woCardText: { fontSize: 15, fontWeight: '700', color: '#0f1b2d', marginTop: 3 },
+  woCardArrow: { fontSize: 26, color: '#1F3864', fontWeight: '700' },
   plannedGate: { color: '#8A4B00', backgroundColor: '#FFF4E5', borderRadius: 10, padding: 10, marginTop: 10, fontSize: 14, fontWeight: '600' },
   loginSafe: { flex: 1, backgroundColor: '#10201d' },
   login: { flexGrow: 1, paddingHorizontal: 24, paddingTop: 48 },
@@ -2266,6 +2357,32 @@ const styles = StyleSheet.create({
   address: { color: '#7c8da3', fontSize: 13, marginTop: 4 },
   meta: { color: '#33465f', fontSize: 12, fontWeight: '600', marginTop: 13 },
   planLine: { color: '#33465f', fontSize: 12, fontWeight: '700', marginTop: 6 },
+  glimpse: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#1f6feb', marginHorizontal: 14, marginTop: 10, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, elevation: 4, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 6, shadowOffset: { width: 0, height: 2 } },
+  glimpseJob: { backgroundColor: '#c2410c' },
+  glimpseTitle: { color: '#fff', fontSize: 14, fontWeight: '800' },
+  glimpseText: { color: '#eaf2ff', fontSize: 12, marginTop: 2 },
+  glimpseClose: { color: '#fff', fontSize: 22, fontWeight: '700', paddingHorizontal: 4 },
+  mapNotice: { paddingHorizontal: 14, paddingTop: 8 },
+  cancelledDot: { backgroundColor: '#b42318' },
+  pendingDismiss: { borderWidth: 1, borderColor: '#d8b06a', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5 },
+  pendingDismissText: { color: '#8a5a00', fontSize: 12, fontWeight: '800' },
+  messageRowOwn: { backgroundColor: '#e8f7f1', borderColor: '#b5e3d2' },
+  composer: { gap: 8, marginTop: 6 },
+  composerJobs: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  composerJob: { borderWidth: 1, borderColor: '#c9d3e0', borderRadius: 14, paddingHorizontal: 10, paddingVertical: 5, backgroundColor: '#fff' },
+  composerJobOn: { backgroundColor: '#1F3864', borderColor: '#1F3864' },
+  composerJobText: { color: '#1F3864', fontSize: 12, fontWeight: '700' },
+  composerJobTextOn: { color: '#fff' },
+  composerInput: { backgroundColor: '#fff', borderWidth: 1.5, borderColor: '#c7d0dc', borderRadius: 8, padding: 10, fontSize: 14, color: '#0f1b2d', minHeight: 60, textAlignVertical: 'top' },
+  reassignBox: { gap: 8 },
+  reassignRow: { flexDirection: 'row', gap: 8 },
+  siteBlock: { backgroundColor: '#fdecea', borderRadius: 10, borderWidth: 1, borderColor: '#f3b8b2', padding: 12, gap: 8 },
+  siteBlockText: { color: '#8f2219', fontSize: 13, fontWeight: '700' },
+  scanRow: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#fff', borderRadius: 9, padding: 10, borderWidth: 1, borderColor: '#e6ecf3' },
+  scanTitle: { color: '#173355', fontSize: 13, fontWeight: '700' },
+  scanMapBtn: { borderWidth: 1, borderColor: '#6b3fa0', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 },
+  scanMapBtnText: { color: '#6b3fa0', fontSize: 12, fontWeight: '800' },
+  photoCameraTag: { position: 'absolute', left: 10, bottom: 10, color: 'rgba(255,255,255,0.7)', fontSize: 12, fontWeight: '700', textShadowColor: 'rgba(0,0,0,0.35)', textShadowRadius: 2 },
   noticeBanner: { backgroundColor: '#fdecea', borderRadius: 12, borderWidth: 1, borderColor: '#f3b8b2', padding: 14, marginBottom: 16, gap: 6 },
   noticeText: { color: '#8f2219', fontSize: 13, fontWeight: '700' },
   noticeDismiss: { color: '#b0554c', fontSize: 11, fontWeight: '600' },

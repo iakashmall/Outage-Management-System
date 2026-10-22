@@ -27,8 +27,9 @@ services:
     volumes:
       - redisdata:/data
 
-  # Login server. Browsers reach its login pages through Caddy (https://${OMS_HOST}:8443); 18080 is published on
-  # this server only (127.0.0.1), so the admin console is not reachable from the network.
+  # Login server. Browsers reach its login pages through Caddy (https://${OMS_HOST}:8443). 18080 is published on the
+  # network because the crew app signs in there; limit it in the firewall to the crew devices' network if you can
+  # (it also serves the admin console).
   keycloak:
     image: quay.io/keycloak/keycloak:24.0
     restart: unless-stopped
@@ -44,9 +45,7 @@ services:
       KC_HTTP_ENABLED: "true"
       KC_PROXY_HEADERS: xforwarded   # login pages are reached through Caddy (https)
     ports:
-      # The crew app signs in on http://<server>:18080. For phones to reach it, change this to "18080:8080"
-      # (and allow 18080 in the firewall only for the crew devices' network if you can).
-      - "127.0.0.1:18080:8080"
+      - "18080:8080"   # crew app sign-in: http://<server>:18080
     volumes:
       - ./infra/keycloak-realm.deploy.json:/opt/keycloak/data/import/realm.json:ro
       - ./infra/keycloak-theme/gridq:/opt/keycloak/themes/gridq:ro
@@ -83,6 +82,10 @@ services:
       SIMULATOR: "off"   # the simulator mixes fake crew GPS, alarms and calls into real data
       MAP_SERVER_URL: http://map-tunnel:8095
       OMS_PUBLIC_URL: https://${OMS_HOST:-localhost}:8443
+    ports:
+      # Crew app API: http://<server>:4000/api (job status, photos, QR scans). The web app goes through Caddy instead.
+      # Limit it in the firewall to the crew devices' network if you can; traffic is not encrypted.
+      - "4000:4000"
     extra_hosts:
       - "host.docker.internal:host-gateway"   # lets the backend reach a map server running on the server itself
     env_file:

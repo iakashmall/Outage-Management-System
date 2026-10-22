@@ -233,8 +233,10 @@ role and a `crew_id` claim in the realm (open item).
   `audit_log` (pre-existing; its immutability trigger lives only in a manual
   migration, `db/migrations/audit_log_immutable.sql`). Left unchanged on
   purpose. `job_reassignments` is not affected.
-- **Daily work order management is partial.** OMS-03's "manage daily work
-  orders" is not built. Work is managed per job, with the fields above.
+- **Daily work orders: crew app only.** The crew starts and ends its day in
+  the app's Today tab (see `docs/FAT_OMS-03_daily_work_orders.md`). The
+  control room can read every crew's day from `GET /api/work-orders`; the
+  dashboard has no screen for it yet.
 - **Hard-coded ports, from before OMS-03.** These were there before and are
   unchanged: backend `db.js`, `auth.js`, `index.js` (4000), Kafka, Redis,
   map proxy; `frontend/vite.config.js` and `frontend/src/lib/auth.js`; crew

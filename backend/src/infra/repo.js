@@ -365,14 +365,19 @@ export const repo = {
     ),
   // Available crews nearest an incident, using real PostGIS distance -- replaces
   // picking "any available crew" with a distance-ranked list.
-  nearestAvailableCrews: (incidentId, limit = 6) =>
+  // OMS-03: a crew may carry several jobs, so every on-shift crew is offered,
+  // idle ones first, then by distance; active_jobs lets the dispatcher see
+  // how busy each one is (same rule as the workload: open incidents only).
+  nearestOnShiftCrews: (incidentId, limit = 8) =>
     db.any(`
-      SELECT c.*, public.ST_Distance(c.geog, i.geog) AS meters_away
+      SELECT c.*, public.ST_Distance(c.geog, i.geog) AS meters_away,
+        (SELECT count(*)::int FROM jobs WHERE jobs.crew_id = c.id
+           AND (jobs.status IS NULL OR jobs.status NOT IN (${INACTIVE_SQL})) AND ${OPEN_INCIDENT_SQL}) AS active_jobs
       FROM crews c, incidents i
       WHERE i.id = $1
-        AND c.status = 'available'
+        AND c.on_shift IS NOT FALSE AND c.status <> 'off_shift'
         AND c.geog IS NOT NULL AND i.geog IS NOT NULL
-      ORDER BY meters_away
+      ORDER BY (c.status = 'available') DESC, meters_away
       LIMIT $2
     `, [incidentId, limit]),
   // ---- alarms
@@ -459,6 +464,27 @@ export const repo = {
       : { row: await db.one('SELECT * FROM job_completions WHERE client_request_id=$1', [c.client_request_id]), created: false };
   },
   jobCompletions: (jobId) => db.any('SELECT * FROM job_completions WHERE job_id=$1 ORDER BY received_at DESC', [jobId]),
+
+  // ---- OMS-03 daily work orders (work_date comes back as 'YYYY-MM-DD')
+  workOrder: (crewId, date) => db.oneOrNone(`SELECT *, to_char(work_date, 'YYYY-MM-DD') AS work_date
+    FROM daily_work_orders WHERE crew_id=$1 AND work_date=$2`, [crewId, date]),
+  workOrdersOn: (date) => db.any(`SELECT *, to_char(work_date, 'YYYY-MM-DD') AS work_date
+    FROM daily_work_orders WHERE work_date=$1 ORDER BY crew_id`, [date]),
+  // { row, created }: created false when the crew's day was already started.
+  startWorkOrder: async (w) => {
+    const row = await db.oneOrNone(`INSERT INTO daily_work_orders
+      (id,crew_id,work_date,status,members,start_checks,start_note,started_at,started_by,start_lat,start_lon,start_client_id)
+      VALUES ($/id/,$/crew_id/,$/work_date/,'started',$/members:json/,$/start_checks:json/,$/start_note/,$/started_at/,$/started_by/,$/start_lat/,$/start_lon/,$/start_client_id/)
+      ON CONFLICT DO NOTHING RETURNING id`, w);
+    return { row: await repo.workOrder(w.crew_id, w.work_date), created: !!row };
+  },
+  // Lands only while the day is still open, so two closes can't both win.
+  closeWorkOrderIf: async (id, c) => {
+    const row = await db.oneOrNone(`UPDATE daily_work_orders SET status='closed', closed_at=$/closed_at/, closed_by=$/closed_by/,
+      close_remarks=$/close_remarks/, close_sign_off=$/close_sign_off:json/, close_snapshot=$/close_snapshot:json/, close_client_id=$/close_client_id/
+      WHERE id=$/id/ AND status='started' RETURNING crew_id, to_char(work_date, 'YYYY-MM-DD') AS work_date`, { ...c, id });
+    return row ? repo.workOrder(row.crew_id, row.work_date) : null;
+  },
   addAssetScan: async (scan) => {
     await db.none(
       `INSERT INTO asset_scans
@@ -477,6 +503,41 @@ export const repo = {
      WHERE j.incident_id = $1 ORDER BY s.scanned_at DESC`,
     [incidentId]
   ),
+  recentAssetScans: (days) => db.any(
+    `SELECT s.*, j.incident_id FROM asset_scans s JOIN jobs j ON s.job_id = j.id
+     WHERE s.not_applied_reason IS NULL AND s.lat IS NOT NULL AND s.lon IS NOT NULL
+       AND s.scanned_at > now() - make_interval(days => $1)
+     ORDER BY s.scanned_at DESC LIMIT 2000`,
+    [days]
+  ),
+
+  // ---- crew reassignment requests
+  addReassignRequest: (r) => db.one(
+    `INSERT INTO reassign_requests (id, job_id, incident_id, crew_id, reason) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+    ['RRQ-' + nanoid(10), r.job_id, r.incident_id ?? null, r.crew_id, r.reason]
+  ),
+  openReassignRequestForJob: (jobId) =>
+    db.oneOrNone(`SELECT * FROM reassign_requests WHERE job_id=$1 AND status='open' ORDER BY created_at DESC LIMIT 1`, [jobId]),
+  latestReassignRequestForJob: (jobId) =>
+    db.oneOrNone(`SELECT * FROM reassign_requests WHERE job_id=$1 ORDER BY created_at DESC LIMIT 1`, [jobId]),
+  // status null = every request (newest first), else only that status.
+  reassignRequests: (status) => db.any(
+    `SELECT r.*, j.status AS job_status, c.name AS crew_name FROM reassign_requests r
+     LEFT JOIN jobs j ON j.id = r.job_id LEFT JOIN crews c ON c.id = r.crew_id
+     WHERE ($1::text IS NULL OR r.status = $1) ORDER BY r.created_at DESC LIMIT 200`,
+    [status]
+  ),
+  resolveReassignRequest: (id, status, by, resolution) => db.oneOrNone(
+    `UPDATE reassign_requests SET status=$2, resolved_at=now(), resolved_by=$3, resolution=$4
+     WHERE id=$1 AND status='open' RETURNING *`,
+    [id, status, by, resolution ?? null]
+  ),
+  resolveReassignRequestsForJob: (jobId, status, by, resolution) => db.any(
+    `UPDATE reassign_requests SET status=$2, resolved_at=now(), resolved_by=$3, resolution=$4
+     WHERE job_id=$1 AND status='open' RETURNING *`,
+    [jobId, status, by, resolution ?? null]
+  ),
+
   addCrewLocation: async (crewId, lat, lon) =>
     db.one(
       `INSERT INTO crew_locations (crew_id, lat, lon) VALUES ($1, $2, $3)

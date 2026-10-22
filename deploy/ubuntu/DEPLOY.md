@@ -21,7 +21,8 @@ Other apps on the server (HRMS, Caddy on ports 80/443, tile server) are not touc
 | Status | `docker compose -f docker-compose.deploy.yml ps` |
 | Update after new code | `docker compose -f docker-compose.deploy.yml up -d --build` |
 | Stop | `docker compose -f docker-compose.deploy.yml down` |
-| Wipe demo data | `docker compose -f docker-compose.deploy.yml down -v` |
+| Back up the databases | `bash deploy/ubuntu/backup-db.sh` (see **Backups**) |
+| Wipe ALL data (photos, scans, logins too) | `docker compose -f docker-compose.deploy.yml down -v` (never on a live server) |
 
 Optional settings (map server, e-mail, reports): create `backend/.env.deploy` with `MAP_*`, `BREVO_*`, `NOTIFY_*`,
 `REPORT_*` lines, then run the update command. The map falls back to OpenStreetMap (needs internet).
@@ -47,13 +48,42 @@ The crew app talks to the server over **plain HTTP** on two ports:
 - **4000**: the OMS backend API.
 - **18080**: Keycloak, for sign-in.
 
-**This compose does not publish 4000**, and it publishes 18080 on `127.0.0.1` only, so phones can reach neither
-as shipped. The web app is not affected: it goes through Caddy on 8443. To use the crew app against this
-server:
-- In `docker-compose.deploy.yml`, add `ports: ["4000:4000"]` to `oms-backend` and change Keycloak's port to
-  `"18080:8080"`.
+`docker-compose.deploy.yml` publishes both on the network. The web app does not use them: it goes through Caddy on 8443.
 - Limit both in the firewall to the crew devices' network if you can. Traffic on these ports is not encrypted, and
   18080 also serves Keycloak's admin console.
+- Build the APK with `EXPO_PUBLIC_OMS_SERVER=<server-ip>`, or type the server IP on the app's sign-in screen.
+- One crew login works on one phone at a time: signing in on a second phone signs the first one out (within 5
+  minutes). Set it up once (and again only if the realm is re-imported):
+  ```bash
+  docker run --rm --network host -v "$PWD/backend:/app" -w /app \
+    -e KEYCLOAK_URL=http://127.0.0.1:18080 -e KEYCLOAK_ADMIN_PASSWORD="$OMS_KC_ADMIN_PASSWORD" \
+    node:20-alpine node scripts/setup-crew-session-limit.mjs
+  ```
+  It only changes the sign-in flow for `field_crew` users; operators and passwords are not touched.
+- Photos and QR scans go straight into the `oms` database (table `job_photos`, about 100-200 KB per photo, and
+  `asset_scans`). Taken offline, they wait on the phone and upload when it is back online.
+
+## Backups
+Everything the OMS keeps, including every crew photo and QR asset scan, is in the `pgdata` volume. Keep it:
+- Never run `down -v`, and always use this folder's `docker-compose.deploy.yml` (project name `oms`); another
+  project name starts with a new, empty volume.
+- Back up nightly with `deploy/ubuntu/backup-db.sh`. It saves `oms_<date>.dump` and `keycloak_<date>.dump` to
+  `~/oms-backups` (set `OMS_BACKUP_DIR` to change) and deletes backups older than 14 days (`OMS_BACKUP_KEEP_DAYS`).
+  It needs no passwords. Add it to cron (`crontab -e`):
+  ```
+  30 2 * * * bash /path/to/OMS-deploy/deploy/ubuntu/backup-db.sh >> $HOME/oms-backups/backup.log 2>&1
+  ```
+- Copy `~/oms-backups` to another machine regularly; a backup on the same disk is lost with the disk.
+- Restore (into an empty `oms` database, with the backend stopped):
+  ```bash
+  docker compose -f docker-compose.deploy.yml stop oms-backend
+  PG=$(docker compose -f docker-compose.deploy.yml ps -q postgres)
+  docker exec -i "$PG" psql -U oms -d postgres -c 'DROP DATABASE oms' -c 'CREATE DATABASE oms'
+  docker exec -i "$PG" psql -U oms -d oms -c 'CREATE EXTENSION IF NOT EXISTS timescaledb' -c 'SELECT timescaledb_pre_restore()'
+  docker exec -i "$PG" pg_restore -U oms -d oms --no-owner < ~/oms-backups/oms_<date>.dump
+  docker exec -i "$PG" psql -U oms -d oms -c 'SELECT timescaledb_post_restore()'
+  docker compose -f docker-compose.deploy.yml start oms-backend
+  ```
 
 ## Map server (in-house map on this same server)
 The map server listens on 127.0.0.1:8095 only, so the OMS reaches it through the tunnel-only login `mapdev`, as other

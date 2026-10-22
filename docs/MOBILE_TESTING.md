@@ -35,7 +35,11 @@ open TCP 4000 and 18080 inbound.
 cd backend
 npm run keycloak:mobile                         # crew password: crew123
 CREW_PASSWORD='Something-Better1' npm run keycloak:mobile
+npm run keycloak:session-limit                  # one phone per crew login
 ```
+
+`keycloak:session-limit` makes a second sign-in with the same crew login end
+the first phone's session (that phone stops syncing within 5 minutes).
 
 This is idempotent. It creates the `oms-mobile` client (public, PKCE), a
 `crew_id` token claim, the `field_crew` role, and six test crew logins:

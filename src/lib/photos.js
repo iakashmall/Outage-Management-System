@@ -1,7 +1,6 @@
 // src/lib/photos.js
-// expo-image-picker gives us the camera and returns base64 directly —
-// exactly what the upload endpoint wants.
-import * as ImagePicker from "expo-image-picker";
+// A photo from the in-app camera (expo-camera CameraView, base64) goes to the
+// upload endpoint with its GPS position, or into Pending Sync without signal.
 import { uploadJobPhoto } from "./api";
 import { getLocation } from "./location";
 import { isRetryable, queuePhoto } from "./offlineQueue";
@@ -21,7 +20,10 @@ async function uriToDataUrl(uri) {
   });
 }
 
-async function uploadCapturedPhoto(jobId, photo, note, technician = {}) {
+// stage: "work_started" | "work_finished": the server stamps it on the photo
+// (with the GPS position and time) as a light watermark. The answer carries
+// `location`, so the app can show where the photo was taken.
+async function uploadCapturedPhoto(jobId, photo, note, technician = {}, stage = null) {
   const loc = await getLocation({ allowCached: false });
   if (!Number.isFinite(loc.lat) || !Number.isFinite(loc.lon)) {
     throw new Error("Location not available. Photo was not uploaded. Enable GPS and try again.");
@@ -37,50 +39,20 @@ async function uploadCapturedPhoto(jobId, photo, note, technician = {}) {
     metadata: {
       technicianName: technician.name ?? null,
       cameraMode: "CameraView",
+      stage,
       width: photo.width ?? null,
       height: photo.height ?? null,
     },
   };
   try {
-    return await uploadJobPhoto(jobId, dataUrl, loc, note, { ...extra, capturedAt: new Date().toISOString() });
+    return { ...(await uploadJobPhoto(jobId, dataUrl, loc, note, { ...extra, capturedAt: new Date().toISOString() })), location: loc };
   } catch (err) {
     // No signal at the site: keep the photo for pending sync instead of
     // losing it. A photo the server refused is a real error.
     if (!isRetryable(err)) throw err;
     await queuePhoto(jobId, dataUrl, loc, note, extra);
-    return { queued: true };
+    return { queued: true, location: loc };
   }
 }
 
 export { uploadCapturedPhoto };
-
-export async function captureAndUpload(jobId, note, technician = {}) {
-  const perm = await ImagePicker.requestCameraPermissionsAsync();
-  if (!perm.granted) throw new Error("Camera permission denied");
-
-  const result = await ImagePicker.launchCameraAsync({
-    mediaTypes: ImagePicker.MediaType.Images,
-    base64: true,
-    exif: true,
-    quality: 0.5, // keep upload small
-  });
-  if (result.canceled) return null;
-
-  const asset = result.assets[0];
-  const dataUrl = "data:image/jpeg;base64," + asset.base64;
-  const loc = await getLocation({ allowCached: false });
-  if (!Number.isFinite(loc.lat) || !Number.isFinite(loc.lon)) {
-    throw new Error("Location not available. Photo was not uploaded. Enable GPS and try again.");
-  }
-  return uploadJobPhoto(jobId, dataUrl, loc, note, {
-    capturedAt: new Date().toISOString(),
-    technicianId: technician.id ?? null,
-    metadata: {
-      technicianName: technician.name ?? null,
-      cameraExif: asset.exif ?? {},
-      fileName: asset.fileName ?? null,
-      width: asset.width ?? null,
-      height: asset.height ?? null,
-    },
-  });
-}

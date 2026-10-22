@@ -66,6 +66,11 @@ export const api = {
   messages: (id) => req('GET', `/incidents/${id}/messages`),
   photos: (id) => req('GET', `/incidents/${id}/photos`),
   assetScans: (id) => req('GET', `/incidents/${id}/asset-scans`),
+  // Every crew QR scan of the last `days` days, for the network map's Asset scans layer.
+  recentAssetScans: (days = 7) => req('GET', `/asset-scans?days=${days}`),
+  // Crews asking for their job to go to another crew; granting = assign another crew.
+  reassignRequests: (all = false) => req('GET', `/reassign-requests${all ? '?status=all' : ''}`),
+  dismissReassignRequest: (id, note) => req('POST', `/reassign-requests/${id}/dismiss`, { note }),
   // OMS-03 crew job workflow: each crew job's lock state, completion form and
   // the photos/scans that reached it after it was locked.
   fieldReport: (id) => req('GET', `/incidents/${id}/field-report`),

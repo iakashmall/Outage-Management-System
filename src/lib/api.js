@@ -135,7 +135,16 @@ function normalizeOmsJob(job) {
     // that it is locked (read-only on the phone).
     locked: !!job.locked,
     undoUntil: job.undoUntil ?? null,
+    // OMS-03 daily work order: when a finished job was finished ("done today").
+    completedAt: job.completed_at ?? job.completedAt ?? null,
+    updatedAt: job.updated_at ?? job.updatedAt ?? null,
     coordinates: Number.isFinite(lat) && Number.isFinite(lon) ? { lat, lon } : null,
+    // Cancelled by the control room (the job, or its incident): the app lists
+    // it under Pending Sync instead of My Jobs.
+    cancelled: job.status === "Cancelled" || job.incident?.status === "cancelled",
+    // When the phone first received it / the crew first opened it (server time).
+    deliveredAt: job.delivered_at ?? null,
+    openedAt: job.opened_at ?? null,
   };
 }
 
@@ -236,6 +245,31 @@ export async function getCrewMessages(crewId) {
   return req(`/mobile/crews/${crewId}/messages`);
 }
 
+// POST /api/mobile/jobs/:id/messages { body } — the crew writes to the control
+// room on that job's incident thread. Online only (the crew sees it failed).
+export async function sendJobMessage(jobId, body) {
+  if (!(await isSignedIn())) throw Object.assign(new Error("Sign in to message the control room"), { status: 401 });
+  return req(`/mobile/jobs/${jobId}/messages`, "POST", { body });
+}
+
+// POST /api/mobile/jobs/:id/seen { event: 'delivered' | 'opened' } — first time only on the server.
+export async function reportJobSeen(jobId, event) {
+  if (!(await isSignedIn())) return null;
+  return req(`/mobile/jobs/${jobId}/seen`, "POST", { event, at: new Date().toISOString(), sentAt: new Date().toISOString() });
+}
+
+// The crew asks the control room to give this job to another crew.
+// POST /api/mobile/jobs/:id/reassign-request { reason } -> { request }
+export async function requestReassignment(jobId, reason) {
+  if (!(await isSignedIn())) throw Object.assign(new Error("Sign in to ask for a reassignment"), { status: 401 });
+  return req(`/mobile/jobs/${jobId}/reassign-request`, "POST", { reason });
+}
+
+export async function getReassignRequest(jobId) {
+  if (!(await isSignedIn())) return { request: null };
+  return req(`/mobile/jobs/${jobId}/reassign-request`);
+}
+
 export async function getJobPhotos(jobId) {
   return req(`/mobile/jobs/${jobId}/photos`);
 }
@@ -259,6 +293,40 @@ export async function postJobCompletion(jobId, form) {
 export async function reopenJob(jobId) {
   return req(`/mobile/jobs/${jobId}/reopen`, "POST", {});
 }
+
+// OMS-03 daily work order. All three answer { workOrder, jobs, summary };
+// start and close add { applied, reason? } (applied:false when the day was
+// already started / ended, or not started). Demo mode keeps the day on the
+// phone only. Signed out, start/close throw 401 like the completion form, so
+// a queued one stays queued until the crew signs in again.
+let demoWorkOrder = null;
+const demoDay = (crewId, date) => ({
+  workOrder: demoWorkOrder?.work_date === date ? demoWorkOrder : { id: `WO-${date.replace(/-/g, "")}-${crewId}`, crew_id: crewId, work_date: date, status: "not_started" },
+});
+
+// GET /api/mobile/crews/:crewId/work-order?date=YYYY-MM-DD
+export async function getWorkOrder(date) {
+  const { isAuthenticated, myCrewId } = await session();
+  if (!isAuthenticated()) return demoDay(DEMO_CREW.id, date);
+  return req(`/mobile/crews/${myCrewId()}/work-order?date=${encodeURIComponent(date)}`);
+}
+
+async function postWorkOrder(kind, form, crewId) {
+  const { isAuthenticated, myCrewId } = await session();
+  if (!isAuthenticated()) {
+    const day = demoDay(DEMO_CREW.id, form.date).workOrder;
+    demoWorkOrder = kind === "start"
+      ? { ...day, status: "started", started_at: form.startedAt, members: form.members, start_note: form.note }
+      : { ...day, status: "closed", closed_at: form.closedAt, close_remarks: form.remarks, close_sign_off: form.signOff, close_snapshot: { carriedOver: form.carryOver } };
+    return { applied: true, ...demoDay(DEMO_CREW.id, form.date) };
+  }
+  return req(`/mobile/crews/${crewId || myCrewId()}/work-order/${kind}`, "POST", { ...form, sentAt: new Date().toISOString() });
+}
+
+// POST /api/mobile/crews/:crewId/work-order/start  (lib/workOrder.js startPayload)
+export const startWorkOrder = (form, crewId) => postWorkOrder("start", form, crewId);
+// POST /api/mobile/crews/:crewId/work-order/close  (lib/workOrder.js closePayload)
+export const closeWorkOrder = (form, crewId) => postWorkOrder("close", form, crewId);
 
 export async function getAssetScans(jobId) {
   return req(`/mobile/jobs/${jobId}/assets/scans`);

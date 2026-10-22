@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { api } from '../lib/api.js';
-import { Icon, SevBadge, StatusBadge, timeAgo, hhmm, useLiveRefresh, toast } from '../lib/ui.jsx';
+import { api, socket } from '../lib/api.js';
+import { Icon, SevBadge, StatusBadge, timeAgo, hhmm, useLiveRefresh, toast, crewBusyText } from '../lib/ui.jsx';
 import { Drawer, DrawerContent } from '../components/ui/drawer.jsx';
 import { currentUser } from '../lib/auth.js';
 
@@ -13,7 +13,7 @@ const SEVS = ['all', 'critical', 'high', 'medium', 'low'];
 // through their own states (notified, isolating, restoring ...).
 const STATS = ['all', 'open', 'dispatched', 'in_progress', 'pending', 'resolved', 'planned'];
 
-export default function Incidents({ openId, focusIncidentId, clearFocus } = {}) {
+export default function Incidents({ openId, focusIncidentId, clearFocus, showOnMap } = {}) {
   const [inc, setInc] = useState([]);
   const [sev, setSev] = useState('all');
   const [st, setSt] = useState('all');
@@ -84,7 +84,7 @@ export default function Incidents({ openId, focusIncidentId, clearFocus } = {}) 
         </table>
       </div>
 
-      {sel && <IncidentDrawer inc={sel} onClose={() => setSel(null)} onChange={refreshSel} />}
+      {sel && <IncidentDrawer inc={sel} onClose={() => setSel(null)} onChange={refreshSel} showOnMap={showOnMap} />}
       {showNew && <NewIncident onClose={() => setShowNew(false)} onCreated={(i) => { setShowNew(false); load(); open(i); }} />}
     </>
   );
@@ -106,7 +106,7 @@ function predictionText(p) {
   return `${p.transformers} transformers, ~${(p.customers_estimate || 0).toLocaleString()} customers (feeder-level)`;
 }
 
-function IncidentDrawer({ inc, onClose, onChange }) {
+function IncidentDrawer({ inc, onClose, onChange, showOnMap }) {
   const [busy, setBusy] = useState(false);
   const [nearest, setNearest] = useState([]);
   useEffect(() => { api.nearestCrews(inc.id).then(setNearest).catch(() => setNearest([])); }, [inc.id]);
@@ -141,7 +141,19 @@ function IncidentDrawer({ inc, onClose, onChange }) {
   };
   const doAssign = async (crewId) => {
     setBusy(true);
-    try { await api.assign(inc.id, crewId, 'Normal'); toast('Crew assigned'); onChange(); }
+    try { await api.assign(inc.id, crewId, 'Normal'); toast('Crew assigned'); onChange(); loadRequests(); }
+    catch (e) { toast(e.message, 'err'); } finally { setBusy(false); }
+  };
+  // A crew asking to be taken off this incident's job (crew app).
+  const [requests, setRequests] = useState([]);
+  const loadRequests = () => api.reassignRequests().then((all) => setRequests(all.filter((r) => r.incident_id === inc.id))).catch(() => setRequests([]));
+  useEffect(() => { loadRequests(); }, [inc.id]); // eslint-disable-line
+  useLiveRefresh(['crew.job.updated', 'oms.incident.updated'], loadRequests);
+  const doDismissRequest = async (r) => {
+    const note = window.prompt(`Decline ${r.crew_id}'s request? Optional note for the crew:`, '');
+    if (note === null) return;
+    setBusy(true);
+    try { await api.dismissReassignRequest(r.id, note); toast('Request declined - the crew was told to continue'); loadRequests(); onChange(); }
     catch (e) { toast(e.message, 'err'); } finally { setBusy(false); }
   };
   const [ertInput, setErtInput] = useState('');
@@ -225,18 +237,20 @@ function IncidentDrawer({ inc, onClose, onChange }) {
             </div>
           )}
 
+          <ReassignRequestPanel requests={requests} nearest={nearest} busy={busy} onAssign={doAssign} onDismiss={doDismissRequest} />
+          <CrewJobsPanel report={report} />
           <FieldReportPanel report={report} />
 
           {!inc.crew_id && ['open', 'dispatched'].includes(inc.status) && (
             <>
-              <div style={{ margin: '18px 0 8px' }} className="eyebrow">Assign crew - nearest first</div>
+              <div style={{ margin: '18px 0 8px' }} className="eyebrow">Assign crew - free crews first, then nearest</div>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 {nearest.map((c) => (
                   <button key={c.id} className="btn sm" disabled={busy} onClick={() => doAssign(c.id)}>
-                    {c.name} - {c.meters_away < 1000 ? `${Math.round(c.meters_away)} m` : `${(c.meters_away / 1000).toFixed(1)} km`}
+                    {c.name} - {c.meters_away < 1000 ? `${Math.round(c.meters_away)} m` : `${(c.meters_away / 1000).toFixed(1)} km`}{crewBusyText(c)}
                   </button>
                 ))}
-                {!nearest.length && <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>No crews available right now.</span>}
+                {!nearest.length && <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>No crews on shift right now.</span>}
               </div>
             </>
           )}
@@ -255,7 +269,7 @@ function IncidentDrawer({ inc, onClose, onChange }) {
           <MessagePanel incidentId={inc.id} />
         </div>
           <PhotoPanel incidentId={inc.id} />
-          <AssetScanPanel incidentId={inc.id} />
+          <AssetScanPanel incidentId={inc.id} showOnMap={showOnMap} />
       </DrawerContent>
     </Drawer>
   );
@@ -285,6 +299,65 @@ function NotAppliedChip({ reason }) {
 
 const RESTORED_LABEL = { yes: 'Yes', partial: 'Partly', no: 'No' };
 
+// Did the assigned crew get the job? Received = the crew's phone downloaded
+// it; Opened = the crew opened the job screen (crew app, first time only).
+function CrewJobsPanel({ report }) {
+  const live = report.filter((r) => r.job.crew_id && !['Work Complete', 'Cancelled', 'Closed'].includes(r.job.status));
+  if (!live.length) return null;
+  return (
+    <div style={{ margin: '18px 0 8px' }}>
+      <div className="eyebrow">Crew job</div>
+      {live.map(({ job }) => (
+        <div key={job.id} style={{ border: '1px solid var(--line-2)', borderRadius: 8, padding: '8px 10px', margin: '8px 0', fontSize: 13, display: 'grid', gap: 3 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}><b className="mono">{job.id} - {job.crew_id}</b><span>{job.status}</span></div>
+          <div>
+            {job.delivered_at
+              ? <span className="chip chip-ok">Received on phone {hhmm(job.delivered_at)}</span>
+              : <span className="chip chip-major" title="The crew's phone has not downloaded this job yet (app closed, no signal, or not signed in)">Not yet received by the crew's phone</span>}
+            {' '}
+            {job.opened_at
+              ? <span className="chip chip-ok">Opened by crew {hhmm(job.opened_at)}</span>
+              : job.delivered_at ? <span className="chip chip-minor">Not opened yet</span> : null}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Open crew requests to hand this incident's job to another crew. Granting
+// one = assigning another crew (the server then moves even a started job).
+function ReassignRequestPanel({ requests, nearest, busy, onAssign, onDismiss }) {
+  const open = requests.filter((r) => r.status === 'open');
+  if (!open.length) return null;
+  return (
+    <div style={{ margin: '18px 0 8px', border: '1px solid #f0b37e', background: '#fff6ec', borderRadius: 8, padding: '10px 12px' }}>
+      {open.map((r) => {
+        const others = nearest.filter((c) => c.id !== r.crew_id);
+        return (
+          <div key={r.id} style={{ display: 'grid', gap: 8 }}>
+            <div className="eyebrow" style={{ color: '#9a4b00' }}>Reassignment requested by {r.crew_name || r.crew_id} - {hhmm(r.created_at)}</div>
+            <div style={{ fontSize: 13.5 }}><b className="mono">{r.job_id}</b> ({r.job_status}): "{r.reason}"</div>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>Give the job to:</div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {others.map((c) => (
+                <button key={c.id} className="btn sm primary" disabled={busy} onClick={() => onAssign(c.id)}>
+                  {c.name} - {c.meters_away < 1000 ? `${Math.round(c.meters_away)} m` : `${(c.meters_away / 1000).toFixed(1)} km`}{crewBusyText(c)}
+                </button>
+              ))}
+              {!others.length && <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>No other crew on shift right now.</span>}
+              <button className="btn sm danger" disabled={busy} onClick={() => onDismiss(r)}>Decline - crew continues</button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Fault diagnosis answer; "Other" shows the reason the crew typed.
+const diagText = (d, key) => (d?.[key] === 'Other' && d[`${key}Other`] ? `Other: ${d[`${key}Other`]}` : d?.[key]);
+
 // The crew's completion form for each job of the incident (newest form
 // first), plus anything the crew sent after the job was locked.
 function FieldReportPanel({ report }) {
@@ -306,7 +379,9 @@ function FieldReportPanel({ report }) {
             {!c && <div style={{ opacity: 0.6, marginTop: 4 }}>No completion form sent (the crew app sends it from the next app version).</div>}
             {c && (
               <div style={{ display: 'grid', gap: 3, marginTop: 6 }}>
-                {c.diagnosis && <div><span style={{ opacity: 0.6 }}>Diagnosis:</span> {c.diagnosis.cause || '-'}{c.diagnosis.action ? ` - ${c.diagnosis.action}` : ''}</div>}
+                {c.diagnosis?.symptom && <div><span style={{ opacity: 0.6 }}>Symptom:</span> {diagText(c.diagnosis, 'symptom')}</div>}
+                {c.diagnosis && <div><span style={{ opacity: 0.6 }}>Diagnosis:</span> {diagText(c.diagnosis, 'cause') || '-'}{c.diagnosis.action ? ` - ${diagText(c.diagnosis, 'action')}` : ''}</div>}
+                {c.diagnosis?.remarks && <div><span style={{ opacity: 0.6 }}>Remarks:</span> {c.diagnosis.remarks}</div>}
                 <div><span style={{ opacity: 0.6 }}>Parts used:</span> {parts.length ? parts.map((x) => `${x.name} x${x.qty}`).join(', ') : 'none'}</div>
                 <div><span style={{ opacity: 0.6 }}>Supply restored:</span> {RESTORED_LABEL[c.restored] || 'not stated'}</div>
                 {c.sign_off && <div><span style={{ opacity: 0.6 }}>Signed off by:</span> {c.sign_off.name || '-'}{c.sign_off.signedAt ? ` at ${hhmm(c.sign_off.signedAt)}` : ''}</div>}
@@ -365,6 +440,12 @@ function MessagePanel({ incidentId }) {
 
   const load = () => api.messages(incidentId).then(setMsgs).catch(() => setMsgs([]));
   useEffect(() => { load(); }, [incidentId]); // eslint-disable-line
+  // New messages (from the crew app or another operator) appear as they arrive.
+  useEffect(() => {
+    const h = (m) => { if (m?.incident_id === incidentId) load(); };
+    socket.on('oms.message.posted', h);
+    return () => socket.off('oms.message.posted', h);
+  }, [incidentId]); // eslint-disable-line
 
   const send = async () => {
     if (!text.trim() || busy) return;
@@ -380,9 +461,9 @@ function MessagePanel({ incidentId }) {
       <div style={{ maxHeight: 220, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8, margin: '10px 0' }}>
         {msgs.length === 0 && <div style={{ fontSize: 13, opacity: 0.6 }}>No messages yet.</div>}
         {msgs.map((m) => (
-          <div key={m.id} style={{ background: '#f2f5f9', borderRadius: 8, padding: '8px 10px' }}>
+          <div key={m.id} style={{ background: m.sender_role === 'field_crew' ? '#fff4e0' : '#f2f5f9', borderRadius: 8, padding: '8px 10px', borderLeft: m.sender_role === 'field_crew' ? '3px solid #e08a1e' : 'none' }}>
             <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 2 }}>
-              {m.sender} - {m.sender_role} - {hhmm(m.ts)}
+              {m.sender_role === 'field_crew' ? `Crew (${m.sender})` : `${m.sender} - ${m.sender_role}`} - {hhmm(m.ts)}
             </div>
             <div style={{ fontSize: 14 }}>{m.body}</div>
           </div>
@@ -407,7 +488,7 @@ function MessagePanel({ incidentId }) {
 
 // Equipment the crew scanned on site (QR on poles, transformers, meters).
 // asset_details is whatever the QR code carried, if it was JSON.
-function AssetScanPanel({ incidentId }) {
+function AssetScanPanel({ incidentId, showOnMap }) {
   const [scans, setScans] = useState([]);
   const load = () => api.assetScans(incidentId).then(setScans).catch(() => setScans([]));
   useEffect(() => { load(); }, [incidentId]); // eslint-disable-line
@@ -433,9 +514,10 @@ function AssetScanPanel({ incidentId }) {
                 </div>
               )}
               {Number.isFinite(s.lat) && Number.isFinite(s.lon) && (
-                <a href={`https://www.openstreetmap.org/?mlat=${s.lat}&mlon=${s.lon}#map=18/${s.lat}/${s.lon}`} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>
-                  Scanned at {s.lat.toFixed(5)}, {s.lon.toFixed(5)}
-                </a>
+                <div style={{ fontSize: 12, marginTop: 4, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <span className="mono">Lat {s.lat.toFixed(6)}, Long {s.lon.toFixed(6)}</span>
+                  {showOnMap && <button className="btn sm" onClick={() => showOnMap({ kind: 'scan', id: s.id, lat: s.lat, lon: s.lon })}>Show on network map</button>}
+                </div>
               )}
             </div>
           );
@@ -444,6 +526,8 @@ function AssetScanPanel({ incidentId }) {
     </div>
   );
 }
+
+const STAGE_LABEL = { work_started: 'Work started', work_finished: 'Work finished' };
 
 function PhotoPanel({ incidentId }) {
   const [photos, setPhotos] = useState([]);
@@ -461,6 +545,7 @@ function PhotoPanel({ incidentId }) {
     });
   }).catch(() => setPhotos([]));
   useEffect(() => { load(); }, [incidentId]); // eslint-disable-line
+  useLiveRefresh(['crew.job.updated'], load);
 
   const openFull = (p) => {
     if (thumbs[p.id]) { setOpenPhoto({ ...p, data_url: thumbs[p.id] }); return; }
@@ -479,8 +564,9 @@ function PhotoPanel({ incidentId }) {
               key={p.id}
               onClick={() => openFull(p)}
               style={{ width: 84, height: 84, borderRadius: 8, overflow: 'hidden', cursor: 'pointer', background: '#f2f5f9', position: 'relative', border: '1px solid var(--line-2)' }}
-              title={`${meta.technicianName || p.technician_id || 'Unknown'} - ${hhmm(p.ts)}${p.not_applied_reason ? ` - not applied (${p.not_applied_reason})` : ''}`}
+              title={`${STAGE_LABEL[meta.stage] ? STAGE_LABEL[meta.stage] + ' - ' : ''}${meta.technicianName || p.technician_id || 'Unknown'} - ${hhmm(p.ts)}${Number.isFinite(p.lat) ? ` - ${p.lat.toFixed(6)}, ${p.lon.toFixed(6)}` : ''}${p.not_applied_reason ? ` - not applied (${p.not_applied_reason})` : ''}`}
             >
+              {STAGE_LABEL[meta.stage] && <span style={{ position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 1, background: 'rgba(15,27,45,.55)', color: '#fff', fontSize: 9, fontWeight: 700, textAlign: 'center', padding: '1px 0' }}>{STAGE_LABEL[meta.stage]}</span>}
               {p.not_applied_reason && <span className="chip chip-major" title={`Not applied - ${p.not_applied_reason}; kept for the record`} style={{ position: 'absolute', left: 2, top: 2, zIndex: 1, padding: '0 5px', fontSize: 10 }}>Late</span>}
               {thumbs[p.id] ? (
                 <img src={thumbs[p.id]} alt="Job photo" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
@@ -498,6 +584,8 @@ function PhotoPanel({ incidentId }) {
             <div style={{ fontSize: 13, marginBottom: 8 }}>
               <b>{(() => { const m = typeof openPhoto.metadata === 'string' ? JSON.parse(openPhoto.metadata) : (openPhoto.metadata || {}); return m.technicianName || openPhoto.technician_id || 'Unknown crew'; })()}</b>
               {' - '}{hhmm(openPhoto.ts)}
+              {(() => { const m = typeof openPhoto.metadata === 'string' ? JSON.parse(openPhoto.metadata) : (openPhoto.metadata || {}); return STAGE_LABEL[m.stage] ? <span className="chip chip-soft" style={{ marginLeft: 8 }}>{STAGE_LABEL[m.stage]}</span> : null; })()}
+              {Number.isFinite(openPhoto.lat) && Number.isFinite(openPhoto.lon) && <div className="mono" style={{ marginTop: 4 }}>Lat {openPhoto.lat.toFixed(6)}, Long {openPhoto.lon.toFixed(6)}</div>}
               {openPhoto.note && <div style={{ marginTop: 4, opacity: 0.8 }}>{openPhoto.note}</div>}
             </div>
             <button className="btn sm" onClick={() => setOpenPhoto(null)}>Close</button>

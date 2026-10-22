@@ -48,10 +48,14 @@ export async function postJobCompletion(id, form) {
 }
 export async function updateJobStatus(id, status) { return call({ type: "status", id, status }); }
 export async function uploadJobPhoto(id) { return call({ type: "photo", id }); }
-export async function saveAssetScan(id) { return call({ type: "scan", id }); }`,
+export async function saveAssetScan(id) { return call({ type: "scan", id }); }
+export async function startWorkOrder(form, crewId) { return call({ type: "wo-start", crewId, form }); }
+export async function closeWorkOrder(form, crewId) { return call({ type: "wo-close", crewId, form }); }`,
   'entry.js': `
 export * as queue from "./offlineQueue.js";
 export * as jobFlow from "./jobFlow.js";
+export * as workOrder from "./workOrder.js";
+export * as woStore from "./workOrderStore.js";
 export { server } from "./api.js";
 export { __store } from "./fake-async-storage.js";`,
   // For the real api.js check.
@@ -69,6 +73,8 @@ mkdirSync(join(dir, 'real-api'));
 for (const [name, src] of Object.entries(FAKES)) writeFileSync(join(dir, name), src);
 copyFileSync(join(lib, 'offlineQueue.js'), join(dir, 'offlineQueue.js'));
 copyFileSync(join(lib, 'jobFlow.js'), join(dir, 'jobFlow.js'));
+copyFileSync(join(lib, 'workOrder.js'), join(dir, 'workOrder.js'));
+copyFileSync(join(lib, 'workOrderStore.js'), join(dir, 'workOrderStore.js'));
 copyFileSync(join(lib, 'api.js'), join(dir, 'real-api/api.js'));
 
 const esbuild = (entry, out, aliases) => execFileSync('npx', ['--yes', 'esbuild@0.28.2', entry, '--bundle', '--platform=node', '--format=esm',
@@ -76,7 +82,7 @@ const esbuild = (entry, out, aliases) => execFileSync('npx', ['--yes', 'esbuild@
 esbuild('entry.js', 'bundle.mjs', [['@react-native-async-storage/async-storage', './fake-async-storage.js'], ['expo-file-system', './fake-expo-fs.js']]);
 esbuild('real-api/entry.js', 'real-api.mjs', [['@react-native-async-storage/async-storage', './fake-async-storage.js'], ['react-native', './real-api/react-native.js']]);
 
-const { queue, jobFlow, server, __store } = await import(pathToFileURL(join(dir, 'bundle.mjs')).href);
+const { queue, jobFlow, workOrder, woStore, server, __store } = await import(pathToFileURL(join(dir, 'bundle.mjs')).href);
 const realApi = await import(pathToFileURL(join(dir, 'real-api.mjs')).href);
 
 let passed = 0, failed = 0;
@@ -180,6 +186,60 @@ try {
   server.signedIn = false;
   const queued = await queue.queueCompletion(JOB, f);
   check('demo mode (never signed in): the form is not queued', queued === false && (await queue.getQueueLength()) === 0);
+
+  console.log('Pending sync, OMS-03 daily work order');
+  const DAY = '2026-10-15';
+  const WO = workOrder.workOrderId('C003', DAY);
+  const start = workOrder.startPayload({ crewId: 'C003', date: DAY, members: ['Priya Singh'], checks: { vehicle: true, tools: true, ppe: true, firstAid: true }, at: new Date(5000) });
+  const close = workOrder.closePayload({ crewId: 'C003', date: DAY, open: [{ id: JOB }], reasons: { [JOB]: 'material' }, signOff: { name: 'Priya Singh' }, at: new Date(9000) });
+  const queueDay = async (kind, payload) => {
+    await queue.queueWorkOrder(kind, WO, 'C003', payload);
+    await woStore.setPendingWorkOrder('C003', DAY, kind, payload);
+  };
+
+  reset();
+  await queueDay('start', start);
+  await queue.queueUpdate({ id: JOB, status: 'Work Finished', crewId: 'C003', queuedAt: 6000 });
+  await queueDay('close', close);
+  let view = workOrder.viewWorkOrder({ crewId: 'C003', date: DAY, server: null, local: await woStore.getPendingWorkOrder() });
+  check('offline: the day shows as ended, waiting to sync', view.status === 'closed' && view.pendingSync === true, view);
+  r = await queue.flushQueue();
+  check('start, job update, end of day: delivered in that order with the crew and the same ids; pending marker cleared',
+    what(server.calls).join() === 'wo-start,status,wo-close' && server.calls[0].crewId === 'C003'
+      && server.calls[0].form.clientRequestId === start.clientRequestId && server.calls[2].form.clientRequestId === close.clientRequestId
+      && r.remaining === 0 && (await woStore.getPendingWorkOrder()) === null, { calls: what(server.calls), r });
+
+  reset();
+  await queueDay('start', start);
+  server.answer = async () => ({ applied: false, reason: 'day already started' });
+  r = await queue.flushQueue();
+  check('start answered applied:false: done, crew told, pending marker cleared',
+    r.remaining === 0 && r.notApplied[0]?.reason === 'not applied: day already started' && (await woStore.getPendingWorkOrder()) === null, r);
+
+  reset();
+  await queueDay('close', close);
+  server.answer = async () => { throw refusal(400, 'the crew lead must sign off the day'); };
+  r = await queue.flushQueue();
+  check('end of day refused (400): dropped with the reason, pending marker cleared',
+    r.dropped[0]?.message === 'the crew lead must sign off the day' && r.remaining === 0 && (await woStore.getPendingWorkOrder()) === null, r);
+
+  reset();
+  await queueDay('start', start);
+  server.answer = async () => { throw new Error('Network request failed'); };
+  r = await queue.flushQueue();
+  check('no signal: start of day stays queued and still shows as started',
+    r.remaining === 1 && workOrder.viewWorkOrder({ crewId: 'C003', date: DAY, server: null, local: await woStore.getPendingWorkOrder() }).status === 'started', r);
+
+  reset();
+  await queueDay('start', start);
+  server.signedIn = false;
+  r = await queue.flushQueue();
+  check('signed out: start of day stays queued, nothing sent', r.remaining === 1 && server.calls.length === 0 && r.dropped.length === 0, r);
+  server.signedIn = true;
+
+  reset();
+  server.signedIn = false;
+  check('demo mode: the start of day is not queued', (await queue.queueWorkOrder('start', WO, 'C003', start)) === false && (await queue.getQueueLength()) === 0);
 
   console.log('Real api.js');
   const fetches = [];
