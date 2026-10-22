@@ -176,3 +176,39 @@ That's the gap a real specialist audit would close.
 - `frontend/src/App.jsx`
 
 No CSS files, color tokens, or visual layout were changed.
+
+## Round 2 -- static jsx-a11y pass (commit 27e7128)
+
+A second, complementary pass ran
+[`eslint-plugin-jsx-a11y`](https://github.com/jsx-eslint/eslint-plugin-jsx-a11y)
+6.x (`strict` config) over every `.jsx` file in `frontend/src`. A static lint
+sees source patterns axe can't (a handler on a `div` that is never rendered
+during a scan, `autoFocus`, label wiring) and needs no running app or login.
+It found **26 findings**; 14 needed code changes, 12 are deliberate and now
+carry an inline comment explaining why. Re-running the lint gives 0 a11y
+findings, and the build passes.
+
+| Finding | WCAG | Where | Resolution |
+|---|---|---|---|
+| Drawers / photo viewer closed only by a mouse click on the backdrop | 2.1.1 | `Incidents.jsx` (New incident, photo viewer), `TCS.jsx` (call drawers) | **Fixed**: new `useEscape()` hook in `lib/ui.jsx`; Escape now closes them. Backdrops marked `aria-hidden`. |
+| Photo thumbnails were clickable `div`s, unreachable by keyboard | 2.1.1, 4.1.2 | `Incidents.jsx` | **Fixed**: real `<button>`s labelled "Open photo: Taken by <crew> at <time>" |
+| Alt text "Job photo" / "Job photo full size" (redundant, uninformative) | 1.1.1 | `Incidents.jsx` | **Fixed**: thumbnail image `alt=""` (button carries the name); full-size image gets the crew/time description |
+| Photo viewer not exposed as a dialog | 4.1.2, 2.4.3 | `Incidents.jsx` | **Fixed**: `role="dialog" aria-modal`, focus moves to Close on open |
+| SMS form labels not associated with inputs | 1.3.1, 3.3.2 | `Analytics.jsx` | **Fixed**: `htmlFor` / `id` pairs |
+| `<button role="listitem">` in the worst-feeders bar chart | 4.1.2 | `KpiCharts.jsx` | **Fixed**: `listitem` wrapper with a plain button inside |
+| `tabIndex` on the scrollable incidents region | 2.1.1 | `Dashboard.jsx` | **Kept**: required by `scrollable-region-focusable` (the round-1 fix); lint rule suppressed with a comment |
+| `autoFocus` on 5 fields | 2.4.3 | `Incidents.jsx`, `TCS.jsx`, `DispatchWorkload.jsx`, `FeederPdfPicker.jsx`, photo Close | **Kept**: each field appears only as a direct result of the user's own click (Reject, Correct, Search, open viewer); moving focus there is expected |
+| Mouse-down on the About overlay backdrop | 2.1.1 | `AboutOverlay.jsx` | **Kept**: Escape already closes it |
+
+Manually confirmed in the running app: Escape on the drawers and viewer,
+keyboard access to thumbnails, KPI bars, SMS label focus. While doing so a
+layout bug surfaced (unrelated to a11y): the incident drawer's Job photos and
+Asset scans sections rendered outside the padded body; fixed in `fda5676`.
+
+### Still open after round 2
+
+The round-1 open items stand: the badge/secondary-text **colour contrast**
+(design decision), the **Network Map canvas**, and a full **NVDA /
+keyboard-only walkthrough** of the incident lifecycle. Additionally the
+drawers do not trap focus while open (Tab can leave them); the Radix-based
+incident drawer does, the hand-rolled `drawer-mask` ones do not.
