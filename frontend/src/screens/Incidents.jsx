@@ -253,9 +253,9 @@ function IncidentDrawer({ inc, onClose, onChange }) {
             ))}
           </ul>
           <MessagePanel incidentId={inc.id} />
-        </div>
           <PhotoPanel incidentId={inc.id} />
           <AssetScanPanel incidentId={inc.id} />
+        </div>
       </DrawerContent>
     </Drawer>
   );
