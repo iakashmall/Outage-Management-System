@@ -708,9 +708,9 @@ export const repo = {
   // Restoration callbacks (notifications.contact_ref = call id / complaint qid). Earliest per contact.
   callbacks: () => db.any(
     `SELECT DISTINCT ON (contact_ref) contact_ref, incident_id, status, ts
-     FROM notifications WHERE contact_ref IS NOT NULL ORDER BY contact_ref, ts ASC`),
+     FROM notifications WHERE contact_ref IS NOT NULL AND kind IS DISTINCT FROM 'escalation' ORDER BY contact_ref, ts ASC`),
   callbacksForIncident: (incidentId) => db.any(
-    'SELECT * FROM notifications WHERE incident_id=$1 AND contact_ref IS NOT NULL ORDER BY ts ASC', [incidentId]),
+    "SELECT * FROM notifications WHERE incident_id=$1 AND contact_ref IS NOT NULL AND kind IS DISTINCT FROM 'escalation' ORDER BY ts ASC", [incidentId]),
   saveMonthlySnapshot: async (monthKey, indices) => {
     await db.none(`
       INSERT INTO monthly_indices (month_key, saidi, saifi, caidi, maifi, computed_at)

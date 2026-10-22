@@ -83,7 +83,11 @@ A `docker-compose.yml` at the repo root sketches the Postgres/Kafka topology for
   repository seam is where a CIM loader would populate assets.
 - **No load-flow / topology tracing.** Severity and customer counts are attributes, not derived from a
   connectivity model (that's the SDP's Python + NetworkX/OpenDSS service, not built here).
-- **Notifications (FR-OMS-021–025), SLA escalation (FR-OMS-008), and traffic-based ETA (FR-OMS-013)** are
-  represented in the UI/state but not wired to real SMS/IVR/traffic providers.
+- **SMS (FR-OMS-021) and SLA escalation (FR-OMS-008)** are real end to end (operator SMS, customer/callback SMS,
+  automatic AE → SE → CE escalation, all recorded in `notifications`) but go through `backend/src/realtime/sms.js`,
+  whose only driver today is `console` (`SMS_DRIVER`). Delivery needs a provider driver plus Indian DLT
+  registration. Officer numbers come from `ESCALATION_SMS_TO` (e.g. `AE=+91…,SE=+91…,CE=+91…`).
+- **IVR notifications (FR-OMS-022–025) and traffic-based ETA (FR-OMS-013)** are represented in the UI/state but
+  not wired to real providers.
 - **Auth is a role picker,** not Keycloak/biometric. The RBAC model and audit trail are real; the identity
   provider is the swap.

@@ -20,6 +20,7 @@ import { topologyGeoJSON } from '../domain/topology.js';
 import { decodePhotoDataUrl, compressPhoto } from '../domain/photos.js';
 import { CALL_CATEGORIES, CALL_SEVERITY, cleanSubstation, deriveCallState } from '../domain/callState.js';
 import { nanoid } from 'nanoid';
+import { db } from '../infra/db.js';
 import { substationForFeeder } from '../domain/prediction.js';
 import { plannedOutageRoutes } from './plannedOutages.js';
 import { plannedComplaintDecision } from '../domain/plannedComplaints.js';
@@ -28,6 +29,9 @@ import { dispatchRoutes } from './dispatch.js';
 import { PRIORITY_CLASSES, isActive, isMovable, priorityInfo } from '../domain/rebalance.js';
 import { isOperator } from '../domain/plannedOutage.js';
 import { normalizeStatus, isCrewStatus, decideStatus, undoOpenUntil, isLocked, RESTORED } from '../domain/jobWorkflow.js';
+import { sendSmsVia, maskPhone, smsDriverName } from '../realtime/sms.js';
+import { listEscalations } from '../realtime/escalation.js';
+import { slaDueAt } from '../domain/sla.js';
 
 export const api = Router();
 
@@ -224,12 +228,11 @@ api.post('/incidents', requireRole('oms_operator', 'system_admin'), async (req, 
   if (!b.zone || !b.severity) return res.status(400).json({ error: 'zone and severity are required (FR-OMS-002)' });
   const id = await repo.nextIncidentId();
   const opened = new Date().toISOString();
-  const SLA = { critical: 90, high: 180, medium: 360, low: 720 }[b.severity] || 360;
   const inc = await repo.createIncident({
     id, type: b.type || 'Power Outage', severity: b.severity, status: 'open',
     zone: b.zone, feeder: b.feeder || null, customers: b.customers || 0, cause: b.cause || 'Unknown',
     lat: b.lat ?? null, lon: b.lon ?? null, crew_id: null, opened_at: opened,
-    ert: null, sla_due_at: new Date(Date.now() + SLA * 60000).toISOString(), source: b.source || 'MANUAL',
+    ert: null, sla_due_at: slaDueAt(b.severity, opened), source: b.source || 'MANUAL',
   });
   await repo.addIncidentEvent(id, actor(req), 'created', `Manually created - ${b.cause || 'Unknown'}`);
   await repo.audit(actor(req), 'incident.create', id);
@@ -708,6 +711,45 @@ api.get('/analytics/mttr', async (req, res) => {
   res.json(mttr);
 });
 // P7.1 -- Supervisor dashboard: SLA compliance (resolved before/after deadline).
+// FR-OMS-021 SMS log: every SMS the OMS recorded (customer, callback,
+// officer, escalation), newest first. Numbers are stored masked.
+api.get('/sms', async (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 100, 500);
+  const rows = await db.any(
+    `SELECT n.id, n.ts, n.incident_id, COALESCE(n.feeder, i.feeder) AS feeder, n.recipient, n.body, n.status, n.error, n.sent_by,
+            COALESCE(n.kind, CASE WHEN n.subject = 'Restoration callback' THEN 'callback' ELSE 'customer' END) AS kind
+     FROM notifications n LEFT JOIN incidents i ON i.id = n.incident_id
+     WHERE n.channel = 'sms' ORDER BY n.ts DESC LIMIT $1`, [limit]);
+  res.json({ driver: smsDriverName(), rows });
+});
+
+// Operator-composed SMS to a lineman / officer.
+api.post('/sms', requireRole('oms_operator', 'system_admin'), async (req, res) => {
+  const b = req.body || {};
+  const recipient = String(b.recipient || '').trim().slice(0, 80);
+  const phone = String(b.phone || '').replace(/[^\d+]/g, '');
+  const message = String(b.message || '').trim();
+  const feeder = String(b.feeder || '').trim() || null;
+  const incidentId = String(b.incidentId || '').trim() || null;
+  if (!recipient) return res.status(400).json({ error: 'Recipient is required' });
+  if (phone.replace(/\D/g, '').length < 10) return res.status(400).json({ error: 'A valid phone number (10+ digits) is required' });
+  if (message.length < 3 || message.length > 500) return res.status(400).json({ error: 'Message must be 3-500 characters' });
+  if (incidentId && !(await repo.incident(incidentId))) return res.status(400).json({ error: `Unknown incident ${incidentId}` });
+  const label = `${recipient} (${maskPhone(phone)})`;
+  const r = await sendSmsVia({ to: phone, body: message, label });
+  const row = await db.one(
+    `INSERT INTO notifications (id, incident_id, channel, recipient, subject, body, status, error, ts, feeder, kind, sent_by)
+     VALUES ($/id/, $/incidentId/, 'sms', $/label/, NULL, $/message/, $/status/, $/error/, now(), $/feeder/, 'officer', $/by/)
+     RETURNING id, ts, status`,
+    { id: 'NOT' + nanoid(8), incidentId, label, message, status: r.status, error: r.error || null, feeder, by: actor(req) });
+  if (incidentId) await repo.addIncidentEvent(incidentId, actor(req), 'sms', `SMS to ${label}: ${message}`);
+  bus.publish(TOPICS.SMS_LOGGED, { id: row.id, incidentId, kind: 'officer' });
+  res.status(201).json({ ...row, recipient: label, driver: smsDriverName() });
+});
+
+// Live SLA escalation tracker (active incidents with an SLA clock).
+api.get('/escalations', async (req, res) => res.json(await listEscalations()));
+
 api.get('/analytics/sla', async (req, res) => {
   const [incidents, events] = await Promise.all([repo.incidents(), repo.allIncidentEvents()]);
   const sla = computeSLACompliance(incidents, events);

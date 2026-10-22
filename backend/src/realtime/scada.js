@@ -5,6 +5,7 @@ import { resolve as resolveAsset } from '../infra/geo.js';
 import { setTag, cacheDel } from '../infra/redis.js';
 import { canScadaRestore, LABELS } from '../domain/lifecycle.js';
 import { predictDownstream } from '../domain/prediction.js';
+import { slaDueAt } from '../domain/sla.js';
 import { sendRestorationCallbacks } from './notifier.js';
 
 // ============================================================
@@ -291,7 +292,7 @@ export async function handleScadaEvent(evt) {
       crew_id: null,
       opened_at: openedAt,
       ert: null,
-      sla_due_at: null,
+      sla_due_at: slaDueAt(severity, openedAt),
       source: 'SCADA',
     });
     await repo.addIncidentEvent(id, 'SCADA', 'created',
