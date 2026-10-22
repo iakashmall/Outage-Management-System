@@ -150,11 +150,13 @@ export function WorstBars({ rows, unit, toneOf, onPick }) {
   return (
     <div className="fk-bars" role="list">
       {rows.map((r) => (
-        <button key={r.feeder} className="fk-bar-row" role="listitem" onClick={() => onPick(r.feeder)} title="Open this feeder">
-          <span className="fk-bar-name mono">{r.feeder}</span>
-          <span className="fk-bar-track"><span className={`fk-bar-fill fk-fill-${toneOf(r.value) || 'ok'}`} style={{ width: `${Math.max(1.5, (Math.abs(r.value) / max) * 100)}%` }} /></span>
-          <span className="fk-bar-val mono">{numFmt(r.value)}<small> {unit === 'Nos' ? '' : unit}</small></span>
-        </button>
+        <div key={r.feeder} role="listitem">
+          <button className="fk-bar-row" onClick={() => onPick(r.feeder)} title="Open this feeder">
+            <span className="fk-bar-name mono">{r.feeder}</span>
+            <span className="fk-bar-track"><span className={`fk-bar-fill fk-fill-${toneOf(r.value) || 'ok'}`} style={{ width: `${Math.max(1.5, (Math.abs(r.value) / max) * 100)}%` }} /></span>
+            <span className="fk-bar-val mono">{numFmt(r.value)}<small> {unit === 'Nos' ? '' : unit}</small></span>
+          </button>
+        </div>
       ))}
     </div>
   );

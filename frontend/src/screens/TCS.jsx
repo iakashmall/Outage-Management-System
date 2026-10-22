@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api.js';
-import { Icon, SevBadge, StatusBadge, timeAgo, useLiveRefresh, toast } from '../lib/ui.jsx';
+import { Icon, SevBadge, StatusBadge, timeAgo, useLiveRefresh, toast, useEscape } from '../lib/ui.jsx';
 
 // Priority order and chip colours: Medical > Critical > Premium-VIP > Normal.
 const CATEGORIES = ['Medical', 'Critical', 'Premium-VIP', 'Normal'];
@@ -165,9 +165,11 @@ const field = (label, node) => <label style={{ display: 'block', marginBottom: 1
 const inp = { width: '100%', padding: '9px 11px', border: '1px solid var(--line-2)', borderRadius: 7, fontFamily: 'var(--ui)', fontSize: 13.5 };
 
 function Panel({ title, onClose, children }) {
+  useEscape(onClose);
   return (
     <>
-      <div className="drawer-mask" onClick={onClose} />
+      {/* Mouse-only backdrop; keyboard users close via Escape or the Close button. */}
+      <div className="drawer-mask" aria-hidden="true" onClick={onClose} />
       <aside className="drawer" role="dialog" aria-label={title}>
         <div className="drawer-h">
           <div style={{ fontFamily: 'var(--disp)', fontSize: 18, fontWeight: 600 }}>{title}</div>
@@ -218,7 +220,7 @@ function RejectCall({ call, onClose, onDone }) {
   return (
     <Panel title={`Reject call ${call.id}`} onClose={onClose}>
       <p className="muted" style={{ marginTop: 0 }}>{call.customer} · {call.address}</p>
-      {field('Reason * (3–500 characters)', <textarea style={{ ...inp, minHeight: 90 }} value={reason} maxLength={500} onChange={(e) => setReason(e.target.value)} autoFocus />)}
+      {field('Reason * (3–500 characters)', <textarea style={{ ...inp, minHeight: 90 }} value={reason} maxLength={500} onChange={(e) => setReason(e.target.value)} autoFocus /* eslint-disable-line jsx-a11y/no-autofocus -- opened by the user's own click */ />)}
       <button className="btn danger" style={{ width: '100%', justifyContent: 'center', marginTop: 6 }} disabled={busy || !ok} onClick={submit}>Reject call</button>
     </Panel>
   );

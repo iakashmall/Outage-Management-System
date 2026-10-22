@@ -695,20 +695,20 @@ export default function Analytics() {
               <div style={{ padding: '16px', borderBottom: '1px solid var(--line-2)', background: '#3b82f608' }}>
                 <form onSubmit={sendSMS} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 2fr auto', gap: 10, alignItems: 'flex-end' }}>
                   <div>
-                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }}>Recipient / Role</label>
-                    <input value={smsDraft.recipient} onChange={e => setSmsDraft(d => ({ ...d, recipient: e.target.value }))} placeholder="Lineman / AE / SE …"
+                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }} htmlFor="sms-recipient">Recipient / Role</label>
+                    <input id="sms-recipient" value={smsDraft.recipient} onChange={e => setSmsDraft(d => ({ ...d, recipient: e.target.value }))} placeholder="Lineman / AE / SE …"
                       style={{ width: '100%', padding: '7px 10px', border: '1px solid var(--line-2)', borderRadius: 6, fontSize: 13, boxSizing: 'border-box' }} />
                   </div>
                   <div>
-                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }}>Feeder</label>
-                    <select value={smsDraft.feeder} onChange={e => setSmsDraft(d => ({ ...d, feeder: e.target.value }))}
+                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }} htmlFor="sms-feeder">Feeder</label>
+                    <select id="sms-feeder" value={smsDraft.feeder} onChange={e => setSmsDraft(d => ({ ...d, feeder: e.target.value }))}
                       style={{ width: '100%', padding: '7px 10px', border: '1px solid var(--line-2)', borderRadius: 6, fontSize: 13, boxSizing: 'border-box', background: 'var(--surface)' }}>
                       {feederList.map(f => <option key={f}>{f}</option>)}
                     </select>
                   </div>
                   <div>
-                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }}>Message</label>
-                    <input value={smsDraft.message} onChange={e => setSmsDraft(d => ({ ...d, message: e.target.value }))} placeholder="Alert text …"
+                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }} htmlFor="sms-message">Message</label>
+                    <input id="sms-message" value={smsDraft.message} onChange={e => setSmsDraft(d => ({ ...d, message: e.target.value }))} placeholder="Alert text …"
                       style={{ width: '100%', padding: '7px 10px', border: '1px solid var(--line-2)', borderRadius: 6, fontSize: 13, boxSizing: 'border-box' }} />
                   </div>
                   <button type="submit" style={{ padding: '8px 16px', background: '#22b06b', color: '#fff', border: 'none', borderRadius: 6, fontWeight: 700, fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap' }}>

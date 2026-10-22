@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
-import { Icon, SevBadge, StatusBadge, timeAgo, hhmm, useLiveRefresh, toast } from '../lib/ui.jsx';
+import { Icon, SevBadge, StatusBadge, timeAgo, hhmm, useLiveRefresh, toast, useEscape } from '../lib/ui.jsx';
 import { Drawer, DrawerContent } from '../components/ui/drawer.jsx';
 import { currentUser } from '../lib/auth.js';
 
@@ -216,7 +216,7 @@ function IncidentDrawer({ inc, onClose, onChange }) {
           {canReturn && returning && (
             <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
               <label className="eyebrow" htmlFor="rfc-reason">What needs correcting? (required, the crew sees it on the timeline)</label>
-              <textarea id="rfc-reason" rows={3} maxLength={500} value={reason} onChange={(e) => setReason(e.target.value)} autoFocus
+              <textarea id="rfc-reason" rows={3} maxLength={500} value={reason} onChange={(e) => setReason(e.target.value)} autoFocus // eslint-disable-line jsx-a11y/no-autofocus -- opened by the user's own click
                 style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid #ccc', fontSize: 13 }} />
               <div style={{ display: 'flex', gap: 8 }}>
                 <button className="btn sm danger" disabled={busy || !reason.trim()} onClick={doReturn}>Return to crew</button>
@@ -325,6 +325,7 @@ function NewIncident({ onClose, onCreated }) {
   const [f, setF] = useState({ zone: '', severity: 'high', type: 'Power Outage', feeder: '', customers: 100, cause: 'Unknown' });
   const [busy, setBusy] = useState(false);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  useEscape(onClose);
   const submit = async () => {
     if (!f.zone) { toast('Zone is required', 'err'); return; }
     setBusy(true);
@@ -336,7 +337,8 @@ function NewIncident({ onClose, onCreated }) {
 
   return (
     <>
-      <div className="drawer-mask" onClick={onClose} />
+      {/* Mouse-only backdrop; keyboard users close via Escape or the Close button. */}
+      <div className="drawer-mask" aria-hidden="true" onClick={onClose} />
       <aside className="drawer" role="dialog" aria-label="New incident">
         <div className="drawer-h">
           <div style={{ fontFamily: 'var(--disp)', fontSize: 18, fontWeight: 600 }}>New incident</div>
@@ -466,6 +468,11 @@ function PhotoPanel({ incidentId }) {
     if (thumbs[p.id]) { setOpenPhoto({ ...p, data_url: thumbs[p.id] }); return; }
     api.photoDetail(p.id).then((full) => setOpenPhoto(full)).catch(() => toast('Could not load photo'));
   };
+  useEscape(openPhoto ? () => setOpenPhoto(null) : null);
+  const photoLabel = (p) => {
+    const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : (p.metadata || {});
+    return `Taken by ${m.technicianName || p.technician_id || 'unknown crew'} at ${hhmm(p.ts)}`;
+  };
 
   return (
     <div style={{ margin: '20px 0 10px' }}>
@@ -475,32 +482,36 @@ function PhotoPanel({ incidentId }) {
         {photos.map((p) => {
           const meta = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : (p.metadata || {});
           return (
-            <div
+            <button
+              type="button"
               key={p.id}
               onClick={() => openFull(p)}
-              style={{ width: 84, height: 84, borderRadius: 8, overflow: 'hidden', cursor: 'pointer', background: '#f2f5f9', position: 'relative', border: '1px solid var(--line-2)' }}
+              aria-label={`Open photo: ${photoLabel(p)}${p.not_applied_reason ? ', late, not applied' : ''}`}
+              style={{ padding: 0, width: 84, height: 84, borderRadius: 8, overflow: 'hidden', cursor: 'pointer', background: '#f2f5f9', position: 'relative', border: '1px solid var(--line-2)' }}
               title={`${meta.technicianName || p.technician_id || 'Unknown'} - ${hhmm(p.ts)}${p.not_applied_reason ? ` - not applied (${p.not_applied_reason})` : ''}`}
             >
               {p.not_applied_reason && <span className="chip chip-major" title={`Not applied - ${p.not_applied_reason}; kept for the record`} style={{ position: 'absolute', left: 2, top: 2, zIndex: 1, padding: '0 5px', fontSize: 10 }}>Late</span>}
               {thumbs[p.id] ? (
-                <img src={thumbs[p.id]} alt="Job photo" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                <img src={thumbs[p.id]} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
               ) : (
                 <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, opacity: 0.6 }}>...</div>
               )}
-            </div>
+            </button>
           );
         })}
       </div>
       {openPhoto && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 2300, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setOpenPhoto(null)}>
-          <div style={{ background: '#fff', borderRadius: 10, padding: 16, maxWidth: '90vw', maxHeight: '90vh', overflow: 'auto' }} onClick={(e) => e.stopPropagation()}>
-            <img src={openPhoto.data_url} alt="Job photo full size" style={{ maxWidth: '100%', maxHeight: '70vh', display: 'block', borderRadius: 6, marginBottom: 10 }} />
+        // Backdrop click is mouse-only; keyboard users close via Escape or the Close button.
+        // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 2300, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={(e) => { if (e.target === e.currentTarget) setOpenPhoto(null); }}>
+          <div role="dialog" aria-modal="true" aria-label="Job photo" style={{ background: '#fff', borderRadius: 10, padding: 16, maxWidth: '90vw', maxHeight: '90vh', overflow: 'auto' }}>
+            <img src={openPhoto.data_url} alt={photoLabel(openPhoto)} style={{ maxWidth: '100%', maxHeight: '70vh', display: 'block', borderRadius: 6, marginBottom: 10 }} />
             <div style={{ fontSize: 13, marginBottom: 8 }}>
               <b>{(() => { const m = typeof openPhoto.metadata === 'string' ? JSON.parse(openPhoto.metadata) : (openPhoto.metadata || {}); return m.technicianName || openPhoto.technician_id || 'Unknown crew'; })()}</b>
               {' - '}{hhmm(openPhoto.ts)}
               {openPhoto.note && <div style={{ marginTop: 4, opacity: 0.8 }}>{openPhoto.note}</div>}
             </div>
-            <button className="btn sm" onClick={() => setOpenPhoto(null)}>Close</button>
+            <button className="btn sm" onClick={() => setOpenPhoto(null)} autoFocus /* eslint-disable-line jsx-a11y/no-autofocus -- opened by the user's own click */>Close</button>
           </div>
         </div>
       )}

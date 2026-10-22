@@ -1,6 +1,16 @@
 import { useEffect, useState, useCallback } from 'react';
 import { socket } from './api.js';
 
+// Close overlays/drawers with the Escape key (WCAG 2.1.1 — backdrop click is mouse-only).
+export function useEscape(onClose) {
+  useEffect(() => {
+    if (!onClose) return undefined;
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+}
+
 // minimal inline icon set (stroke, 20x20)
 const P = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round' };
 export const Icon = ({ name, size = 20 }) => {

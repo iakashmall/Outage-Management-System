@@ -12,6 +12,8 @@ export default function AboutOverlay({ onClose }) {
   }, [onClose]);
 
   return (
+    // Backdrop mousedown is mouse-only; keyboard users close via Escape (handled above).
+    // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
     <div
       role="dialog"
       aria-modal="true"

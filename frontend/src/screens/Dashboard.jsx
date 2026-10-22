@@ -55,6 +55,8 @@ export default function Dashboard({ go }) {
       <div className="grid" style={{ gridTemplateColumns: '1.6fr 1fr' }}>
         <div className="card">
           <div className="card-h"><h3>Active incidents</h3><span className="eyebrow">{active.length} open</span></div>
+          {/* Scrollable region must be focusable so keyboard users can scroll it (WCAG 2.1.1). */}
+          {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
           <div tabIndex={0} role="region" aria-label="Active incidents table" style={{ overflow: 'auto', maxHeight: 380 }}>
             <table>
               <thead><tr><th>ID</th><th>Severity</th><th>Zone</th><th>Feeder</th><th>Customers</th><th>Status</th></tr></thead>
