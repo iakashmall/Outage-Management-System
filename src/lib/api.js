@@ -289,6 +289,14 @@ export async function postJobCompletion(jobId, form) {
   return req(`/mobile/jobs/${jobId}/completion`, "POST", { ...form, sentAt: new Date().toISOString() });
 }
 
+// POST /api/mobile/jobs/:id/checklist { items: [{ label, checked, at }], passedAt }
+// The pre-work priority checklist, for the control room's timeline. Same
+// signed-out rule as postJobCompletion.
+export async function postJobChecklist(jobId, body) {
+  if (!(await isSignedIn())) throw Object.assign(new Error("Not signed in"), { status: 401, code: "SIGNED_OUT" });
+  return req(`/mobile/jobs/${jobId}/checklist`, "POST", { ...body, sentAt: new Date().toISOString() });
+}
+
 // POST /api/mobile/jobs/:id/reopen — undo Work Complete while the window is open. Online only.
 export async function reopenJob(jobId) {
   return req(`/mobile/jobs/${jobId}/reopen`, "POST", {});

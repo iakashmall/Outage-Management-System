@@ -46,6 +46,10 @@ export async function postJobCompletion(id, form) {
   if (!server.signedIn) throw Object.assign(new Error("Not signed in"), { status: 401, code: "SIGNED_OUT" });
   return call({ type: "completion", id, form });
 }
+export async function postJobChecklist(id, checklist) {
+  if (!server.signedIn) throw Object.assign(new Error("Not signed in"), { status: 401, code: "SIGNED_OUT" });
+  return call({ type: "checklist", id, checklist });
+}
 export async function updateJobStatus(id, status) { return call({ type: "status", id, status }); }
 export async function uploadJobPhoto(id) { return call({ type: "photo", id }); }
 export async function saveAssetScan(id) { return call({ type: "scan", id }); }
@@ -66,7 +70,7 @@ export const isAuthenticated = () => state.signedIn;
 export const myCrewId = () => "C003";
 export async function freshAuthHeader() { return { Authorization: "Bearer t" }; }`,
   'real-api/react-native.js': `export const Platform = { OS: "android" };`,
-  'real-api/entry.js': `export { postJobCompletion } from "./api.js"; export { state } from "./session.js";`,
+  'real-api/entry.js': `export { postJobCompletion, postJobChecklist } from "./api.js"; export { state } from "./session.js";`,
 };
 
 mkdirSync(join(dir, 'real-api'));
@@ -240,6 +244,30 @@ try {
   reset();
   server.signedIn = false;
   check('demo mode: the start of day is not queued', (await queue.queueWorkOrder('start', WO, 'C003', start)) === false && (await queue.getQueueLength()) === 0);
+  console.log('Pending sync, priority checklist');
+  const ticks = [{ label: 'Log job details', checked: true, at: new Date(500).toISOString() }];
+  const cl = { items: ticks, passedAt: new Date(600).toISOString() };
+
+  reset();
+  await queue.queueChecklist(JOB, cl);
+  await queue.queueUpdate({ id: JOB, status: 'En Route', crewId: 'C003', queuedAt: 2000 });
+  r = await queue.flushQueue();
+  check('checklist then status: delivered in that order with the items unchanged, queue empty',
+    what(server.calls).join() === 'checklist,status' && JSON.stringify(server.calls[0].checklist) === JSON.stringify(cl) && r.remaining === 0, { calls: server.calls, r });
+
+  reset();
+  await queue.queueChecklist(JOB, cl);
+  server.answer = async () => { throw new Error('Network request failed'); };
+  r = await queue.flushQueue();
+  check('no signal: checklist kept for the next flush', what(await queue.getQueueItems()).join() === 'checklist' && r.dropped.length === 0);
+
+  reset();
+  server.signedIn = false;
+  check('demo mode (never signed in): the checklist is not queued', (await queue.queueChecklist(JOB, cl)) === false && (await queue.getQueueLength()) === 0);
+
+  const withList = jobFlow.completionPayload({ jobId: JOB, restored: 'yes', checklist: [{ label: 'PPE worn', checked: 1, at: 'T', extra: 1 }], at: new Date(1000) });
+  check('completion payload carries the safety checklist ({ label, checked, at } only); none -> null',
+    JSON.stringify(withList.checklist) === JSON.stringify([{ label: 'PPE worn', checked: true, at: 'T' }]) && form().checklist === null, withList.checklist);
 
   console.log('Real api.js');
   const fetches = [];
@@ -251,6 +279,13 @@ try {
   const ok = await realApi.postJobCompletion(JOB, f);
   check('postJobCompletion signed in: posts the form unchanged', ok?.applied === true && fetches.length === 1
     && JSON.parse(fetches[0][1].body).clientRequestId === f.clientRequestId && fetches[0][0].endsWith(`/mobile/jobs/${JOB}/completion`));
+  realApi.state.signedIn = false;
+  const clErr = await realApi.postJobChecklist(JOB, cl).then(() => null, (e) => e);
+  realApi.state.signedIn = true;
+  await realApi.postJobChecklist(JOB, cl);
+  const clBody = JSON.parse(fetches[1]?.[1].body || 'null');
+  check('postJobChecklist: 401 signed out; signed in posts items + passedAt to /checklist', clErr?.status === 401 && fetches.length === 2
+    && fetches[1][0].endsWith(`/mobile/jobs/${JOB}/checklist`) && clBody?.passedAt === cl.passedAt && clBody.items.length === 1 && !!clBody.sentAt);
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }

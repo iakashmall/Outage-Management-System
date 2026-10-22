@@ -457,9 +457,9 @@ export const repo = {
       ON CONFLICT DO NOTHING RETURNING job_id`, [jobId, kind, status || '', clientTs, reason])),
   addJobCompletion: async (c) => {
     const row = await db.oneOrNone(`INSERT INTO job_completions
-      (id,job_id,incident_id,crew_id,client_request_id,diagnosis,parts_used,restored,sign_off,submitted_at,submitted_by)
-      VALUES ($/id/,$/job_id/,$/incident_id/,$/crew_id/,$/client_request_id/,$/diagnosis:json/,$/parts_used:json/,$/restored/,$/sign_off:json/,$/submitted_at/,$/submitted_by/)
-      ON CONFLICT (client_request_id) DO NOTHING RETURNING *`, { id: 'JC' + nanoid(8), ...c });
+      (id,job_id,incident_id,crew_id,client_request_id,diagnosis,parts_used,restored,sign_off,checklist,submitted_at,submitted_by)
+      VALUES ($/id/,$/job_id/,$/incident_id/,$/crew_id/,$/client_request_id/,$/diagnosis:json/,$/parts_used:json/,$/restored/,$/sign_off:json/,$/checklist:json/,$/submitted_at/,$/submitted_by/)
+      ON CONFLICT (client_request_id) DO NOTHING RETURNING *`, { id: 'JC' + nanoid(8), checklist: null, ...c });
     return row ? { row, created: true }
       : { row: await db.one('SELECT * FROM job_completions WHERE client_request_id=$1', [c.client_request_id]), created: false };
   },

@@ -33,12 +33,12 @@ import {
 import { biometricUnlock } from './lib/biometric';
 import { getLockoutStatus, recordFailedAttempt, resetAttempts as resetLoginAttempts, MAX_ATTEMPTS, LOCKOUT_MS } from './lib/lockout';
 import { API_PORT, CLIENT_ID, KEYCLOAK_PORT, JOB_POLL_INTERVAL_MS } from './config';
-import { reportTrackingState, getCurrentCrew, fetchMyJobs, clearJobCache, updateJobStatus, getJobMessages, getJobPhotos, getCrewMessages, saveAssetScan, getAssetScans, isNotYourJob, postJobCompletion, reopenJob, getWorkOrder, startWorkOrder, closeWorkOrder, sendJobMessage, requestReassignment, getReassignRequest, reportJobSeen } from './lib/api.js';
+import { reportTrackingState, getCurrentCrew, fetchMyJobs, clearJobCache, updateJobStatus, getJobMessages, getJobPhotos, getCrewMessages, saveAssetScan, getAssetScans, isNotYourJob, postJobCompletion, postJobChecklist, reopenJob, getWorkOrder, startWorkOrder, closeWorkOrder, sendJobMessage, requestReassignment, getReassignRequest, reportJobSeen } from './lib/api.js';
 import { getLocation } from './lib/location';
 import { uploadCapturedPhoto } from './lib/photos';
 import { siteBlock, SITE_STATUSES } from './lib/siteCheck';
 import { setupAlerts, findNewJobs, findNewMessages, alertNewJobs, alertNewMessages, reportDelivered, isOwnMessage } from './lib/alerts';
-import { queueUpdate, queueScan, queueCompletion, queueWorkOrder, keepUndeliveredCompletion, getUndeliveredCompletion, clearUndeliveredCompletion, isRetryable, isRefusal, flushQueue, getQueueLength, getQueueItems } from './lib/offlineQueue';
+import { queueUpdate, queueScan, queueCompletion, queueChecklist, queueWorkOrder, keepUndeliveredCompletion, getUndeliveredCompletion, clearUndeliveredCompletion, isRetryable, isRefusal, flushQueue, getQueueLength, getQueueItems } from './lib/offlineQueue';
 import { localDate, workOrderId, viewWorkOrder, dayJobs, summarize, startPayload, closePayload, cleanMembers } from './lib/workOrder';
 import { getCachedWorkOrder, cacheWorkOrder, getPendingWorkOrder, setPendingWorkOrder, getLastMembers, saveLastMembers, clearWorkOrderCache } from './lib/workOrderStore';
 import DailyWorkOrder from './components/DailyWorkOrder';
@@ -130,7 +130,7 @@ function jobPlanLine(job) {
 // Why a status update was dropped instead of retried.
 const itemLabel = (item) => (item.type === 'photo' ? `${item.id} photo` : item.type === 'scan' ? `${item.id} QR scan`
   : item.type === 'completion' ? `${item.id} completion form` : item.type === 'wo-start' ? `${item.id} start of day`
-  : item.type === 'wo-close' ? `${item.id} end of day` : `${item.id} → ${item.status}`);
+  : item.type === 'wo-close' ? `${item.id} end of day` : item.type === 'checklist' ? `${item.id} priority checklist` : `${item.id} → ${item.status}`);
 
 function droppedUpdateNotice(item) {
   const what = itemLabel(item);
@@ -1071,7 +1071,7 @@ function NativeAppScreen() {
                     <View style={styles.pendingDot} />
                     <View style={{ flex: 1 }}>
                       <Text style={styles.pendingItemTitle}>
-                        {item.type === 'photo' ? `${item.id} · Photo` : item.type === 'scan' ? `${item.id} · QR scan ${item.scan?.assetId ?? ''}` : item.type === 'completion' ? `${item.id} · Completion form` : item.type === 'wo-start' ? `${item.id} · Start of day` : item.type === 'wo-close' ? `${item.id} · End of day` : `${item.id} → ${item.status}`}
+                        {item.type === 'photo' ? `${item.id} · Photo` : item.type === 'scan' ? `${item.id} · QR scan ${item.scan?.assetId ?? ''}` : item.type === 'completion' ? `${item.id} · Completion form` : item.type === 'wo-start' ? `${item.id} · Start of day` : item.type === 'wo-close' ? `${item.id} · End of day` : item.type === 'checklist' ? `${item.id} · Priority checklist` : `${item.id} → ${item.status}`}
                       </Text>
                       <Text style={styles.pendingItemMeta}>
                         {item.queuedAt ? `Queued ${timeAgo(item.queuedAt)}` : 'Queued offline'}
@@ -1640,6 +1640,8 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
   const [diagnosis, setDiagnosis] = useState(null);
   const [partsUsed, setPartsUsed] = useState(null);
   const [signOff, setSignOff] = useState(null);
+  // The safety checklist ticked before Work Started, sent with the completion form.
+  const [safetyChecklist, setSafetyChecklist] = useState(null);
   // OMS-03: "Supply restored?" goes with the completion form.
   const [restored, setRestored] = useState(null);
   const [reopening, setReopening] = useState(false);
@@ -1779,11 +1781,24 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
     setCompletionStep(null);
     setAdvancing(true);
     try {
-      await sendCompletion(completionPayload({ jobId: job.id, diagnosis, partsUsed, restored, signOff: finalSignOff }));
+      await sendCompletion(completionPayload({ jobId: job.id, diagnosis, partsUsed, restored, signOff: finalSignOff, checklist: safetyChecklist }));
       await advance();
     } finally {
       setAdvancing(false);
     }
+  };
+
+  // The priority checklist, once every item is ticked: a record for the
+  // control room's timeline, not a gate (this screen gates itself). Not
+  // waited for; no signal: it waits in Pending sync.
+  const onPriorityChecklist = (allDone, items) => {
+    setChecklistDone(allDone);
+    if (!allDone) return;
+    const body = { items, passedAt: new Date().toISOString() };
+    postJobChecklist(job.id, body).catch(async (err) => {
+      if (!isRetryable(err)) return;
+      if (await queueChecklist(job.id, body)) onQueued?.();
+    });
   };
 
   const resendCompletion = async () => {
@@ -1954,7 +1969,7 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
           </View>
         </View>
 
-        <PriorityChecklist severity={job.severity} onChange={setChecklistDone} />
+        <PriorityChecklist severity={job.severity} onChange={onPriorityChecklist} />
 
         {!checklistDone && (
           <View style={styles.checklistLock}>
@@ -1967,7 +1982,8 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
         <View onLayout={(e) => { flowY.current = e.nativeEvent.layout.y; }}>
         {checklistDone && showSafety && (
           <SafetyChecklist
-            onPass={() => {
+            onPass={(items) => {
+              setSafetyChecklist(items);
               setShowSafety(false);
               setAdvancing(true);
               advance().finally(() => setAdvancing(false));

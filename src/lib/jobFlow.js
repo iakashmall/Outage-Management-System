@@ -34,13 +34,15 @@ export function isReadOnly(job, now = Date.now()) {
 }
 
 // Body of POST /mobile/jobs/:id/completion. clientRequestId makes a resend
-// (pending sync) idempotent on the server.
-export function completionPayload({ jobId, diagnosis, partsUsed, restored, signOff, at = new Date() }) {
+// (pending sync) idempotent on the server. checklist: the safety checklist
+// ticked before Work Started, [{ label, checked, at }].
+export function completionPayload({ jobId, diagnosis, partsUsed, restored, signOff, checklist, at = new Date() }) {
   return {
     diagnosis: diagnosis && typeof diagnosis === "object" ? diagnosis : null,
     partsUsed: Array.isArray(partsUsed) ? partsUsed.map((p) => ({ name: p.name, qty: p.qty })) : [],
     restored: RESTORED_CHOICES.some((c) => c.value === restored) ? restored : null,
     signOff: signOff ? { name: signOff.name ?? null, signedAt: signOff.signedAt ?? null } : null,
+    checklist: Array.isArray(checklist) ? checklist.map((c) => ({ label: String(c.label), checked: !!c.checked, at: c.at ?? null })) : null,
     clientRequestId: `${jobId}-${at.getTime()}`,
     submittedAt: at.toISOString(),
   };

@@ -1294,6 +1294,11 @@ api.patch('/mobile/jobs/:id/status', async (req, res) => {
 // Fault jobs only; planned-outage jobs have their own close-out (permits).
 const notAFaultJob = (res) => res.status(409).json({ code: 'NOT_A_FAULT_JOB', message: 'planned-outage jobs are closed out through their permit' });
 const isObj = (v) => v != null && typeof v === 'object' && !Array.isArray(v);
+// A checklist as the crew app sends it: [{ label, checked, at }]. Returns the
+// stored shape, or null when it is not a list of { label: string, checked: boolean }.
+const checklistItems = (v) => (Array.isArray(v) && v.every((x) => isObj(x) && typeof x.label === 'string' && typeof x.checked === 'boolean')
+  ? v.map((x) => ({ label: x.label, checked: x.checked, at: typeof x.at === 'string' ? x.at : null }))
+  : null);
 
 // The crew's completion form (diagnosis, parts used, restored, sign-off).
 // Optional for now: a job reaches Work Complete without it. Idempotent: the
@@ -1309,6 +1314,8 @@ api.post('/mobile/jobs/:id/completion', async (req, res) => {
   if (b.partsUsed != null && !Array.isArray(b.partsUsed)) return res.status(400).json({ code: 'BAD_REQUEST', message: 'partsUsed must be a list' });
   if (b.signOff != null && !isObj(b.signOff)) return res.status(400).json({ code: 'BAD_REQUEST', message: 'signOff must be an object' });
   if (b.restored != null && !RESTORED.includes(b.restored)) return res.status(400).json({ code: 'BAD_REQUEST', message: 'restored must be yes, partial or no' });
+  const checklist = b.checklist == null ? null : checklistItems(b.checklist);
+  if (b.checklist != null && !checklist) return res.status(400).json({ code: 'BAD_REQUEST', message: 'checklist must be a list of { label, checked }' });
   const submittedAt = clientTime(b.submittedAt, b.sentAt);
   const clientRequestId = typeof b.clientRequestId === 'string' && b.clientRequestId ? b.clientRequestId : `${job.id}@${submittedAt}`;
   if (info.locked) return notApplied(res, job, { kind: 'completion', clientTs: submittedAt, rawTs: b.submittedAt, reason: lockReason(info) });
@@ -1317,7 +1324,7 @@ api.post('/mobile/jobs/:id/completion', async (req, res) => {
   }
   const { row, created } = await repo.addJobCompletion({
     job_id: job.id, incident_id: job.incident_id, crew_id: job.crew_id, client_request_id: clientRequestId,
-    diagnosis: b.diagnosis ?? null, parts_used: b.partsUsed ?? null, restored: b.restored ?? null, sign_off: b.signOff ?? null,
+    diagnosis: b.diagnosis ?? null, parts_used: b.partsUsed ?? null, restored: b.restored ?? null, sign_off: b.signOff ?? null, checklist,
     submitted_at: submittedAt, submitted_by: req.user?.username || null,
   });
   if (created && job.incident_id) {
@@ -1333,6 +1340,32 @@ api.get('/mobile/jobs/:id/completion', async (req, res) => {
   const job = await jobFor(req, res);
   if (!job) return;
   res.json(await repo.jobCompletions(job.id));
+});
+
+// The pre-work priority checklist, ticked before Work Started (so it cannot
+// ride on the completion form). A record for the timeline, not a lock: the
+// phone gates its own UI. The event note is a summary line, a newline, then
+// the items as JSON, so the dashboard can list them. A resend of the same
+// ticks (same labels and times) adds no second event.
+api.post('/mobile/jobs/:id/checklist', async (req, res) => {
+  const job = await jobFor(req, res);
+  if (!job) return;
+  const b = req.body || {};
+  const items = checklistItems(b.items);
+  if (!items || !items.length) return res.status(400).json({ code: 'BAD_REQUEST', message: 'items must be a non-empty list of { label, checked }' });
+  const passedAt = clientTime(b.passedAt, b.sentAt);
+  const done = items.filter((x) => x.checked).length;
+  const note = `Priority checklist ${done === items.length ? 'passed' : 'incomplete'} (${done}/${items.length}) for job ${job.id}\n${JSON.stringify(items)}`;
+  let event = null, duplicate = false;
+  if (job.incident_id) {
+    event = (await repo.incidentEvents(job.incident_id)).find((e) => e.kind === 'checklist' && e.note === note) || null;
+    duplicate = !!event;
+    if (!event) {
+      event = await repo.addIncidentEvent(job.incident_id, req.user?.username || 'Crew', 'checklist', note, passedAt);
+      bus.publish(TOPICS.INCIDENT_UPDATED, await repo.incident(job.incident_id));
+    }
+  }
+  res.status(event && !duplicate ? 201 : 200).json({ ...job, applied: true, duplicate, job, event });
 });
 
 // Undo: the crew reopens its own finished job while the window is open

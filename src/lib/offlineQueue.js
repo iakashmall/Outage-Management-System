@@ -12,7 +12,7 @@
 //   { type: 'wo-start' | 'wo-close', id, crewId, form, queuedAt }   OMS-03 daily work order; id = work order id
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Directory, File, Paths } from "expo-file-system";
-import { updateJobStatus, uploadJobPhoto, saveAssetScan, postJobCompletion, startWorkOrder, closeWorkOrder, isSignedIn, isNotYourJob } from "./api";
+import { updateJobStatus, uploadJobPhoto, saveAssetScan, postJobCompletion, postJobChecklist, startWorkOrder, closeWorkOrder, isSignedIn, isNotYourJob } from "./api";
 import { serverJobUpdate } from "./jobFlow";
 import { clearPendingWorkOrder } from "./workOrderStore";
 
@@ -94,6 +94,13 @@ export async function queueWorkOrder(kind, workOrderId, crewId, form) {
   return true;
 }
 const isWorkOrderItem = (item) => item.type === "wo-start" || item.type === "wo-close";
+// The pre-work priority checklist ({ items, passedAt }), a record for the
+// control room's timeline. Not queued in demo mode, like completion forms.
+export async function queueChecklist(jobId, checklist) {
+  if (!(await isSignedIn())) return false;
+  await push({ type: "checklist", id: jobId, checklist });
+  return true;
+}
 
 async function readUndelivered() {
   try {
@@ -155,6 +162,8 @@ async function send(item) {
   } else if (item.type === "wo-close") {
     if (!(await isSignedIn())) throw Object.assign(new Error("Not signed in"), { status: 401 });
     return closeWorkOrder(item.form, item.crewId);
+  } else if (item.type === "checklist") {
+    return postJobChecklist(item.id, item.checklist);
   }
   return updateJobStatus(item.id, item.status, item.location || {}, item.crewId, ts);
 }
