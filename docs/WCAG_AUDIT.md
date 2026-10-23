@@ -209,6 +209,14 @@ Asset scans sections rendered outside the padded body; fixed in `fda5676`.
 
 The round-1 open items stand: the badge/secondary-text **colour contrast**
 (design decision), the **Network Map canvas**, and a full **NVDA /
-keyboard-only walkthrough** of the incident lifecycle. Additionally the
-drawers do not trap focus while open (Tab can leave them); the Radix-based
-incident drawer does, the hand-rolled `drawer-mask` ones do not.
+keyboard-only walkthrough** of the incident lifecycle.
+
+### Focus management in hand-rolled dialogs (fixed)
+
+The New incident drawer, TCS call drawers, photo viewer and About overlay let
+Tab escape to the page behind (WCAG 2.1.2 / 2.4.3). They now share
+`useDialog()` in `lib/ui.jsx`: Escape closes, Tab / Shift+Tab cycle inside,
+focus moves in on open and returns to the opener on close; all four are
+`role="dialog" aria-modal="true"`. Verified by hand in the running app (focus
+start, Tab and Shift+Tab wrap, Escape, focus return, backdrop click). The
+Radix-based incident drawer already managed focus and is unchanged.

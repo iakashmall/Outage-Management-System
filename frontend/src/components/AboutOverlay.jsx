@@ -1,20 +1,19 @@
-import { useEffect } from 'react';
-import { Icon } from '../lib/ui.jsx';
+import { useRef } from 'react';
+import { Icon, useDialog } from '../lib/ui.jsx';
 
 // Full-screen "About" page opened from the GridQ mark in the rail. Plain
 // fixed-position overlay (no router in this app) styled with the same
 // design tokens as the rest of the shell — see index.css :root block.
 export default function AboutOverlay({ onClose }) {
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  const dlg = useRef(null);
+  useDialog(dlg, onClose);
 
   return (
-    // Backdrop mousedown is mouse-only; keyboard users close via Escape (handled above).
+    // Backdrop mousedown is mouse-only; keyboard users close via Escape (useDialog).
     // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
     <div
+      ref={dlg}
+      tabIndex={-1}
       role="dialog"
       aria-modal="true"
       aria-label="About GridQ"

@@ -1,14 +1,40 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { socket } from './api.js';
 
-// Close overlays/drawers with the Escape key (WCAG 2.1.1 — backdrop click is mouse-only).
-export function useEscape(onClose) {
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+// Modal behaviour for hand-rolled overlays/drawers (WCAG 2.1.1, 2.1.2, 2.4.3):
+// Escape closes (backdrop click is mouse-only), Tab / Shift+Tab cycle inside
+// the dialog instead of escaping to the page behind, focus moves in on open
+// (unless a field already took it via autoFocus) and returns to the opener on
+// close. Pass onClose = null while the dialog is not shown.
+export function useDialog(ref, onClose) {
+  const close = useRef(onClose);
+  close.current = onClose;
+  const open = !!onClose;
   useEffect(() => {
-    if (!onClose) return undefined;
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    if (!open) return undefined;
+    const opener = document.activeElement;
+    const el = ref.current;
+    if (el && !el.contains(document.activeElement)) {
+      const first = el.querySelector(FOCUSABLE);
+      (first || el).focus();
+    }
+    const onKey = (e) => {
+      if (e.key === 'Escape') { close.current?.(); return; }
+      if (e.key !== 'Tab' || !ref.current) return;
+      const items = [...ref.current.querySelectorAll(FOCUSABLE)].filter((n) => n.offsetParent !== null);
+      if (!items.length) { e.preventDefault(); return; }
+      const first = items[0], last = items[items.length - 1];
+      if (e.shiftKey && (document.activeElement === first || !ref.current.contains(document.activeElement))) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && (document.activeElement === last || !ref.current.contains(document.activeElement))) { e.preventDefault(); first.focus(); }
+    };
     document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [onClose]);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      if (opener && opener.isConnected && typeof opener.focus === 'function') opener.focus();
+    };
+  }, [open, ref]);
 }
 
 // minimal inline icon set (stroke, 20x20)

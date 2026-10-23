@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
-import { Icon, SevBadge, StatusBadge, timeAgo, hhmm, useLiveRefresh, toast, useEscape } from '../lib/ui.jsx';
+import { Icon, SevBadge, StatusBadge, timeAgo, hhmm, useLiveRefresh, toast, useDialog } from '../lib/ui.jsx';
 import { Drawer, DrawerContent } from '../components/ui/drawer.jsx';
 import { currentUser } from '../lib/auth.js';
 
@@ -325,7 +325,8 @@ function NewIncident({ onClose, onCreated }) {
   const [f, setF] = useState({ zone: '', severity: 'high', type: 'Power Outage', feeder: '', customers: 100, cause: 'Unknown' });
   const [busy, setBusy] = useState(false);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
-  useEscape(onClose);
+  const dlg = useRef(null);
+  useDialog(dlg, onClose);
   const submit = async () => {
     if (!f.zone) { toast('Zone is required', 'err'); return; }
     setBusy(true);
@@ -339,7 +340,7 @@ function NewIncident({ onClose, onCreated }) {
     <>
       {/* Mouse-only backdrop; keyboard users close via Escape or the Close button. */}
       <div className="drawer-mask" aria-hidden="true" onClick={onClose} />
-      <aside className="drawer" role="dialog" aria-label="New incident">
+      <aside ref={dlg} tabIndex={-1} className="drawer" role="dialog" aria-modal="true" aria-label="New incident">
         <div className="drawer-h">
           <div style={{ fontFamily: 'var(--disp)', fontSize: 18, fontWeight: 600 }}>New incident</div>
           <button className="iconbtn" aria-label="Close" onClick={onClose}><Icon name="x" size={16} /></button>
@@ -468,7 +469,8 @@ function PhotoPanel({ incidentId }) {
     if (thumbs[p.id]) { setOpenPhoto({ ...p, data_url: thumbs[p.id] }); return; }
     api.photoDetail(p.id).then((full) => setOpenPhoto(full)).catch(() => toast('Could not load photo'));
   };
-  useEscape(openPhoto ? () => setOpenPhoto(null) : null);
+  const viewer = useRef(null);
+  useDialog(viewer, openPhoto ? () => setOpenPhoto(null) : null);
   const photoLabel = (p) => {
     const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : (p.metadata || {});
     return `Taken by ${m.technicianName || p.technician_id || 'unknown crew'} at ${hhmm(p.ts)}`;
@@ -504,7 +506,7 @@ function PhotoPanel({ incidentId }) {
         // Backdrop click is mouse-only; keyboard users close via Escape or the Close button.
         // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 2300, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={(e) => { if (e.target === e.currentTarget) setOpenPhoto(null); }}>
-          <div role="dialog" aria-modal="true" aria-label="Job photo" style={{ background: '#fff', borderRadius: 10, padding: 16, maxWidth: '90vw', maxHeight: '90vh', overflow: 'auto' }}>
+          <div ref={viewer} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Job photo" style={{ background: '#fff', borderRadius: 10, padding: 16, maxWidth: '90vw', maxHeight: '90vh', overflow: 'auto' }}>
             <img src={openPhoto.data_url} alt={photoLabel(openPhoto)} style={{ maxWidth: '100%', maxHeight: '70vh', display: 'block', borderRadius: 6, marginBottom: 10 }} />
             <div style={{ fontSize: 13, marginBottom: 8 }}>
               <b>{(() => { const m = typeof openPhoto.metadata === 'string' ? JSON.parse(openPhoto.metadata) : (openPhoto.metadata || {}); return m.technicianName || openPhoto.technician_id || 'Unknown crew'; })()}</b>

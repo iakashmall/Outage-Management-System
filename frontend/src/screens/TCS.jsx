@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
-import { Icon, SevBadge, StatusBadge, timeAgo, useLiveRefresh, toast, useEscape } from '../lib/ui.jsx';
+import { Icon, SevBadge, StatusBadge, timeAgo, useLiveRefresh, toast, useDialog } from '../lib/ui.jsx';
 
 // Priority order and chip colours: Medical > Critical > Premium-VIP > Normal.
 const CATEGORIES = ['Medical', 'Critical', 'Premium-VIP', 'Normal'];
@@ -165,12 +165,13 @@ const field = (label, node) => <label style={{ display: 'block', marginBottom: 1
 const inp = { width: '100%', padding: '9px 11px', border: '1px solid var(--line-2)', borderRadius: 7, fontFamily: 'var(--ui)', fontSize: 13.5 };
 
 function Panel({ title, onClose, children }) {
-  useEscape(onClose);
+  const dlg = useRef(null);
+  useDialog(dlg, onClose);
   return (
     <>
       {/* Mouse-only backdrop; keyboard users close via Escape or the Close button. */}
       <div className="drawer-mask" aria-hidden="true" onClick={onClose} />
-      <aside className="drawer" role="dialog" aria-label={title}>
+      <aside ref={dlg} tabIndex={-1} className="drawer" role="dialog" aria-modal="true" aria-label={title}>
         <div className="drawer-h">
           <div style={{ fontFamily: 'var(--disp)', fontSize: 18, fontWeight: 600 }}>{title}</div>
           <button className="iconbtn" aria-label="Close" onClick={onClose}><Icon name="x" size={16} /></button>
