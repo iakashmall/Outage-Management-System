@@ -8,15 +8,15 @@
 
 :root{
   --paper:#eef1f4; --paper-2:#f7f9fb; --surface:#ffffff; --surface-2:#fbfcfe;
-  --ink:#0f1b2d; --ink-2:#33465f; --muted:#64748b; --faint:#9fb0c4;
+  --ink:#0f1b2d; --ink-2:#33465f; --muted:#5e6d82; --faint:#566e8b;
   --line:#dbe3ec; --line-2:#c8d4e0;
   --navy:#0f2847; --navy-2:#22456e;
   --live:#0e9f8e; --live-bg:#e2f6f2;
   --copper:#c56a2c; --copper-bg:#fbeadc;
-  --crit:#d7382a; --crit-bg:#fdeceb;
-  --high:#e08a1e; --high-bg:#fdf1de;
-  --med:#2f6fd6; --med-bg:#e7f0fd;
-  --low:#2a9d5c; --low-bg:#e5f6ec;
+  --crit:#c93326; --crit-bg:#fdeceb;
+  --high:#9a5f15; --high-bg:#fdf1de;
+  --med:#2868cd; --med-bg:#e7f0fd;
+  --low:#217b48; --low-bg:#e5f6ec;
   --r:14px; --r-sm:10px;
   --shadow:0 1px 2px rgba(15,27,45,.04), 0 2px 12px rgba(15,27,45,.05);
   --shadow-lg:0 12px 40px rgba(15,27,45,.12);
@@ -802,7 +802,7 @@ body{
 .sw-topoLines{background:#0e7490}
 .sw-topoStruct{background:#6b7a90;border-radius:50%}
 .sw-topoEquip{background:#2563eb;border-radius:2px;box-shadow:0 0 0 2px #fff inset}
-.lp-sub{font-size:10.5px;color:var(--ink-3,#7b8aa0);padding:0 2px 4px;line-height:1.35}
+.lp-sub{font-size:10.5px;color:var(--ink-3,#5b697e);padding:0 2px 4px;line-height:1.35}
 .map-fit.topo{background:#0e7490;color:#fff;border-color:#0e7490}
 .map-fit.topo:hover{background:#0b5e75}
 .trace-box{margin-top:12px;padding:10px 11px;border-radius:10px;background:#fff7ed;border:1px solid #fed7aa}

@@ -37,9 +37,9 @@ function Ring({ metric, size, index }) {
 
 export default function ReliabilityRings({ saidi, saifi, caidi, maifi }) {
   const metrics = [
-    { label: 'SAIDI', value: saidi.value, target: saidi.target, unit: 'min', color: '#0e9f8e', colorLight: '#5fd9c9', size: 168 },
+    { label: 'SAIDI', value: saidi.value, target: saidi.target, unit: 'min', color: '#0e9f8e', textColor: '#0a7568', colorLight: '#5fd9c9', size: 168 },
     { label: 'SAIFI', value: saifi.value, target: saifi.target, unit: '', color: '#2f6fed', colorLight: '#7ea6f7', size: 128 },
-    { label: 'CAIDI', value: caidi.value, target: caidi.target, unit: 'min', color: '#c8811a', colorLight: '#f0b967', size: 88 },
+    { label: 'CAIDI', value: caidi.value, target: caidi.target, unit: 'min', color: '#c8811a', textColor: '#905d13', colorLight: '#f0b967', size: 88 },
   ];
 
   return (
@@ -58,7 +58,7 @@ export default function ReliabilityRings({ saidi, saifi, caidi, maifi }) {
             <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--muted)' }}>
               {m.label}
             </div>
-            <div style={{ fontSize: 20, fontWeight: 600, color: m.color }}>
+            <div style={{ fontSize: 20, fontWeight: 600, color: m.textColor || m.color }}>
               {m.value}{m.unit && ` ${m.unit}`}
               <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--muted)', marginLeft: 4 }}>
                 / {m.target}{m.unit && ` ${m.unit}`} target

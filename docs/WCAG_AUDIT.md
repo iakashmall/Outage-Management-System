@@ -220,3 +220,64 @@ focus moves in on open and returns to the opener on close; all four are
 `role="dialog" aria-modal="true"`. Verified by hand in the running app (focus
 start, Tab and Shift+Tab wrap, Escape, focus return, backdrop click). The
 Radix-based incident drawer already managed focus and is unchanged.
+
+## Round 3 -- colour contrast fixed, full live re-scan
+
+The badge / secondary-text contrast item above was resolved by darkening
+each failing colour just enough (same hue, HSL lightness only) to reach
+4.5:1 on every background it is drawn on -- "option A", chosen by the
+product owner over keeping the original orange/grey for non-text use.
+
+| Token | Before | After | Worst ratio before → after |
+|---|---|---|---|
+| `--crit` | `#d7382a` | `#c93326` | 4.09 → 4.61 |
+| `--high` | `#e08a1e` | `#9a5f15` | 2.37 → 4.61 (orange reads as brown) |
+| `--med` | `#2f6fd6` | `#2868cd` | 4.19 → 4.63 |
+| `--low` | `#2a9d5c` | `#217b48` | 3.05 → 4.64 |
+| `--muted` | `#64748b` | `#5e6d82` | 4.20 → 4.65 |
+| `--faint` | `#9fb0c4` | `#566e8b` | 1.95 → 4.63 |
+
+Hard-coded colours that bypassed the tokens were fixed where axe found
+failing **text**: the Analytics status palette (`#e23b2e`, `#22b06b`,
+`#3b82f6`, `#ef9021`, `#d1a017` → `#c4271b`, `#177648`, `#0a5de4`,
+`#9a580b`, `#83640e`), SAIDI/CAIDI values in `ReliabilityRings.jsx` (new
+`textColor`, ring gradients unchanged), the incident-search severity tags,
+and the Network Map legend subtitle. Chart lines, map markers and status
+dots keep their colours (non-text; not flagged).
+
+The same scan also found and fixed: an unnamed feeder `<select>` on
+Analytics; the SMS log / escalation tracker scroll areas not keyboard
+focusable (`role="region"`, `tabIndex=0`); and the Feeder PQ KPI View /
+Period / Phase toggles mis-declared as `tablist` (now `role="group"` with
+`aria-pressed`).
+
+**Method:** axe-core 4.10 via Playwright (headless Chromium), logged in
+through the real Keycloak flow as a temporary `oms_operator` user with
+password + TOTP (deleted afterwards); tags `wcag2a`, `wcag2aa`, `wcag21a`,
+`wcag21aa`. Same script before and after, old colours restored for the
+"before" run.
+
+| View | Contrast nodes before | After | Other violations after |
+|---|---|---|---|
+| Dashboard | 22 | 0 | 0 |
+| Network Map | 1 | 0 | 0 |
+| Incidents | 26 | 0 | 0 |
+| Dispatch | 5 | 0 | 0 |
+| Planned outages | 1 | 0 | 0 |
+| Alarms | 10 | 0 | 0 |
+| TCS / IVR | 26 | 0 | 0 |
+| Complaints | 1 | 0 | 0 |
+| Analytics | 19 (+1 `select-name`) | 0 | 0 |
+| Admin | 1 | 0 | 0 |
+| New incident drawer / incident detail drawer / About | 26 / 26 / 19 | 0 | 0 |
+| Analytics › SMS & Escalation, › Feeder PQ KPIs | not scanned | 0 | 0 (after the fixes above) |
+
+**Result: 0 automated WCAG 2.1 A/AA violations across all 15 views.**
+
+### Still open (manual only)
+
+- Keyboard-only and NVDA walkthrough of the incident lifecycle.
+- Network Map canvas: keyboard pan/zoom and colour-only encoding.
+
+Automated tools find roughly 30-40% of WCAG issues; these manual checks
+are what remains before P8.7a can be called complete.

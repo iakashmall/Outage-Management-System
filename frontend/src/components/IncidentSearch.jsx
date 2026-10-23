@@ -11,7 +11,8 @@ import { api } from '../lib/api.js';
 // once dropped into a small 260px header slot), not an inline header
 // search box — fighting its internals wasn't worth it when this app
 // already has a working pattern for exactly this UI.
-const SEV_COLOR = { critical: '#c73a3a', high: '#c8811a', medium: '#2f6fd6', low: '#1f8a5b' };
+// White tag text on these must reach 4.5:1 (WCAG 1.4.3); high/low/fallback match the --high/--low/--muted tokens.
+const SEV_COLOR = { critical: '#c73a3a', high: '#9a5f15', medium: '#2f6fd6', low: '#217b48' };
 
 export default function IncidentSearch({ onOpen }) {
   const [all, setAll] = useState([]);
@@ -73,7 +74,7 @@ export default function IncidentSearch({ onOpen }) {
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => select(i)}
             >
-              <span className="ms-tag" style={{ background: SEV_COLOR[i.severity] || '#94a3b8' }}>{i.severity}</span>
+              <span className="ms-tag" style={{ background: SEV_COLOR[i.severity] || '#5e6d82' }}>{i.severity}</span>
               <span className="ms-label">{i.zone} · {i.id}</span>
               <span className="ms-sub">{i.status.replace('_', ' ')}</span>
             </button>
