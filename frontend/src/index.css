@@ -429,7 +429,7 @@ tr.row-hot td{background:var(--crit-bg)}
 .ms-empty{padding:12px 14px;font-size:12.5px;color:var(--faint)}
 .ms-item{display:flex;align-items:center;gap:9px;width:100%;text-align:left;border:none;background:#fff;padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--line)}
 .ms-item:last-child{border-bottom:none}
-.ms-item:hover{background:var(--paper)}
+.ms-item:hover,.ms-item.active{background:var(--paper)}
 .ms-tag{flex:none;font-family:var(--disp,sans-serif);font-size:9.5px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:#fff;padding:2px 7px;border-radius:6px;min-width:62px;text-align:center}
 .tag-ss{background:#99b7e0}.tag-feeder{background:#3b82f6}.tag-incident{background:#e23b2e}.tag-crew{background:#0fb39d}
 .tag-ptx{background:#e0742b}.tag-dt{background:#3b82f6}.tag-switch{background:#8b5cf6}.tag-rmu{background:#7a9e2e}.tag-fuse{background:#b98a5e}
@@ -724,7 +724,7 @@ body{
 .ms-box,.ms-results,.ms-item{
   background:#ffffff;
 }
-.ms-item:hover{
+.ms-item:hover,.ms-item.active{
   background:var(--teal-wash);
 }
 .ms-clear:hover{
@@ -978,3 +978,6 @@ button.kh-more:hover{text-decoration:underline}
 .fp-err{color:#e23b2e;font-size:12px}
 .fp-foot{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .fp-foot .muted{font-size:11.5px}
+
+/* Visually hidden, still read by screen readers (chart data tables). */
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}

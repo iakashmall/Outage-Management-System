@@ -281,3 +281,20 @@ password + TOTP (deleted afterwards); tags `wcag2a`, `wcag2aa`, `wcag21a`,
 
 Automated tools find roughly 30-40% of WCAG issues; these manual checks
 are what remains before P8.7a can be called complete.
+
+## Map and chart text alternatives (after round 3)
+
+Two gaps predicted while writing the manual script (`WCAG_MANUAL_TEST.md`
+steps C5 and B14) were fixed in code; they are confirmed by build and
+jsx-a11y lint, and are to be confirmed by that manual run:
+
+- **Network Map keyboard route (2.1.1, 4.1.2):** the map search is now an
+  ARIA combobox (↓/↑ move through results, Enter opens one) and is the
+  keyboard path to every feature, including canvas-drawn RMUs, switches and
+  DTRs. Search box and clear button are labelled; incident, crew, substation
+  and power-transformer markers get accessible names; choosing a feature
+  moves focus to the details panel (a named region).
+- **Charts (1.1.1, 1.3.1):** KPI trend charts, hierarchy line charts and
+  the monthly SAIDI bars each carry a screen-reader-only data table
+  (`SrTable` in `lib/ui.jsx`); decorative reliability-ring graphics are
+  `aria-hidden` (their values are already text).

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { SrTable } from '../lib/ui.jsx';
 import { api } from '../lib/api.js';
 import { TrendChart, WorstBars, allZeroMessage } from './KpiCharts.jsx';
 import FeederPdfPicker from './FeederPdfPicker.jsx';
@@ -389,6 +390,8 @@ function MiniLines({ labels: allLabels, granularity, lines: allLines, def, unit 
         })}
         {hover != null && <line x1={x(hover)} x2={x(hover)} y1={MT} y2={H - MB} stroke="var(--muted)" strokeDasharray="3 3" strokeWidth={0.8} />}
       </svg>
+      <SrTable caption={`${def.code} values`} head={['Time', ...lines.map((ln) => ln.label)]}
+        rows={labels.map((l, i) => [xLabel(l.label, granularity), ...lines.map((ln) => (ln.values[i] == null ? '–' : fmt(ln.values[i], unit)))])} />
       {hover != null && (
         <div className="kh-tip">
           <b>{xLabel(labels[hover].label, granularity)}</b>

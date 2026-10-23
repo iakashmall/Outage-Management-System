@@ -12,7 +12,7 @@
 
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { api } from '../lib/api.js';
-import { useLiveRefresh, toast } from '../lib/ui.jsx';
+import { useLiveRefresh, toast, SrTable } from '../lib/ui.jsx';
 import FeederKpiPanel from '../components/FeederKpiPanel.jsx';
 // ─────────────────────────────────────────────────────────────
 // Constants
@@ -158,6 +158,7 @@ function Sparkbars({ data }) {
   const max = Math.max(...data, 1);
   const W = 640, H = 180, pad = 28, bw = (W - pad * 2) / data.length;
   return (
+    <>
     <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto' }} role="img" aria-label="Monthly SAIDI trend">
       {[0.25, 0.5, 0.75, 1].map((g) => (
         <line key={g} x1={pad} x2={W - pad} y1={H - pad - (H - pad * 2) * g} y2={H - pad - (H - pad * 2) * g} stroke="var(--line-2)" strokeWidth={0.5} />
@@ -178,6 +179,8 @@ function Sparkbars({ data }) {
         );
       })}
     </svg>
+    <SrTable caption="Monthly SAIDI" head={['Month', 'SAIDI']} rows={data.map((v, i) => [MONTHS[i], v])} />
+    </>
   );
 }
 

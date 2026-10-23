@@ -165,6 +165,12 @@ export default function NetworkMap() {
     hits.sort((a, b) => (b.starts - a.starts) || ((RANK[a.type] ?? 9) - (RANK[b.type] ?? 9)) || a.label.localeCompare(b.label));
     return hits.slice(0, 30);
   }, [query, searchIndex, liveIndex]); // eslint-disable-line
+  const [activeIdx, setActiveIdx] = useState(0);
+  // Move focus to the details panel when a feature is chosen (search, or Enter on a marker),
+  // so keyboard and screen-reader users land on what they opened.
+  const detailRef = useRef(null);
+  const selKey = sel ? `${sel.kind}:${sel.id || sel.mrid || sel.label || ''}` : '';
+  useEffect(() => { if (selKey) detailRef.current?.focus({ preventScroll: true }); }, [selKey]);
 
   // create the Leaflet map once
   useEffect(() => {
@@ -239,8 +245,8 @@ export default function NetworkMap() {
     net.rmus.forEach((a) => L.circleMarker([a.lat, a.lon], { radius: 3, color: '#7a9e2e', weight: 0, fillOpacity: 0.9 }).on('click', () => select('rmu', a, 'RMU')).addTo(groups.current.rmus));
     net.switches.forEach((a) => L.circleMarker([a.lat, a.lon], { radius: 2.8, color: '#8b5cf6', weight: 0, fillOpacity: 0.85 }).on('click', () => select('switch', a, a.name || 'Switch')).addTo(groups.current.switches));
     net.distTx.forEach((a) => L.circleMarker([a.lat, a.lon], { radius: 3, color: '#3b82f6', weight: 0, fillOpacity: 0.85 }).bindTooltip(a.name || 'DTR').on('click', () => select('dt', a, a.name || 'DTR')).addTo(groups.current.distTx));
-    net.powerTx.forEach((a) => L.marker([a.lat, a.lon], { icon: L.divIcon({ className: '', html: '<div class="mk-ptx"></div>', iconSize: [12, 12] }) }).on('click', () => select('ptx', a, a.name || 'Power Txr')).addTo(groups.current.powerTx));
-    net.substations.forEach((s) => L.marker([s.lat, s.lon], { icon: L.divIcon({ className: '', html: `<div class="mk-ss"><span class="mk-ss-d"></span><span class="mk-ss-l">${clean(s.name)}</span></div>`, iconSize: [14, 14], iconAnchor: [7, 7] }), zIndexOffset: 500 }).on('click', () => select('ss', s, s.name)).addTo(groups.current.substations));
+    net.powerTx.forEach((a) => L.marker([a.lat, a.lon], { icon: L.divIcon({ className: '', html: '<div class="mk-ptx"></div>', iconSize: [12, 12] }), title: `Power transformer ${a.name || ''}`.trim() }).on('click', () => select('ptx', a, a.name || 'Power Txr')).addTo(groups.current.powerTx));
+    net.substations.forEach((s) => L.marker([s.lat, s.lon], { icon: L.divIcon({ className: '', html: `<div class="mk-ss"><span class="mk-ss-d"></span><span class="mk-ss-l">${clean(s.name)}</span></div>`, iconSize: [14, 14], iconAnchor: [7, 7] }), zIndexOffset: 500, title: `Substation ${clean(s.name)}` }).on('click', () => select('ss', s, s.name)).addTo(groups.current.substations));
 
     groups.current.incidents = mk();
     groups.current.crews = mk();
@@ -320,7 +326,7 @@ export default function NetworkMap() {
     g.clearLayers();
     inc.filter((i) => i.lat && i.lon).forEach((i) => {
       const active = !['resolved', 'closed', 'cancelled'].includes(i.status);
-      const m = L.marker([i.lat, i.lon], { icon: L.divIcon({ className: '', html: `<div class="mk-inc ${active ? 'live' : ''}" style="--c:${SEVC[i.severity]}"></div>`, iconSize: [16, 16], iconAnchor: [8, 8] }), zIndexOffset: 1000 });
+      const m = L.marker([i.lat, i.lon], { icon: L.divIcon({ className: '', html: `<div class="mk-inc ${active ? 'live' : ''}" style="--c:${SEVC[i.severity]}"></div>`, iconSize: [16, 16], iconAnchor: [8, 8] }), zIndexOffset: 1000, title: `Incident ${i.id}, ${i.severity}, ${String(i.status).replace('_', ' ')}` });
       m.on('click', () => select('incident', i, i.id)); m.addTo(g);
     });
   }, [inc, ready]);
@@ -336,7 +342,7 @@ export default function NetworkMap() {
       const color = CREWC[c.status] || '#9fb0c4';
       let e = live.get(c.id);
       if (!e) {
-        const m = L.marker([c.lat, c.lon], { icon: L.divIcon({ className: '', html: `<div class="mk-crew-wrap"><div class="mk-crew" style="--c:${color}"></div></div>`, iconSize: [16, 16], iconAnchor: [8, 8] }), zIndexOffset: 900 });
+        const m = L.marker([c.lat, c.lon], { icon: L.divIcon({ className: '', html: `<div class="mk-crew-wrap"><div class="mk-crew" style="--c:${color}"></div></div>`, iconSize: [16, 16], iconAnchor: [8, 8] }), zIndexOffset: 900, title: `Crew ${c.name || c.id}` });
         e = { m, crew: c, at: Date.now(), heading: 0, raf: 0 };
         m.on('click', () => select('crew', e.crew, e.crew.name));
         // Leaflet rebuilds the icon element when the layer is toggled back on
@@ -585,18 +591,29 @@ export default function NetworkMap() {
           <div className="map-search">
             <div className="ms-box">
               <Icon name="pin" size={15} />
+              {/* Keyboard route to every map feature (markers on the canvas can't take focus):
+                  a combobox - arrows move through results, Enter opens the active one. */}
               <input value={query} placeholder="Search feeders, substations, DTRs, crews…"
-                onChange={(e) => { setQuery(e.target.value); setOpenResults(true); }}
+                aria-label="Search the network map" role="combobox" aria-autocomplete="list"
+                aria-expanded={!!(openResults && query)} aria-controls="map-search-results"
+                aria-activedescendant={openResults && query && results[activeIdx] ? `map-result-${activeIdx}` : undefined}
+                onChange={(e) => { setQuery(e.target.value); setOpenResults(true); setActiveIdx(0); }}
                 onFocus={() => setOpenResults(true)}
                 onBlur={() => setTimeout(() => setOpenResults(false), 150)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && results[0]) goTo(results[0]); if (e.key === 'Escape') { setQuery(''); setOpenResults(false); } }} />
-              {query && <button className="ms-clear" onMouseDown={(e) => e.preventDefault()} onClick={() => setQuery('')}><Icon name="x" size={13} /></button>}
+                onKeyDown={(e) => {
+                  if (e.key === 'ArrowDown' && results.length) { e.preventDefault(); setOpenResults(true); setActiveIdx((i) => Math.min(i + 1, results.length - 1)); }
+                  else if (e.key === 'ArrowUp' && results.length) { e.preventDefault(); setActiveIdx((i) => Math.max(i - 1, 0)); }
+                  else if (e.key === 'Enter' && results[activeIdx]) goTo(results[activeIdx]);
+                  else if (e.key === 'Escape') { setQuery(''); setOpenResults(false); }
+                }} />
+              {query && <button className="ms-clear" aria-label="Clear search" onMouseDown={(e) => e.preventDefault()} onClick={() => setQuery('')}><Icon name="x" size={13} /></button>}
             </div>
             {openResults && query && (
-              <div className="ms-results">
-                {results.length === 0 && <div className="ms-empty">No matches for “{query}”.</div>}
+              <div className="ms-results" id="map-search-results" role="listbox" aria-label="Search results">
+                {results.length === 0 && <div className="ms-empty" role="status">No matches for “{query}”.</div>}
                 {results.map((r, i) => (
-                  <button key={r.kind + r.label + i} className="ms-item" onMouseDown={(e) => e.preventDefault()} onClick={() => goTo(r)}>
+                  <button key={r.kind + r.label + i} id={`map-result-${i}`} role="option" aria-selected={i === activeIdx} tabIndex={-1}
+                    className={`ms-item${i === activeIdx ? ' active' : ''}`} onMouseEnter={() => setActiveIdx(i)} onMouseDown={(e) => e.preventDefault()} onClick={() => goTo(r)}>
                     <span className={`ms-tag tag-${r.kind}`}>{r.type}</span>
                     <span className="ms-label">{r.label}</span>
                     {r.sub && <span className="ms-sub">{r.sub}</span>}
@@ -626,7 +643,7 @@ export default function NetworkMap() {
           </div>
 
           {sel && (
-            <div className="map-detail card">
+            <div className="map-detail card" ref={detailRef} tabIndex={-1} role="region" aria-label={`Selected: ${sel.kind === 'incident' ? sel.id : sel.label || sel.kind}`}>
               <div className="card-h"><h3>{sel.kind === 'incident' ? sel.id : sel.kind === 'feeder' ? 'Feeder' : sel.label}</h3>
                 <button className="iconbtn" aria-label="Close" onClick={() => { setSel(null); setSelFeeder(null); setTrace(null); highlight(null); }}><Icon name="x" size={15} /></button></div>
               <div className="card-b">

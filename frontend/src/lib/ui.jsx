@@ -1,6 +1,18 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { socket } from './api.js';
 
+// Text alternative for a chart (WCAG 1.1.1 / 1.3.1): the same numbers as a
+// table that only assistive technology sees. The SVG itself stays role="img".
+export function SrTable({ caption, head, rows }) {
+  return (
+    <table className="sr-only">
+      <caption>{caption}</caption>
+      <thead><tr>{head.map((h) => <th key={h} scope="col">{h}</th>)}</tr></thead>
+      <tbody>{rows.map((r, i) => <tr key={i}>{r.map((c, j) => (j === 0 ? <th key={j} scope="row">{c}</th> : <td key={j}>{c}</td>))}</tr>)}</tbody>
+    </table>
+  );
+}
+
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 // Modal behaviour for hand-rolled overlays/drawers (WCAG 2.1.1, 2.1.2, 2.4.3):
