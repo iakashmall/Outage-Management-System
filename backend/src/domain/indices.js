@@ -38,7 +38,8 @@ export function filterIncidents(incidents, filters = {}) {
 
 export function computeIndices(incidents, filters = {}) {
   const served = customersServed();
-  const scoped = filterIncidents(incidents, filters);
+  // A cancelled incident (false alarm / test entry) interrupted nobody.
+  const scoped = filterIncidents(incidents, filters).filter((i) => i.status !== 'cancelled');
   const interrupting = scoped.filter((i) => i.type !== 'Scheduled' && i.severity !== 'low' && !i.momentary);
   const momentaryEvents = scoped.filter((i) => i.momentary);
   const custInterrupted = interrupting.reduce((s, i) => s + (i.customers || 0), 0);
