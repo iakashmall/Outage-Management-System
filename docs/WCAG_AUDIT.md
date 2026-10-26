@@ -176,3 +176,125 @@ That's the gap a real specialist audit would close.
 - `frontend/src/App.jsx`
 
 No CSS files, color tokens, or visual layout were changed.
+
+## Round 2 -- static jsx-a11y pass (commit 27e7128)
+
+A second, complementary pass ran
+[`eslint-plugin-jsx-a11y`](https://github.com/jsx-eslint/eslint-plugin-jsx-a11y)
+6.x (`strict` config) over every `.jsx` file in `frontend/src`. A static lint
+sees source patterns axe can't (a handler on a `div` that is never rendered
+during a scan, `autoFocus`, label wiring) and needs no running app or login.
+It found **26 findings**; 14 needed code changes, 12 are deliberate and now
+carry an inline comment explaining why. Re-running the lint gives 0 a11y
+findings, and the build passes.
+
+| Finding | WCAG | Where | Resolution |
+|---|---|---|---|
+| Drawers / photo viewer closed only by a mouse click on the backdrop | 2.1.1 | `Incidents.jsx` (New incident, photo viewer), `TCS.jsx` (call drawers) | **Fixed**: new `useEscape()` hook in `lib/ui.jsx`; Escape now closes them. Backdrops marked `aria-hidden`. |
+| Photo thumbnails were clickable `div`s, unreachable by keyboard | 2.1.1, 4.1.2 | `Incidents.jsx` | **Fixed**: real `<button>`s labelled "Open photo: Taken by <crew> at <time>" |
+| Alt text "Job photo" / "Job photo full size" (redundant, uninformative) | 1.1.1 | `Incidents.jsx` | **Fixed**: thumbnail image `alt=""` (button carries the name); full-size image gets the crew/time description |
+| Photo viewer not exposed as a dialog | 4.1.2, 2.4.3 | `Incidents.jsx` | **Fixed**: `role="dialog" aria-modal`, focus moves to Close on open |
+| SMS form labels not associated with inputs | 1.3.1, 3.3.2 | `Analytics.jsx` | **Fixed**: `htmlFor` / `id` pairs |
+| `<button role="listitem">` in the worst-feeders bar chart | 4.1.2 | `KpiCharts.jsx` | **Fixed**: `listitem` wrapper with a plain button inside |
+| `tabIndex` on the scrollable incidents region | 2.1.1 | `Dashboard.jsx` | **Kept**: required by `scrollable-region-focusable` (the round-1 fix); lint rule suppressed with a comment |
+| `autoFocus` on 5 fields | 2.4.3 | `Incidents.jsx`, `TCS.jsx`, `DispatchWorkload.jsx`, `FeederPdfPicker.jsx`, photo Close | **Kept**: each field appears only as a direct result of the user's own click (Reject, Correct, Search, open viewer); moving focus there is expected |
+| Mouse-down on the About overlay backdrop | 2.1.1 | `AboutOverlay.jsx` | **Kept**: Escape already closes it |
+
+Manually confirmed in the running app: Escape on the drawers and viewer,
+keyboard access to thumbnails, KPI bars, SMS label focus. While doing so a
+layout bug surfaced (unrelated to a11y): the incident drawer's Job photos and
+Asset scans sections rendered outside the padded body; fixed in `fda5676`.
+
+### Still open after round 2
+
+The round-1 open items stand: the badge/secondary-text **colour contrast**
+(design decision), the **Network Map canvas**, and a full **NVDA /
+keyboard-only walkthrough** of the incident lifecycle.
+
+### Focus management in hand-rolled dialogs (fixed)
+
+The New incident drawer, TCS call drawers, photo viewer and About overlay let
+Tab escape to the page behind (WCAG 2.1.2 / 2.4.3). They now share
+`useDialog()` in `lib/ui.jsx`: Escape closes, Tab / Shift+Tab cycle inside,
+focus moves in on open and returns to the opener on close; all four are
+`role="dialog" aria-modal="true"`. Verified by hand in the running app (focus
+start, Tab and Shift+Tab wrap, Escape, focus return, backdrop click). The
+Radix-based incident drawer already managed focus and is unchanged.
+
+## Round 3 -- colour contrast fixed, full live re-scan
+
+The badge / secondary-text contrast item above was resolved by darkening
+each failing colour just enough (same hue, HSL lightness only) to reach
+4.5:1 on every background it is drawn on -- "option A", chosen by the
+product owner over keeping the original orange/grey for non-text use.
+
+| Token | Before | After | Worst ratio before → after |
+|---|---|---|---|
+| `--crit` | `#d7382a` | `#c93326` | 4.09 → 4.61 |
+| `--high` | `#e08a1e` | `#9a5f15` | 2.37 → 4.61 (orange reads as brown) |
+| `--med` | `#2f6fd6` | `#2868cd` | 4.19 → 4.63 |
+| `--low` | `#2a9d5c` | `#217b48` | 3.05 → 4.64 |
+| `--muted` | `#64748b` | `#5e6d82` | 4.20 → 4.65 |
+| `--faint` | `#9fb0c4` | `#566e8b` | 1.95 → 4.63 |
+
+Hard-coded colours that bypassed the tokens were fixed where axe found
+failing **text**: the Analytics status palette (`#e23b2e`, `#22b06b`,
+`#3b82f6`, `#ef9021`, `#d1a017` → `#c4271b`, `#177648`, `#0a5de4`,
+`#9a580b`, `#83640e`), SAIDI/CAIDI values in `ReliabilityRings.jsx` (new
+`textColor`, ring gradients unchanged), the incident-search severity tags,
+and the Network Map legend subtitle. Chart lines, map markers and status
+dots keep their colours (non-text; not flagged).
+
+The same scan also found and fixed: an unnamed feeder `<select>` on
+Analytics; the SMS log / escalation tracker scroll areas not keyboard
+focusable (`role="region"`, `tabIndex=0`); and the Feeder PQ KPI View /
+Period / Phase toggles mis-declared as `tablist` (now `role="group"` with
+`aria-pressed`).
+
+**Method:** axe-core 4.10 via Playwright (headless Chromium), logged in
+through the real Keycloak flow as a temporary `oms_operator` user with
+password + TOTP (deleted afterwards); tags `wcag2a`, `wcag2aa`, `wcag21a`,
+`wcag21aa`. Same script before and after, old colours restored for the
+"before" run.
+
+| View | Contrast nodes before | After | Other violations after |
+|---|---|---|---|
+| Dashboard | 22 | 0 | 0 |
+| Network Map | 1 | 0 | 0 |
+| Incidents | 26 | 0 | 0 |
+| Dispatch | 5 | 0 | 0 |
+| Planned outages | 1 | 0 | 0 |
+| Alarms | 10 | 0 | 0 |
+| TCS / IVR | 26 | 0 | 0 |
+| Complaints | 1 | 0 | 0 |
+| Analytics | 19 (+1 `select-name`) | 0 | 0 |
+| Admin | 1 | 0 | 0 |
+| New incident drawer / incident detail drawer / About | 26 / 26 / 19 | 0 | 0 |
+| Analytics › SMS & Escalation, › Feeder PQ KPIs | not scanned | 0 | 0 (after the fixes above) |
+
+**Result: 0 automated WCAG 2.1 A/AA violations across all 15 views.**
+
+### Still open (manual only)
+
+- Keyboard-only and NVDA walkthrough of the incident lifecycle.
+- Network Map canvas: keyboard pan/zoom and colour-only encoding.
+
+Automated tools find roughly 30-40% of WCAG issues; these manual checks
+are what remains before P8.7a can be called complete.
+
+## Map and chart text alternatives (after round 3)
+
+Two gaps predicted while writing the manual script (`WCAG_MANUAL_TEST.md`
+steps C5 and B14) were fixed in code; they are confirmed by build and
+jsx-a11y lint, and are to be confirmed by that manual run:
+
+- **Network Map keyboard route (2.1.1, 4.1.2):** the map search is now an
+  ARIA combobox (↓/↑ move through results, Enter opens one) and is the
+  keyboard path to every feature, including canvas-drawn RMUs, switches and
+  DTRs. Search box and clear button are labelled; incident, crew, substation
+  and power-transformer markers get accessible names; choosing a feature
+  moves focus to the details panel (a named region).
+- **Charts (1.1.1, 1.3.1):** KPI trend charts, hierarchy line charts and
+  the monthly SAIDI bars each carry a screen-reader-only data table
+  (`SrTable` in `lib/ui.jsx`); decorative reliability-ring graphics are
+  `aria-hidden` (their values are already text).

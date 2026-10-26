@@ -371,7 +371,7 @@ export function ProposalCard({ proposal, crewName, onDone, onStale }) {
         )}
 
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', alignItems: 'center', flexWrap: 'wrap' }}>
-          {rejecting && <input style={{ ...inp, width: 280 }} placeholder="Reason for rejecting (optional)" value={note} onChange={(e) => setNote(e.target.value)} autoFocus />}
+          {rejecting && <input style={{ ...inp, width: 280 }} placeholder="Reason for rejecting (optional)" value={note} onChange={(e) => setNote(e.target.value)} autoFocus /* eslint-disable-line jsx-a11y/no-autofocus -- opened by the user's own click */ />}
           {rejecting
             ? <><button className="btn sm" onClick={() => setRejecting(false)} disabled={busy}>Cancel</button>
                 <button className="btn danger sm" onClick={reject} disabled={busy}><Icon name="x" size={14} /> Confirm reject</button></>

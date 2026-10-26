@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { SrTable } from '../lib/ui.jsx';
 import { api } from '../lib/api.js';
 import { TrendChart, WorstBars, allZeroMessage } from './KpiCharts.jsx';
 import FeederPdfPicker from './FeederPdfPicker.jsx';
@@ -147,13 +148,14 @@ export default function FeederKpiPanel() {
   return (
     <div className="fk">
       <div className="fk-bar">
-        <div className="seg" role="tablist" aria-label="View">
-          <button className={mode === 'tree' ? 'on' : ''} onClick={() => setMode('tree')}>Hierarchy</button>
-          <button className={mode === 'all' ? 'on' : ''} onClick={() => setMode('all')}>All feeders</button>
-          <button className={mode === 'one' ? 'on' : ''} onClick={() => setMode('one')}>One feeder</button>
+        {/* Toggle groups (role=group + aria-pressed), not tablists: these buttons switch a filter, they do not own tab panels. */}
+        <div className="seg" role="group" aria-label="View">
+          <button aria-pressed={mode === 'tree'} className={mode === 'tree' ? 'on' : ''} onClick={() => setMode('tree')}>Hierarchy</button>
+          <button aria-pressed={mode === 'all'} className={mode === 'all' ? 'on' : ''} onClick={() => setMode('all')}>All feeders</button>
+          <button aria-pressed={mode === 'one'} className={mode === 'one' ? 'on' : ''} onClick={() => setMode('one')}>One feeder</button>
         </div>
-        <div className="seg" role="tablist" aria-label="Period">
-          {PERIODS.map(([k, l]) => <button key={k} className={period === k ? 'on' : ''} onClick={() => setPeriod(k)}>{l}</button>)}
+        <div className="seg" role="group" aria-label="Period">
+          {PERIODS.map(([k, l]) => <button key={k} aria-pressed={period === k} className={period === k ? 'on' : ''} onClick={() => setPeriod(k)}>{l}</button>)}
         </div>
         {period === 'custom' ? (
           <span className="fk-dates">
@@ -170,8 +172,8 @@ export default function FeederKpiPanel() {
           </select>
         )}
         {mode !== 'one' && (
-          <div className="seg" aria-label="Phase">
-            {PHASES.map((p) => <button key={p} className={phase === p ? 'on' : ''} onClick={() => setPhase(p)}>{p === 'T' ? 'Total' : p}</button>)}
+          <div className="seg" role="group" aria-label="Phase">
+            {PHASES.map((p) => <button key={p} aria-pressed={phase === p} className={phase === p ? 'on' : ''} onClick={() => setPhase(p)}>{p === 'T' ? 'Total' : p}</button>)}
           </div>
         )}
         <div className="grow" />
@@ -388,6 +390,8 @@ function MiniLines({ labels: allLabels, granularity, lines: allLines, def, unit 
         })}
         {hover != null && <line x1={x(hover)} x2={x(hover)} y1={MT} y2={H - MB} stroke="var(--muted)" strokeDasharray="3 3" strokeWidth={0.8} />}
       </svg>
+      <SrTable caption={`${def.code} values`} head={['Time', ...lines.map((ln) => ln.label)]}
+        rows={labels.map((l, i) => [xLabel(l.label, granularity), ...lines.map((ln) => (ln.values[i] == null ? '–' : fmt(ln.values[i], unit)))])} />
       {hover != null && (
         <div className="kh-tip">
           <b>{xLabel(labels[hover].label, granularity)}</b>

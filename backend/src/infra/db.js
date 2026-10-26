@@ -218,6 +218,15 @@ export async function migrate() {
     ALTER TABLE incidents ADD COLUMN IF NOT EXISTS restored_by TEXT;
     ALTER TABLE incidents ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ;
     ALTER TABLE notifications ADD COLUMN IF NOT EXISTS contact_ref TEXT;
+    ALTER TABLE notifications ADD COLUMN IF NOT EXISTS feeder TEXT;
+    ALTER TABLE notifications ADD COLUMN IF NOT EXISTS kind TEXT;     -- officer | escalation (NULL = customer / callback)
+    ALTER TABLE notifications ADD COLUMN IF NOT EXISTS sent_by TEXT;
+    -- SCADA incidents used to open without an SLA clock; give still-active ones the same
+    -- severity SLA as manual incidents (domain/sla.js) so escalation covers them.
+    UPDATE incidents SET sla_due_at = opened_at + make_interval(mins => CASE severity
+        WHEN 'critical' THEN 90 WHEN 'high' THEN 180 WHEN 'low' THEN 720 ELSE 360 END)
+      WHERE sla_due_at IS NULL AND source = 'SCADA'
+        AND status NOT IN ('closed', 'resolved', 'cancelled', 'restored', 'scheduled');
     CREATE UNIQUE INDEX IF NOT EXISTS notifications_callback_once ON notifications (incident_id, contact_ref) WHERE contact_ref IS NOT NULL;
     ALTER TABLE crews ADD COLUMN IF NOT EXISTS tracking_state TEXT;
     ALTER TABLE crews ADD COLUMN IF NOT EXISTS tracking_reason TEXT;

@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { SrTable } from '../lib/ui.jsx';
 
 // Charts for the PFC feeder KPI panel. Hand-drawn SVG, no chart library,
 // same approach as the SAIDI bars in screens/Analytics.jsx.
@@ -132,6 +133,8 @@ export function TrendChart({ points, def, granularity, rating }) {
         })}
         {hover != null && <line x1={x(hover)} x2={x(hover)} y1={MT} y2={H - MB} className="fk-cross" />}
       </svg>
+      <SrTable caption={`${def.name} values`} head={['Period', ...phases.map((p) => (p ? NAMES[p] : def.code))]}
+        rows={points.map((pt) => [shortLabel(pt.label, granularity), ...phases.map((p) => pt.kpis[keyOf(p)] ?? '–')])} />
       {hp && (
         <div className="fk-tip" style={{ left: `${(x(hover) / W) * 100}%` }}>
           <b>{shortLabel(hp.label, granularity)}</b>
@@ -150,11 +153,13 @@ export function WorstBars({ rows, unit, toneOf, onPick }) {
   return (
     <div className="fk-bars" role="list">
       {rows.map((r) => (
-        <button key={r.feeder} className="fk-bar-row" role="listitem" onClick={() => onPick(r.feeder)} title="Open this feeder">
-          <span className="fk-bar-name mono">{r.feeder}</span>
-          <span className="fk-bar-track"><span className={`fk-bar-fill fk-fill-${toneOf(r.value) || 'ok'}`} style={{ width: `${Math.max(1.5, (Math.abs(r.value) / max) * 100)}%` }} /></span>
-          <span className="fk-bar-val mono">{numFmt(r.value)}<small> {unit === 'Nos' ? '' : unit}</small></span>
-        </button>
+        <div key={r.feeder} role="listitem">
+          <button className="fk-bar-row" onClick={() => onPick(r.feeder)} title="Open this feeder">
+            <span className="fk-bar-name mono">{r.feeder}</span>
+            <span className="fk-bar-track"><span className={`fk-bar-fill fk-fill-${toneOf(r.value) || 'ok'}`} style={{ width: `${Math.max(1.5, (Math.abs(r.value) / max) * 100)}%` }} /></span>
+            <span className="fk-bar-val mono">{numFmt(r.value)}<small> {unit === 'Nos' ? '' : unit}</small></span>
+          </button>
+        </div>
       ))}
     </div>
   );

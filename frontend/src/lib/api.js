@@ -58,6 +58,9 @@ const exportFeederKpiPdf = (params = {}, feeders = []) => {
 };
 export const api = {
   incidents: () => req('GET', '/incidents'),
+  smsLog: () => req('GET', '/sms'),
+  sendSms: (b) => req('POST', '/sms', b),
+  escalations: () => req('GET', '/escalations'),
   incident: (id) => req('GET', `/incidents/${id}`),
   createIncident: (b) => req('POST', '/incidents', b),
   setStatus: (id, status, note) => req('PATCH', `/incidents/${id}/status`, { status, note }),
