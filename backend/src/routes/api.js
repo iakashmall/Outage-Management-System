@@ -8,6 +8,7 @@ import { bus, TOPICS } from '../domain/bus.js';
 import { canTransition, nextStates, LABELS } from '../domain/lifecycle.js';
 import { computeIndices, computePlannedIndices, computeMTTR, computeSLACompliance, computeCrewProductivity, computeOutageFrequency } from '../domain/indices.js';
 import { buildCsv, buildPdf } from '../domain/reports.js';
+import { REPORTS, buildStandardReport, standardReportCsv } from '../domain/standardReports.js';
 import { MAX_LOCATION_BATCH, parseLocationBatch, newestLivePoint, parseTileParams } from '../domain/locations.js';
 import { createRouter } from '../domain/roadRouter.js';
 import { mapProxy } from './mapProxy.js';
@@ -891,6 +892,23 @@ api.get('/analytics/outage-frequency', async (req, res) => {
   res.json(freq);
 });
   
+// ---------- Standard reports (Analytics -> Standard reports) ----------
+// Outage History, Cause Analysis, Recurring Trouble, Worst-Performing Feeders/Devices,
+// Closed Cases. Query: from, to, zone (+ windowDays/minCount for recurring, limit for worst);
+// format=csv downloads the same report.
+api.get('/reports/standard', (req, res) => res.json(Object.entries(REPORTS).map(([kind, title]) => ({ kind, title }))));
+api.get('/reports/standard/:kind', async (req, res) => {
+  const { from, to, zone, windowDays, minCount, limit, format } = req.query;
+  const r = buildStandardReport(req.params.kind, await repo.incidents(), { from, to, zone, windowDays, minCount, limit });
+  if (!r) return res.status(404).json({ error: `unknown report "${req.params.kind}"` });
+  if (format === 'csv') {
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${r.kind}-report.csv"`);
+    return res.send(standardReportCsv(r));
+  }
+  res.json(r);
+});
+
 // ---------- P7.2: regulatory reliability reports ----------
   api.get('/reports/reliability', requireRole('system_admin', 'oms_operator'), async (req, res) => {
     const { from, to, zone, assetType, format = 'json' } = req.query;

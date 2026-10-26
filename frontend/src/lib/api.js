@@ -51,6 +51,8 @@ async function download(path, fallbackName) {
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 }
+const clean = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== '' && v != null));
+const exportStandardReport = (kind, params = {}) => download(`/reports/standard/${kind}?${new URLSearchParams({ ...clean(params), format: 'csv' })}`, `${kind}-report.csv`);
 const exportFeederKpi = (params = {}) => download(`/analytics/feeder-kpi/export?${new URLSearchParams(params)}`, 'feeder-kpi.csv');
 const exportFeederKpiPdf = (params = {}, feeders = []) => {
   const { feeder, ...rest } = params; // the PDF names its own feeders
@@ -96,6 +98,8 @@ export const api = {
   indicators: () => req('GET', '/indicators'),
   monthly: () => req('GET', '/analytics/monthly'),
   exportReliabilityReport,
+  standardReport: (kind, params = {}) => req('GET', `/reports/standard/${kind}?${new URLSearchParams(clean(params))}`),
+  exportStandardReport,
   mttr: () => req('GET', '/analytics/mttr'),
   slaCompliance: () => req('GET', '/analytics/sla'),
   crewProductivity: () => req('GET', '/analytics/crew-productivity'),

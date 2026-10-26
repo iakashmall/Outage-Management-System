@@ -14,6 +14,7 @@ import { useEffect, useMemo, useState, useCallback } from 'react';
 import { api } from '../lib/api.js';
 import { useLiveRefresh, toast, SrTable, RowButton } from '../lib/ui.jsx';
 import FeederKpiPanel from '../components/FeederKpiPanel.jsx';
+import StandardReports from '../components/StandardReports.jsx';
 // ─────────────────────────────────────────────────────────────
 // Constants
 // ─────────────────────────────────────────────────────────────
@@ -330,6 +331,7 @@ export default function Analytics() {
   const showFunctional = role === 'functional';
 
   const TABS = [
+    { key: 'reports',    label: 'Standard reports', show: true },
     { key: 'kpi',        label: 'Feeder KPIs (PFC)', show: true },
     { key: 'saidi',      label: 'SAIDI/SAIFI', show: true },
     { key: 'sms',        label: 'SMS & Escalation', show: true },
@@ -986,6 +988,7 @@ export default function Analytics() {
           </div>
         </div>
       )}
+      {activeTab === 'reports' && <StandardReports />}
       {activeTab === 'pfc' && <FeederKpiPanel />} 
 
       {/* Drill-down panel (shared) */}

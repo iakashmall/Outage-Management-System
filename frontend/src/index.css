@@ -1033,3 +1033,18 @@ button.kh-more:hover{text-decoration:underline}
 .lg-crew{flex:none;display:inline-flex;width:16px;height:14px;justify-content:center}
 /* The scrolling track is transformed, so it painted over the LIVE badge; keep the badge on top. */
 .tape .badge{position:relative;z-index:1;flex:none}
+/* Analytics -> Standard reports */
+.sr-kinds{margin-bottom:6px}
+.sr-about{margin:4px 0 12px;color:var(--muted);font-size:12.5px}
+.sr-filters{display:flex;flex-wrap:wrap;align-items:flex-end;gap:14px 20px;padding:12px 14px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--paper-2,#f7f9fc)}
+.sr-field{display:flex;flex-direction:column;gap:5px;min-width:0}
+.sr-label{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.sr-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.sr-filters input[type=date],.sr-filters input[type=number],.sr-filters select{font:inherit;font-size:12.5px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--surface,#fff);color:inherit}
+.sr-filters select{min-width:220px;max-width:320px}
+.sr-num{width:60px}
+.sr-filters .grow{flex:1}
+.sr-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:0 0 12px}
+.sr-stat{border:1px solid var(--line);border-radius:var(--r-sm);padding:10px 12px;background:var(--surface,#fff);display:flex;flex-direction:column;gap:4px;min-width:0}
+.sr-stat span{font-size:11px;color:var(--muted)}
+.sr-stat b{font-size:16px;overflow-wrap:anywhere}
