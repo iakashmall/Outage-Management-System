@@ -98,21 +98,37 @@ function LiveTape() {
   const feed = events.length ? events : [{ id: 0, label: 'SYSTEM', cls: 'ok', detail: 'Field telemetry stream connected - awaiting events', t: hhmm(new Date().toISOString()) }];
   const doubled = [...feed, ...feed];
   return (
-    <div className="tape" role="status" aria-label="Live event feed">
+    // Not a live region: the tape updates on every crew GPS ping, and announcing each one
+    // drowns out everything else for screen-reader users (WCAG 2.2.2). It stays readable in
+    // browse mode; the second copy only exists for the scrolling animation, so it is hidden.
+    <section className="tape" aria-label="Live event feed">
       <div className="badge"><i />Live</div>
       <div className="track">
         {doubled.map((e, idx) => (
-          <span className={`ev ${e.cls}`} key={e.id + '-' + idx}>
+          <span className={`ev ${e.cls}`} key={e.id + '-' + idx} aria-hidden={idx >= feed.length || undefined}>
             <span className="t">{e.t}</span><b>{e.label}</b> {e.detail}
           </span>
         ))}
       </div>
-    </div>
+    </section>
   );
 }
 
 export default function App() {
   const [tab, setTab] = useState('dashboard');
+  // Choosing a screen in the rail moves focus to that screen, so the next Tab
+  // reaches its first control instead of the header controls again (WCAG 2.4.1, 2.4.3).
+  const mainRef = useRef(null);
+  const goTab = (id) => { setTab(id); requestAnimationFrame(() => mainRef.current?.focus({ preventScroll: true })); };
+  // Esc inside a screen returns focus to that screen's button in the rail - unless Esc already
+  // has a job there: closing a dialog/drawer, or leaving a field the user is typing in.
+  const escToRail = (e) => {
+    if (e.key !== 'Escape' || e.defaultPrevented) return;
+    const t = e.target;
+    if (t.closest?.('input, textarea, select, [contenteditable="true"], [role="combobox"]')) return;
+    if (document.querySelector('[role="dialog"][aria-modal="true"], [data-vaul-drawer]')) return;
+    document.querySelector('nav.rail button[aria-current="true"]')?.focus();
+  };
   const [focusIncidentId, setFocusIncidentId] = useState(null);
   const [showAbout, setShowAbout] = useState(false);
   const up = useConnection();
@@ -177,11 +193,12 @@ export default function App() {
 
   return (
     <div className="shell">
+      <a className="skip-link" href="#main-content" onClick={(e) => { e.preventDefault(); mainRef.current?.focus(); }}>Skip to main content</a>
       <nav className="rail" aria-label="Primary">
         <div className="brand" title="GridQ"><img src="/gridq-mark.png" alt="GridQ" className="brand-img" /></div>
         {nav.map(([id, label, icon]) => (
           <button key={id} className={`navbtn ${tab === id ? 'on' : ''}`}
-            onClick={() => setTab(id)} aria-current={tab === id} aria-label={label}>
+            onClick={() => goTab(id)} aria-current={tab === id} aria-label={label}>
             <Icon name={icon} />
             <span className="tip">{label}</span>
           </button>
@@ -231,7 +248,9 @@ export default function App() {
 
         <LiveTape />
 
-        <div className="content">
+        {/* onKeyDown handles Esc bubbling up from the screen's own controls (see escToRail). */}
+        {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
+        <main className="content" id="main-content" ref={mainRef} tabIndex={-1} aria-label={active[1]} onKeyDown={escToRail}>
           <AnimatePresence mode="wait">
             <motion.div
               key={tab}
@@ -246,7 +265,7 @@ export default function App() {
               </ScreenBoundary>
             </motion.div>
           </AnimatePresence>
-        </div>
+        </main>
 
         <div className="powered-by">
           <img src="/spintech-logo.png" alt="" />

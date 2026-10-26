@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api.js';
-import { Icon, SevBadge, StatusBadge, timeAgo, useLiveRefresh, toast } from '../lib/ui.jsx';
+import { Icon, SevBadge, StatusBadge, timeAgo, useLiveRefresh, toast, RowButton } from '../lib/ui.jsx';
 
 const CATCHIP = { 'No Supply': 'crit', 'Partial Supply': 'major', 'Voltage': 'minor', 'Wire Down': 'crit', 'Meter': 'neutral', 'Other': 'neutral' };
 const clean = (n) => (n || '').replace(/33\/11 kV/i, '').replace(/S\/s/i, '').trim() || '—';
@@ -65,7 +65,7 @@ export default function Complaints() {
               <tbody>
                 {sorted.map((r) => (
                   <tr key={r.qid} className={sel === r.qid ? 'row-sel' : ''} onClick={() => openTrace(r.qid)} style={{ cursor: 'pointer' }}>
-                    <td className="mono">{r.qid}</td>
+                    <td className="mono"><RowButton label={`Show trace for complaint ${r.qid}`} aria-pressed={sel === r.qid} onActivate={() => openTrace(r.qid)}>{r.qid}</RowButton></td>
                     <td className="mono muted">{r.external_id || '—'}</td>
                     <td>{r.customer || '—'}</td>
                     <td><span className={`chip chip-${CATCHIP[r.category] || 'neutral'}`}>{r.category}</span></td>

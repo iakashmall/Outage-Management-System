@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { SrTable } from '../lib/ui.jsx';
+import { SrTable, RowButton } from '../lib/ui.jsx';
 import { api } from '../lib/api.js';
 import { TrendChart, WorstBars, allZeroMessage } from './KpiCharts.jsx';
 import FeederPdfPicker from './FeederPdfPicker.jsx';
@@ -227,7 +227,7 @@ export default function FeederKpiPanel() {
                 const none = !f.coverage.coveredMinutes;
                 return (
                   <tr key={f.feeder} onClick={() => openFeeder(f.feeder)} className={none ? 'fk-nodata' : ''} style={{ cursor: 'pointer' }}>
-                    <td className="mono">{f.feeder}</td>
+                    <td className="mono"><RowButton label={`Open feeder ${f.feeder}`} onActivate={() => openFeeder(f.feeder)}>{f.feeder}</RowButton></td>
                     <td className="fk-subst">{f.substation || '—'}</td>
                     <td className="mono">{none ? 'no data' : `${Math.round(f.coverage.completenessPct)}%`}</td>
                     {LEAGUE.map((c) => {
@@ -278,7 +278,7 @@ export default function FeederKpiPanel() {
                     const v = one.kpis[d.code];
                     return (
                       <tr key={d.code} onClick={() => setCode(d.code)} className={code === d.code ? 'fk-rowsel' : ''} style={{ cursor: 'pointer' }}>
-                        <td className="muted">{d.item}</td><td className="mono"><b>{d.code}</b></td><td>{d.name}</td><td className="muted">{d.unit}</td>
+                        <td className="muted">{d.item}</td><td className="mono"><RowButton label={`Chart ${d.code}`} aria-pressed={code === d.code} onActivate={() => setCode(d.code)}><b>{d.code}</b></RowButton></td><td>{d.name}</td><td className="muted">{d.unit}</td>
                         <td colSpan={3} className="muted fk-note">R/Y/B combined{one.extras?.FLIF_AVG != null ? ` · average ${one.extras.FLIF_AVG}%` : ''}</td>
                         <td className={`mono fk-num fk-${tone(d.code, v)}`}>{fmt(v, d.unit)}</td>
                       </tr>
@@ -286,7 +286,7 @@ export default function FeederKpiPanel() {
                   }
                   return (
                     <tr key={d.code} onClick={() => setCode(d.code)} className={code === d.code ? 'fk-rowsel' : ''} style={{ cursor: 'pointer' }}>
-                      <td className="muted">{d.item}</td><td className="mono"><b>{d.code}</b></td><td>{d.name}</td><td className="muted">{d.unit}</td>
+                      <td className="muted">{d.item}</td><td className="mono"><RowButton label={`Chart ${d.code}`} aria-pressed={code === d.code} onActivate={() => setCode(d.code)}><b>{d.code}</b></RowButton></td><td>{d.name}</td><td className="muted">{d.unit}</td>
                       {PHASES.map((p) => {
                         const v = one.kpis[`${d.code}_${p}`];
                         return <td key={p} className={`mono fk-num fk-${tone(d.code, v)} ${p === 'T' ? 'fk-total' : ''}`}>{fmt(v, d.unit)}</td>;

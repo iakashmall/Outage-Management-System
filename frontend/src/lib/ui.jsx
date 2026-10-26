@@ -3,6 +3,16 @@ import { socket } from './api.js';
 
 // Text alternative for a chart (WCAG 1.1.1 / 1.3.1): the same numbers as a
 // table that only assistive technology sees. The SVG itself stays role="img".
+// Clickable table rows are mouse-only (a <tr> can't take focus). Put one of these
+// in the row's first cell: same action, reachable by Tab, named for screen readers
+// (WCAG 2.1.1). It stops propagation so the row's own click doesn't fire twice.
+export function RowButton({ label, onActivate, children, ...rest }) {
+  return (
+    <button type="button" className="row-open" aria-label={label}
+      onClick={(e) => { e.stopPropagation(); onActivate(); }} {...rest}>{children}</button>
+  );
+}
+
 export function SrTable({ caption, head, rows }) {
   return (
     <table className="sr-only">

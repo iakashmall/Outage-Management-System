@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
-import { CrewDot, Icon, SevBadge, StatusBadge, timeAgo, useLiveRefresh } from '../lib/ui.jsx';
+import { CrewDot, Icon, SevBadge, StatusBadge, timeAgo, useLiveRefresh, RowButton } from '../lib/ui.jsx';
 import ReliabilityRings from '../components/ReliabilityRings.jsx';
 
 export default function Dashboard({ go }) {
@@ -63,7 +63,7 @@ export default function Dashboard({ go }) {
               <tbody>
                 {active.map((i) => (
                   <tr key={i.id} className="click" onClick={() => go('incidents')}>
-                    <td className="id-cell">{i.id.slice(-6)}</td>
+                    <td className="id-cell"><RowButton label={`Go to incidents (${i.id})`} onActivate={() => go('incidents')}>{i.id.slice(-6)}</RowButton></td>
                     <td><SevBadge sev={i.severity} /></td>
                     <td>{i.zone}</td>
                     <td className="mono" style={{ fontSize: 12 }}>{i.feeder || '—'}</td>

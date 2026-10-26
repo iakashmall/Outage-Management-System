@@ -204,7 +204,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     try {
       gl = L.maplibreGL({
         style: '/api/map/style.json',
-        attributionControl: { customAttribution: 'Spintech-inhouse map' },
+        attributionControl: { customAttribution: 'Spintech' },
         transformRequest: (url) => (new URL(url, location.href).pathname.startsWith('/api/map/') ? { url, headers: authHeader() } : undefined),
       }).addTo(map);
       const glMap = gl.getMaplibreMap();

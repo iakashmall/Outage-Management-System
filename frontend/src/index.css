@@ -991,3 +991,27 @@ button.kh-more:hover{text-decoration:underline}
 
 /* Visually hidden, still read by screen readers (chart data tables). */
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+
+/* Skip link: first Tab stop on the page, visible only while focused (WCAG 2.4.1). */
+.skip-link{position:absolute;left:12px;top:-60px;z-index:3000;background:var(--navy,#0f2847);color:#fff;padding:10px 14px;border-radius:8px;font-weight:600;text-decoration:none}
+.skip-link:focus{top:12px}
+.content:focus{outline:none}
+.content:focus-visible{outline:none}
+
+/* Incident ID as a button: looks like the plain ID text, focusable for keyboard users. */
+.row-open{all:unset;cursor:pointer;font:inherit;color:inherit;border-radius:4px}
+.row-open:hover{text-decoration:underline}
+.row-open:focus-visible{outline:2px solid var(--med);outline-offset:2px}
+
+/* Focus indicator: a shadowed box instead of an outline line (WCAG 2.4.7, 1.4.11).
+   White inner edge (shows on the dark rail) + solid blue band (5.3:1 on white, the part
+   that carries the contrast) + soft glow. Last in the file so it wins over earlier rules. */
+:root{--focus-ring:#2868cd;--focus-glow:rgba(40,104,205,.45)}
+:focus-visible,
+.rail .brand-btn:focus-visible,
+.row-open:focus-visible{
+  outline:none;
+  box-shadow:0 0 0 2px #fff,0 0 0 5px var(--focus-ring),0 4px 16px 4px var(--focus-glow);
+}
+/* The screen container takes focus only as a starting point for Tab; no box on it. */
+.content:focus,.content:focus-visible{box-shadow:none}

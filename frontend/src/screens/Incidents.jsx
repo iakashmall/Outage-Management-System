@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, socket } from '../lib/api.js';
-import { Icon, SevBadge, StatusBadge, timeAgo, hhmm, useLiveRefresh, toast, useDialog, crewBusyText } from '../lib/ui.jsx';
+import { Icon, SevBadge, StatusBadge, timeAgo, hhmm, useLiveRefresh, toast, useDialog, crewBusyText, RowButton } from '../lib/ui.jsx';
 import { Drawer, DrawerContent } from '../components/ui/drawer.jsx';
 import { currentUser } from '../lib/auth.js';
 
@@ -69,7 +69,8 @@ export default function Incidents({ openId, focusIncidentId, clearFocus, showOnM
           <tbody>
             {rows.map((i) => (
               <tr key={i.id} className="click" onClick={() => open(i)}>
-                <td className="id-cell">{i.id}</td>
+                {/* The row click is for the mouse; the ID button is the keyboard / screen-reader way in (WCAG 2.1.1). */}
+                <td className="id-cell"><RowButton label={`Open incident ${i.id}`} onActivate={() => open(i)}>{i.id}</RowButton></td>
                 <td><SevBadge sev={i.severity} /></td>
                 <td>{i.type}</td>
                 <td>{i.zone}</td>
@@ -108,6 +109,12 @@ function predictionText(p) {
 
 function IncidentDrawer({ inc, onClose, onChange, showOnMap }) {
   const [busy, setBusy] = useState(false);
+  // vaul neither moves focus in (autoFocus is off by default) nor knows the row that opened it:
+  // remember the opener and give focus back on close (WCAG 2.4.3).
+  useEffect(() => {
+    const opener = document.activeElement;
+    return () => { if (opener && opener.isConnected && typeof opener.focus === 'function') opener.focus(); };
+  }, []);
   const [nearest, setNearest] = useState([]);
   useEffect(() => { api.nearestCrews(inc.id).then(setNearest).catch(() => setNearest([])); }, [inc.id]);
   // OMS-03: the crew's field completion report and lock state, per job.
@@ -169,8 +176,11 @@ function IncidentDrawer({ inc, onClose, onChange, showOnMap }) {
     } catch (e) { toast(e.message, 'err'); } finally { setBusy(false); }
   };
 
+  // handleOnly (not dismissible={false}): no drag on the content, so the ETA datetime input still works,
+  // while Escape and an outside click close the drawer (WCAG 2.1.1).
   return (
-    <Drawer direction="right" open={true} onOpenChange={(open) => { if (!open) onClose(); }} dismissible={false}>
+    <Drawer direction="right" open={true} onOpenChange={(open) => { if (!open) onClose(); }} handleOnly
+      autoFocus /* eslint-disable-line jsx-a11y/no-autofocus -- vaul prop: move focus into the dialog it opens */>
       <DrawerContent aria-label={`Incident ${inc.id} details`} style={{ width: 'min(440px, 94vw)', height: '100vh', borderRadius: 0 }}>
         <div className="drawer-h">
           <div>

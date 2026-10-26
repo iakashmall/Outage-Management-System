@@ -51,7 +51,7 @@ Focus visible, 3.2.1/3.2.2 no unexpected context change.
 | A10 | Change status with the status buttons (e.g. In progress → Resolved / Accept - verified restored) | Each change works with Enter / Space; the timeline updates | |
 | A11 | Type a message in **Message the crew** and send with Enter | Message posted | |
 | A12 | Close the drawer with **Esc** | Drawer closes; focus returns to the incident row you opened | |
-| A13 | **Dispatch** screen: use **Select nearest crew to assign** on any open incident (arrow keys + Enter) | Selection works without a mouse | |
+| A13 | **Dispatch** → **Unassigned jobs** card for your own new incident: Tab to its crew dropdown, change the crew with ↑/↓ (Alt+↓ opens the list), then Tab past it to **Dispatch** and press Enter | Crew chosen and dispatched without a mouse; a toast confirms it and the job leaves the list. NVDA reads "Crew for INC-…" and "Dispatch selected crew to INC-…" | |
 | A14 | **TCS / IVR**: on a call, open **Reject**, type a reason, submit; then open another and press **Esc** | Drawer works fully by keyboard; Esc closes and returns focus | |
 | A15 | **Analytics**: switch tabs; in **Feeder PQ KPIs** change View / Period / Phase; in **SMS & Escalation** use **+ Compose SMS** and Tab into the scrollable tables, scroll them with arrow keys | All controls reachable; tables scroll with arrows once focused | |
 | A16 | Throughout: was there **any** moment the focus outline disappeared or you didn't know where you were? | No | |
@@ -83,7 +83,7 @@ Start NVDA, open the app, keep **Speech viewer** open.
 | B13 | **Feeder PQ KPIs** toggles | Read as buttons with pressed state ("Daily, toggle button, pressed") | |
 | B14 | Charts (KPI trend lines, reliability rings) | Values are available as text somewhere (labels, legend, or a table); a chart that is only a picture is a Fail | |
 | B15 | **About** (SpinTech logo, bottom of rail) | "About GridQ, dialog"; content readable; Esc returns to the logo | |
-| B16 | Live updates: wait for a new alarm / call / incident while on another screen | Is anything announced? Note what. (Silent live updates may be acceptable for a control room with sound alarms - record what happens) | |
+| B16 | Live updates: wait for a new alarm / call / incident while on another screen | Nothing is spoken automatically (the feed is not a live region, so GPS pings don't flood speech). **D** to "Live event feed" then **↓** reads the latest events on demand | |
 
 ---
 

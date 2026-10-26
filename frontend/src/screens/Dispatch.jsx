@@ -193,7 +193,7 @@ export default function Dispatch() {
                     <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                       <NearestCrewPicker incId={i.id} area={i.substation} skill={o.skill} pick={pick} setPick={setPick}
                         offShift={offShift} fallback={available} wlCrews={wlCrews} />
-                      <button className="btn primary sm" disabled={!pick[i.id] || offShift.has(pick[i.id])} onClick={() => assign(i)}>
+                      <button className="btn primary sm" aria-label={`Dispatch selected crew to ${i.id}`} disabled={!pick[i.id] || offShift.has(pick[i.id])} onClick={() => assign(i)}>
                         <Icon name="arrow" size={14} /> Dispatch
                       </button>
                     </div>
@@ -271,7 +271,7 @@ function NearestCrewPicker({ incId, area, skill, pick, setPick, offShift, fallba
   }, [nearest, listKey, offKey]); // eslint-disable-line
   const dist = (m) => (m == null ? '' : m < 1000 ? ` · ${Math.round(m)} m` : ` · ${(m / 1000).toFixed(1)} km`);
   return (
-    <select className="btn sm" style={{ flex: 1 }} aria-label="Select nearest crew to assign" value={cur || ''} onChange={(e) => setPick({ ...pick, [incId]: e.target.value })}>
+    <select className="btn sm" style={{ flex: 1 }} aria-label={`Crew for ${incId}`} value={cur || ''} onChange={(e) => setPick({ ...pick, [incId]: e.target.value })}>
       <option value="">{nearest === null ? 'Loading crews…' : usable.length ? 'Select crew…' : 'No crews on shift'}</option>
       {list.map((c) => {
         const off = offShift.has(c.id);

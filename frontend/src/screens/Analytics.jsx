@@ -12,7 +12,7 @@
 
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { api } from '../lib/api.js';
-import { useLiveRefresh, toast, SrTable } from '../lib/ui.jsx';
+import { useLiveRefresh, toast, SrTable, RowButton } from '../lib/ui.jsx';
 import FeederKpiPanel from '../components/FeederKpiPanel.jsx';
 // ─────────────────────────────────────────────────────────────
 // Constants
@@ -361,9 +361,9 @@ export default function Analytics() {
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             {/* Role selector */}
-            <div style={{ display: 'flex', gap: 2, background: 'var(--surface-2,#f0f2f6)', borderRadius: 8, padding: 2 }}>
+            <div role="group" aria-label="Role" style={{ display: 'flex', gap: 2, background: 'var(--surface-2,#f0f2f6)', borderRadius: 8, padding: 2 }}>
               {ROLES.map(r => (
-                <button key={r.key} onClick={() => setRole(r.key)} style={{
+                <button key={r.key} aria-pressed={role === r.key} onClick={() => setRole(r.key)} style={{
                   padding: '5px 12px', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
                   background: role === r.key ? '#0f2847' : 'transparent',
                   color: role === r.key ? '#fff' : 'var(--muted)',
@@ -376,9 +376,9 @@ export default function Analytics() {
         </div>
 
         {/* Period selector */}
-        <div style={{ display: 'flex', gap: 6, marginTop: 14, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div role="group" aria-label="Period" style={{ display: 'flex', gap: 6, marginTop: 14, flexWrap: 'wrap', alignItems: 'center' }}>
           {PERIODS.map(p => (
-            <button key={p.key} onClick={() => setPeriod(p.key)} style={{
+            <button key={p.key} aria-pressed={period === p.key} onClick={() => setPeriod(p.key)} style={{
               padding: '4px 12px', border: `1.5px solid ${period === p.key ? '#0a5de4' : 'var(--line-2)'}`,
               borderRadius: 20, fontSize: 12, fontWeight: period === p.key ? 600 : 400,
               background: period === p.key ? '#0a5de420' : 'transparent',
@@ -430,9 +430,10 @@ export default function Analytics() {
       </div>
 
       {/* ── Tab strip ── */}
-      <div style={{ display: 'flex', gap: 2, flexWrap: 'wrap', borderBottom: '2px solid var(--line-2)', marginBottom: 16 }}>
+      {/* Selection was shown by colour only; aria-pressed lets NVDA say which view is on (WCAG 1.3.1, 4.1.2). */}
+      <div role="group" aria-label="Analytics view" style={{ display: 'flex', gap: 2, flexWrap: 'wrap', borderBottom: '2px solid var(--line-2)', marginBottom: 16 }}>
         {TABS.map(t => (
-          <button key={t.key} onClick={() => setActiveTab(t.key)} style={{
+          <button key={t.key} aria-pressed={activeTab === t.key} onClick={() => setActiveTab(t.key)} style={{
             padding: '8px 14px', border: 'none', borderBottom: `2px solid ${activeTab === t.key ? '#0a5de4' : 'transparent'}`,
             marginBottom: -2, background: 'transparent', fontWeight: activeTab === t.key ? 700 : 400,
             fontSize: 13, cursor: 'pointer', color: activeTab === t.key ? '#0a5de4' : 'var(--fg)',
@@ -454,9 +455,9 @@ export default function Analytics() {
             </select>
 
             {/* Phase selector */}
-            <div style={{ display: 'flex', gap: 4 }}>
+            <div role="group" aria-label="Phase" style={{ display: 'flex', gap: 4 }}>
               {PHASES.map(ph => (
-                <button key={ph} onClick={() => setActivePhase(ph)} style={{
+                <button key={ph} aria-pressed={activePhase === ph} onClick={() => setActivePhase(ph)} style={{
                   width: 32, height: 32, borderRadius: 6, border: `2px solid ${activePhase === ph ? PHASE_COLORS[ph] : 'var(--line-2)'}`,
                   background: activePhase === ph ? PHASE_COLORS[ph] + '22' : 'var(--surface)',
                   fontWeight: 700, fontSize: 12, cursor: 'pointer', color: activePhase === ph ? PHASE_COLORS[ph] : 'var(--muted)',
@@ -465,9 +466,9 @@ export default function Analytics() {
             </div>
 
             {/* Group filter */}
-            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            <div role="group" aria-label="KPI group" style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
               {Object.entries(KPI_GROUPS).map(([gk, gv]) => (
-                <button key={gk} onClick={() => setActiveKpiGroup(gk)} style={{
+                <button key={gk} aria-pressed={activeKpiGroup === gk} onClick={() => setActiveKpiGroup(gk)} style={{
                   padding: '4px 10px', borderRadius: 16, fontSize: 11, fontWeight: 600, cursor: 'pointer',
                   border: `1.5px solid ${activeKpiGroup === gk ? gv.color : 'var(--line-2)'}`,
                   background: activeKpiGroup === gk ? gv.color + '18' : 'transparent',
@@ -908,7 +909,7 @@ export default function Analytics() {
               <tbody>
                 {mttr.map((z) => (
                   <tr key={z.zone} onClick={() => setDrillZone(drillZone === z.zone ? null : z.zone)} style={{ cursor: 'pointer' }}>
-                    <td>{z.zone}</td><td className="mono">{z.mttrMinutes}</td><td>{z.incidentCount}</td>
+                    <td><RowButton label={`Drill into ${z.zone}`} aria-expanded={drillZone === z.zone} onActivate={() => setDrillZone(drillZone === z.zone ? null : z.zone)}>{z.zone}</RowButton></td><td className="mono">{z.mttrMinutes}</td><td>{z.incidentCount}</td>
                   </tr>
                 ))}
                 {!mttr.length && <tr><td colSpan={3} className="empty">No resolved incidents yet.</td></tr>}
@@ -929,7 +930,7 @@ export default function Analytics() {
               <tbody>
                 {(sla?.byZone || []).map((z) => (
                   <tr key={z.zone} onClick={() => setDrillZone(drillZone === z.zone ? null : z.zone)} style={{ cursor: 'pointer' }}>
-                    <td>{z.zone}</td>
+                    <td><RowButton label={`Drill into ${z.zone}`} aria-expanded={drillZone === z.zone} onActivate={() => setDrillZone(drillZone === z.zone ? null : z.zone)}>{z.zone}</RowButton></td>
                     <td>{z.compliant}</td>
                     <td>{z.breached ? <span className="chip chip-crit">{z.breached}</span> : <span className="muted">0</span>}</td>
                     <td>{z.atRisk ? <span className="chip chip-crit">{z.atRisk}</span> : <span className="muted">0</span>}</td>
@@ -975,7 +976,7 @@ export default function Analytics() {
               <tbody>
                 {outageFreq.map((z) => (
                   <tr key={z.zone} onClick={() => setDrillZone(drillZone === z.zone ? null : z.zone)} style={{ cursor: 'pointer' }}>
-                    <td>{z.zone}</td><td>{z.total}</td>
+                    <td><RowButton label={`Drill into ${z.zone}`} aria-expanded={drillZone === z.zone} onActivate={() => setDrillZone(drillZone === z.zone ? null : z.zone)}>{z.zone}</RowButton></td><td>{z.total}</td>
                     <td>{z.critical || 0}</td><td>{z.high || 0}</td><td>{z.medium || 0}</td><td>{z.low || 0}</td>
                   </tr>
                 ))}
