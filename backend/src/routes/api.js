@@ -9,6 +9,8 @@ import { canTransition, nextStates, LABELS } from '../domain/lifecycle.js';
 import { computeIndices, computePlannedIndices, computeMTTR, computeSLACompliance, computeCrewProductivity, computeOutageFrequency } from '../domain/indices.js';
 import { buildCsv, buildPdf } from '../domain/reports.js';
 import { REPORTS, buildStandardReport, standardReportCsv } from '../domain/standardReports.js';
+import { fieldList, OPS, runReport, reportCsv, feederSummaries, validateSpec } from '../domain/reportBuilder.js';
+import { smsFeederManager } from '../realtime/feederManagers.js';
 import { MAX_LOCATION_BATCH, parseLocationBatch, newestLivePoint, parseTileParams } from '../domain/locations.js';
 import { createRouter } from '../domain/roadRouter.js';
 import { mapProxy } from './mapProxy.js';
@@ -907,6 +909,108 @@ api.get('/reports/standard/:kind', async (req, res) => {
     return res.send(standardReportCsv(r));
   }
   res.json(r);
+});
+
+// ---------- Feeder managers (Admin -> Feeder managers) ----------
+// One manager per feeder gets that feeder's outage / restoration SMS and report summaries.
+// Phones are stored in full (needed to send) but only ever returned masked.
+const FM_WRITE = requireRole('oms_operator', 'system_admin');
+api.get('/feeder-managers', async (req, res) => {
+  const [managers, feeders] = await Promise.all([
+    db.any('SELECT feeder, name, phone, active, updated_by, updated_at FROM feeder_managers ORDER BY feeder'),
+    db.any("SELECT DISTINCT feeder FROM incidents WHERE feeder IS NOT NULL AND feeder <> '' ORDER BY feeder"),
+  ]);
+  res.json({
+    managers: managers.map(({ phone, ...m }) => ({ ...m, phone: maskPhone(phone) })),
+    feeders: [...new Set([...feeders.map((f) => f.feeder), ...managers.map((m) => m.feeder)])].sort(),
+  });
+});
+api.put('/feeder-managers/:feeder', FM_WRITE, async (req, res) => {
+  const feeder = String(req.params.feeder || '').trim().slice(0, 60);
+  const b = req.body || {};
+  const name = String(b.name || '').trim().slice(0, 80);
+  const phone = String(b.phone || '').replace(/[^\d+]/g, '');
+  const active = b.active !== false;
+  if (!feeder) return res.status(400).json({ error: 'Feeder is required' });
+  if (!name) return res.status(400).json({ error: 'Manager name is required' });
+  const existing = await db.oneOrNone('SELECT phone FROM feeder_managers WHERE feeder = $1', [feeder]);
+  // An edit may leave the phone blank to keep the stored one.
+  if (!phone && !existing) return res.status(400).json({ error: 'A phone number is required' });
+  if (phone && phone.replace(/\D/g, '').length < 10) return res.status(400).json({ error: 'A valid phone number (10+ digits) is required' });
+  const row = await db.one(
+    `INSERT INTO feeder_managers (feeder, name, phone, active, updated_by, updated_at) VALUES ($1, $2, $3, $4, $5, now())
+     ON CONFLICT (feeder) DO UPDATE SET name = EXCLUDED.name, phone = EXCLUDED.phone, active = EXCLUDED.active,
+       updated_by = EXCLUDED.updated_by, updated_at = now()
+     RETURNING feeder, name, phone, active, updated_by, updated_at`,
+    [feeder, name, phone || existing.phone, active, actor(req)]);
+  await repo.audit(actor(req), 'feeder_manager.set', `${feeder}: ${name} (${maskPhone(row.phone)})${active ? '' : ', inactive'}`);
+  res.json({ ...row, phone: maskPhone(row.phone) });
+});
+api.delete('/feeder-managers/:feeder', FM_WRITE, async (req, res) => {
+  const r = await db.result('DELETE FROM feeder_managers WHERE feeder = $1', [req.params.feeder]);
+  if (!r.rowCount) return res.status(404).json({ error: 'No manager for that feeder' });
+  await repo.audit(actor(req), 'feeder_manager.remove', req.params.feeder);
+  res.status(204).end();
+});
+// Operator-sent SMS to the manager of an incident's feeder (incident drawer).
+api.post('/incidents/:id/sms-feeder-manager', FM_WRITE, async (req, res) => {
+  const inc = await repo.incident(req.params.id);
+  if (!inc) return res.status(404).json({ error: 'Unknown incident' });
+  if (!inc.feeder) return res.status(400).json({ error: 'This incident has no feeder' });
+  const message = String(req.body?.message || '').trim() ||
+    `GridQ: update on ${inc.id}, feeder ${inc.feeder}: status ${String(inc.status).replace('_', ' ')}, ~${inc.customers || 0} customers.`;
+  if (message.length > 500) return res.status(400).json({ error: 'Message must be at most 500 characters' });
+  const r = await smsFeederManager({ feeder: inc.feeder, body: message, incidentId: inc.id, subject: 'Operator message', by: actor(req) });
+  if (!r) return res.status(404).json({ error: `No active manager set for feeder ${inc.feeder} (Admin -> Feeder managers)` });
+  res.status(201).json({ ...r, driver: smsDriverName() });
+});
+
+// ---------- Report builder (Analytics -> Report builder) ----------
+const specFrom = (b) => ({ columns: b.columns, filters: b.filters, groupBy: b.groupBy, sort: b.sort, from: b.from, to: b.to });
+api.get('/report-builder/fields', (req, res) => res.json({ fields: fieldList(), ops: OPS }));
+api.post('/report-builder/run', async (req, res) => {
+  let result;
+  try { result = runReport(await repo.incidents(), specFrom(req.body || {})); } catch (e) { return res.status(400).json({ error: e.message }); }
+  if (req.query.format === 'csv') {
+    const name = String(req.body?.name || 'Custom report').slice(0, 80);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${name.replace(/[^\w-]+/g, '-').toLowerCase() || 'report'}.csv"`);
+    return res.send(reportCsv(result, name));
+  }
+  res.json({ ...result, rows: result.rows.slice(0, 1000), truncated: result.rows.length > 1000 });
+});
+api.get('/report-builder/saved', async (req, res) =>
+  res.json(await db.any('SELECT id, name, spec, created_by, created_at FROM saved_reports ORDER BY lower(name)')));
+// Saving under an existing name (any case) replaces that report.
+api.post('/report-builder/saved', FM_WRITE, async (req, res) => {
+  const name = String(req.body?.name || '').trim().slice(0, 80);
+  if (!name) return res.status(400).json({ error: 'Give the report a name' });
+  let spec;
+  try { spec = validateSpec(specFrom(req.body?.spec || {})); } catch (e) { return res.status(400).json({ error: e.message }); }
+  const same = await db.oneOrNone('SELECT id FROM saved_reports WHERE lower(name) = lower($1)', [name]);
+  const row = same
+    ? await db.one('UPDATE saved_reports SET name = $2, spec = $3, created_by = $4, created_at = now() WHERE id = $1 RETURNING id, name, spec, created_by, created_at', [same.id, name, spec, actor(req)])
+    : await db.one('INSERT INTO saved_reports (id, name, spec, created_by) VALUES ($1, $2, $3, $4) RETURNING id, name, spec, created_by, created_at', ['RPT' + nanoid(8), name, spec, actor(req)]);
+  await repo.audit(actor(req), 'report.saved', name);
+  res.status(same ? 200 : 201).json(row);
+});
+api.delete('/report-builder/saved/:id', FM_WRITE, async (req, res) => {
+  const r = await db.result('DELETE FROM saved_reports WHERE id = $1', [req.params.id]);
+  if (!r.rowCount) return res.status(404).json({ error: 'No such saved report' });
+  res.status(204).end();
+});
+// SMS each feeder manager their feeder's slice of the report.
+api.post('/report-builder/sms', FM_WRITE, async (req, res) => {
+  const name = String(req.body?.name || 'Custom report').trim().slice(0, 60);
+  let list;
+  try { list = feederSummaries(await repo.incidents(), specFrom(req.body?.spec || {}), name); } catch (e) { return res.status(400).json({ error: e.message }); }
+  const sent = [], noManager = [];
+  for (const { feeder, body } of list) {
+    const r = await smsFeederManager({ feeder, body, subject: `Report: ${name}`, by: actor(req) });
+    if (r) sent.push({ feeder, recipient: r.recipient, status: r.status }); else noManager.push(feeder);
+  }
+  await repo.audit(actor(req), 'report.sms', `${name}: ${sent.length} sent, ${noManager.length} feeders without a manager`);
+  res.json({ sent, noManager, driver: smsDriverName() });
 });
 
 // ---------- P7.2: regulatory reliability reports ----------

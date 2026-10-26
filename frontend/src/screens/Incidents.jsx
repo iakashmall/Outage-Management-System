@@ -300,6 +300,7 @@ function IncidentDrawer({ inc, onClose, onChange, showOnMap }) {
             })}
           </ul>
           <MessagePanel incidentId={inc.id} />
+          {inc.feeder && <FeederManagerSms incident={inc} />}
           <PhotoPanel incidentId={inc.id} />
           <AssetScanPanel incidentId={inc.id} showOnMap={showOnMap} />
         </div>
@@ -540,6 +541,34 @@ function MessagePanel({ incidentId }) {
         />
         <button onClick={send} disabled={busy} style={{ padding: '8px 14px', borderRadius: 8, border: 0, background: '#12325a', color: '#fff', cursor: 'pointer' }}>
           Send
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// One SMS to the manager of this incident's feeder (Admin -> Feeder managers).
+// Blank message = the server's standard status update.
+function FeederManagerSms({ incident }) {
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const send = async () => {
+    setBusy(true);
+    try {
+      const r = await api.smsFeederManager(incident.id, text.trim());
+      toast(`SMS ${r.status === 'failed' ? 'failed' : 'sent'} to feeder manager ${r.recipient}`, r.status === 'failed' ? 'err' : 'ok');
+      setText('');
+    } catch (e) { toast(e.message, 'err'); } finally { setBusy(false); }
+  };
+  return (
+    <div style={{ margin: '14px 0 0' }}>
+      <div className="eyebrow">Feeder manager ({incident.feeder})</div>
+      <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+        <input value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && !busy && send()} maxLength={500}
+          aria-label={`SMS to the manager of feeder ${incident.feeder}; leave empty for a status update`}
+          placeholder="SMS text (empty = status update)" style={{ flex: 1, padding: '8px 10px', borderRadius: 8, border: '1px solid #ccc' }} />
+        <button onClick={send} disabled={busy} style={{ padding: '8px 14px', borderRadius: 8, border: 0, background: '#12325a', color: '#fff', cursor: 'pointer', whiteSpace: 'nowrap' }}>
+          {busy ? 'Sending…' : 'SMS manager'}
         </button>
       </div>
     </div>

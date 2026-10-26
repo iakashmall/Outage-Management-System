@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
-import { SevBadge, StatusBadge, toast } from '../lib/ui.jsx';
+import { SevBadge, StatusBadge, toast, focusAfter } from '../lib/ui.jsx';
 
 // Analytics -> Standard reports: the five standard OMS reports (backend
 // domain/standardReports.js). One report at a time, a date range, a zone
@@ -45,6 +45,7 @@ function statsFor(r) {
 
 export default function StandardReports() {
   const [kind, setKind] = useState('history');
+  const pickerRef = useRef(null);
   const [preset, setPreset] = useState('90');
   const [from, setFrom] = useState(daysAgo(90));
   const [to, setTo] = useState(iso(new Date()));
@@ -71,14 +72,14 @@ export default function StandardReports() {
   }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const pickPreset = (p) => { setPreset(p); setFrom(daysAgo(Number(p))); setTo(iso(new Date())); };
-  const exportCsv = () => api.exportStandardReport(kind, params).catch((e) => toast(`Export failed: ${e.message}`, 'error'));
+  const exportCsv = () => api.exportStandardReport(kind, params).catch((e) => toast(`Export failed: ${e.message}`, 'err'));
   const [, title, about] = KINDS.find(([k]) => k === kind);
   const shown = data && data.kind === kind ? data : null;
 
   return (
     <div className="fk sr">
-      <div className="seg sr-kinds" role="group" aria-label="Report">
-        {KINDS.map(([k, l]) => <button key={k} aria-pressed={kind === k} className={kind === k ? 'on' : ''} onClick={() => setKind(k)}>{l}</button>)}
+      <div className="seg sr-kinds" role="group" aria-label="Report" ref={pickerRef}>
+        {KINDS.map(([k, l]) => <button key={k} aria-pressed={kind === k} className={kind === k ? 'on' : ''} onClick={() => { setKind(k); focusAfter(pickerRef.current); }}>{l}</button>)}
       </div>
       <p className="sr-about">{about}</p>
 

@@ -604,6 +604,27 @@ export async function migrate() {
     );
     CREATE INDEX IF NOT EXISTS reassign_requests_open_idx ON reassign_requests(status, created_at DESC);
 
+    -- Feeder managers: who gets the outage / restoration SMS for a feeder and the
+    -- report-builder summaries (Admin -> Feeder managers). Phone is kept in full
+    -- because it is needed to send; the API only ever returns it masked.
+    CREATE TABLE IF NOT EXISTS feeder_managers (
+      feeder     TEXT PRIMARY KEY,
+      name       TEXT NOT NULL,
+      phone      TEXT NOT NULL,
+      active     BOOLEAN NOT NULL DEFAULT true,
+      updated_by TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    -- Report builder: named report definitions (columns, filters, grouping) as JSON.
+    CREATE TABLE IF NOT EXISTS saved_reports (
+      id         TEXT PRIMARY KEY,
+      name       TEXT NOT NULL,
+      spec       JSONB NOT NULL,
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
     -- Stored monthly reliability indices (POST /analytics/snapshot writes, GET /analytics/monthly reads).
     -- repo.js used this table but nothing created it, so the monthly chart always failed with a 500.
     CREATE TABLE IF NOT EXISTS monthly_indices (

@@ -6,6 +6,19 @@ import { socket } from './api.js';
 // Clickable table rows are mouse-only (a <tr> can't take focus). Put one of these
 // in the row's first cell: same action, reachable by Tab, named for screen readers
 // (WCAG 2.1.1). It stops propagation so the row's own click doesn't fire twice.
+// After a view button opens its view, move focus to the first control of that view
+// (the first focusable after `anchor`), so the next Tab goes on into the view instead of
+// through the remaining view buttons (WCAG 2.4.3). Runs after the view has rendered.
+export function focusAfter(anchor) {
+  const sel = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea, [tabindex]:not([tabindex="-1"])';
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (!anchor) return;
+    const root = anchor.closest('main') || document;
+    const next = [...root.querySelectorAll(sel)].find((el) => !anchor.contains(el) && anchor.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING && !el.closest('.sr-only'));
+    next?.focus();
+  }));
+}
+
 export function RowButton({ label, onActivate, children, ...rest }) {
   return (
     <button type="button" className="row-open" aria-label={label}

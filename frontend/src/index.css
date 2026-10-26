@@ -1048,3 +1048,43 @@ button.kh-more:hover{text-decoration:underline}
 .sr-stat{border:1px solid var(--line);border-radius:var(--r-sm);padding:10px 12px;background:var(--surface,#fff);display:flex;flex-direction:column;gap:4px;min-width:0}
 .sr-stat span{font-size:11px;color:var(--muted)}
 .sr-stat b{font-size:16px;overflow-wrap:anywhere}
+/* Rows of a read-only table are the Tab stops once inside it (lib/tableGate.js). */
+tr[data-tgate-row]:focus-visible{outline:2px solid var(--focus-ring);outline-offset:-2px;background:rgba(40,104,205,.08);box-shadow:none}
+/* Admin -> Feeder managers */
+.fm-form{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 14px}
+.fm-field{display:flex;flex-direction:column;gap:5px}
+.fm-field input,.fm-field select{font:inherit;font-size:12.5px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--surface,#fff);color:inherit;min-width:180px}
+.fm-check{display:inline-flex;gap:6px;align-items:center;font-size:12.5px;padding-bottom:6px}
+/* Analytics -> Report builder */
+.rb-grid{display:grid;grid-template-columns:230px 1fr;gap:14px;margin:14px 0 4px;align-items:start}
+@media (max-width:900px){.rb-grid{grid-template-columns:1fr}}
+.rb-main{display:flex;flex-direction:column;gap:14px;min-width:0}
+.rb-row2{display:grid;grid-template-columns:1fr 1.4fr;gap:14px}
+@media (max-width:1100px){.rb-row2{grid-template-columns:1fr}}
+.rb-panel{border:1px solid var(--line);border-radius:var(--r-sm);padding:10px 12px;background:var(--surface,#fff);min-width:0}
+.rb-panel h4{margin:0 0 8px;font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+.rb-panel select,.rb-panel input,.rb-name{font:inherit;font-size:12.5px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--surface,#fff);color:inherit}
+.rb-name{min-width:240px}
+.rb-chips{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:6px}
+.rb-source{flex-direction:column;flex-wrap:nowrap;max-height:430px;overflow:auto}
+.rb-drop{min-height:46px;padding:8px;border:2px dashed var(--line);border-radius:8px;transition:border-color .15s,background .15s}
+.rb-drop.armed,.rb-group.armed{border-color:var(--focus-ring);background:rgba(40,104,205,.04)}
+.rb-chip{display:inline-flex;align-items:center;gap:4px;padding:4px 4px 4px 9px;border:1px solid var(--line);border-left:3px solid var(--muted);border-radius:6px;background:var(--paper-2,#f7f9fc);font-size:12.5px;cursor:grab;user-select:none}
+.rb-source .rb-chip{justify-content:space-between}
+.rb-chip.on{background:#fff}
+.rb-chip.before{box-shadow:-3px 0 0 var(--focus-ring)}
+.rb-chip.after{box-shadow:3px 0 0 var(--focus-ring)}
+.rb-chip.t-number,.rb-dot.t-number{border-left-color:#2563eb}
+.rb-chip.t-date,.rb-dot.t-date{border-left-color:#9a5f15}
+.rb-chip.t-text,.rb-dot.t-text{border-left-color:#217b48}
+.rb-x{border:0;background:transparent;cursor:pointer;padding:2px 6px;border-radius:4px;font-size:12px;color:var(--muted);line-height:1}
+.rb-x:hover:not(:disabled){background:var(--paper,#eef2f8);color:inherit}
+.rb-x:disabled{opacity:.3;cursor:default}
+.rb-key{margin:8px 0 0;font-size:11px;color:var(--muted);display:flex;gap:6px;align-items:center}
+.rb-dot{display:inline-block;width:10px;height:10px;border-left:4px solid;margin-left:4px}
+.rb-hint{padding:6px}
+.rb-note{margin:8px 0 0;font-size:12px}
+.rb-filter{margin-bottom:8px}
+.rb-sort{all:unset;cursor:pointer}
+.rb-sort:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+.rb-total td{border-top:2px solid var(--line);background:var(--paper-2,#f7f9fc)}

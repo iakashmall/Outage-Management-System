@@ -35,6 +35,7 @@ import { ensureRatings, startFeederKpiJobs } from './realtime/feederKpi.js';
 import { startFeederTelemetrySim } from './realtime/feederTelemetrySim.js';
 import { startStaleLocationMonitor } from './realtime/staleLocation.js';
 import { startEscalations } from './realtime/escalation.js';
+import { startFeederManagerAlerts } from './realtime/feederManagers.js';
 // ...alongside your other startX() calls at boot:
 startScheduledReports();
 const PORT = process.env.PORT || 4000;
@@ -129,5 +130,6 @@ http.listen(PORT, () => {
   }
   startNotifier();
   startPlannedNotices(); // OMS-01 advance notices, after the notifier is listening
+  startFeederManagerAlerts(); // outage / restoration SMS to the feeder's manager
   startEscalations();    // FR-OMS-008 SLA escalation SMS to officers
 });

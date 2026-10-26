@@ -38,8 +38,10 @@ async function exportReliabilityReport(format, filters = {}) {
   URL.revokeObjectURL(url);
 }
 // Downloads a file from the API (with the login token) under the name the server gives it.
-async function download(path, fallbackName) {
-  const r = await fetch(`${BASE}${path}`, { headers: { ...(await freshAuthHeader()) } });
+async function download(path, fallbackName, body) {
+  const r = await fetch(`${BASE}${path}`, body
+    ? { method: 'POST', headers: { 'content-type': 'application/json', ...(await freshAuthHeader()) }, body: JSON.stringify(body) }
+    : { headers: { ...(await freshAuthHeader()) } });
   if (!r.ok) {
     const data = await r.json().catch(() => ({}));
     throw Object.assign(new Error(data.error || r.statusText), { data, status: r.status });
@@ -100,6 +102,17 @@ export const api = {
   exportReliabilityReport,
   standardReport: (kind, params = {}) => req('GET', `/reports/standard/${kind}?${new URLSearchParams(clean(params))}`),
   exportStandardReport,
+  feederManagers: () => req('GET', '/feeder-managers'),
+  setFeederManager: (feeder, b) => req('PUT', `/feeder-managers/${encodeURIComponent(feeder)}`, b),
+  removeFeederManager: (feeder) => req('DELETE', `/feeder-managers/${encodeURIComponent(feeder)}`),
+  smsFeederManager: (incidentId, message) => req('POST', `/incidents/${incidentId}/sms-feeder-manager`, { message }),
+  reportFields: () => req('GET', '/report-builder/fields'),
+  runReport: (spec) => req('POST', '/report-builder/run', spec),
+  exportBuiltReport: (spec, name) => download('/report-builder/run?format=csv', 'report.csv', { ...spec, name }),
+  savedReports: () => req('GET', '/report-builder/saved'),
+  saveReport: (name, spec) => req('POST', '/report-builder/saved', { name, spec }),
+  deleteReport: (id) => req('DELETE', `/report-builder/saved/${id}`),
+  smsReport: (name, spec) => req('POST', '/report-builder/sms', { name, spec }),
   mttr: () => req('GET', '/analytics/mttr'),
   slaCompliance: () => req('GET', '/analytics/sla'),
   crewProductivity: () => req('GET', '/analytics/crew-productivity'),

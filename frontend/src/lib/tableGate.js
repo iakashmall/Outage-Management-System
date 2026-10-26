@@ -12,6 +12,8 @@ import { useEffect } from 'react';
 // tables added later or re-rendered by live updates are covered without per-screen code.
 // The Network Map gets the same gate for its markers (Leaflet makes each one a Tab stop);
 // on the map itself the arrow keys still pan and +/- zoom.
+// Read-only tables (nothing clickable) get the same gate, and inside them each row is
+// the stop, so a screen reader reads the row and the keyboard user can still step through.
 
 const FOCUSABLE = 'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"]), [data-tgate-ti]';
 const HINT_ID = 'tgate-hint';
@@ -59,12 +61,26 @@ function restore(el) {
 }
 
 
+// Read-only table: make each body row a (locked) stop of its own.
+function markRows(gate) {
+  for (const tr of gate.querySelectorAll('tbody tr')) {
+    if (tr.hasAttribute('data-tgate-row')) continue;
+    tr.setAttribute('data-tgate-row', '');
+    tr.setAttribute('data-tgate-ti', '0');
+    tr.tabIndex = -1;
+  }
+}
+
 function setup(table) {
   // Use an existing scrollable region wrapper as the stop, so it isn't two stops.
   const gate = table.closest('[role="region"][tabindex]') || table;
   if (gate.dataset.tgate) return;
   const hint = gate.dataset.tgateKind === 'map' ? MAP_HINT_ID : HINT_ID;
-  if (!inner(gate).length) return; // read-only table: nothing to skip
+  if (!inner(gate).length) {
+    if (gate.dataset.tgateKind === 'map' || !gate.querySelector('tbody tr')) return; // nothing to step through yet
+    gate.dataset.tgateRows = '1';
+    markRows(gate);
+  }
   gate.dataset.tgate = 'closed';
   gate.tabIndex = 0;
   const desc = gate.getAttribute('aria-describedby');
@@ -76,6 +92,13 @@ const open = (gate) => { if (gate.dataset.tgate !== 'open') { gate.dataset.tgate
 const close = (gate) => { if (gate.dataset.tgate !== 'closed') { gate.dataset.tgate = 'closed'; lock(gate); } };
 
 function moveRow(from, dir) {
+  if (from.hasAttribute('data-tgate-row')) {
+    let row = from;
+    while ((row = dir > 0 ? row.nextElementSibling : row.previousElementSibling)) {
+      if (row.hasAttribute('data-tgate-row')) { row.focus(); row.scrollIntoView?.({ block: 'nearest' }); return true; }
+    }
+    return true;
+  }
   const td = from.closest('td, th');
   const tr = from.closest('tr');
   if (!td || !tr) return false;
@@ -101,6 +124,7 @@ export function useTableGates(rootRef) {
       // Leaflet makes every marker a Tab stop; the map gets the same Enter-to-enter gate.
       root.querySelectorAll('.leaflet-container').forEach((m) => { m.dataset.tgateKind = 'map'; setup(m); });
       // New rows rendered into a table must follow its current mode.
+      root.querySelectorAll('[data-tgate-rows]').forEach(markRows);
       root.querySelectorAll('[data-tgate="closed"]').forEach(lock);
       root.querySelectorAll('[data-tgate="open"]').forEach(unlockRows);
     };

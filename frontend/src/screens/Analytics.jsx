@@ -10,11 +10,12 @@
 //   • Role-based view: Management / CE / Functional
 //   • Map indication placeholder (WFM integration hook)
 
-import { useEffect, useMemo, useState, useCallback } from 'react';
+import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { api } from '../lib/api.js';
-import { useLiveRefresh, toast, SrTable, RowButton } from '../lib/ui.jsx';
+import { useLiveRefresh, toast, SrTable, RowButton, focusAfter } from '../lib/ui.jsx';
 import FeederKpiPanel from '../components/FeederKpiPanel.jsx';
 import StandardReports from '../components/StandardReports.jsx';
+import ReportBuilder from '../components/ReportBuilder.jsx';
 // ─────────────────────────────────────────────────────────────
 // Constants
 // ─────────────────────────────────────────────────────────────
@@ -235,6 +236,8 @@ export default function Analytics() {
 
   // New state
   const [activeTab, setActiveTab] = useState('kpi');
+  const viewStripRef = useRef(null);
+  const openView = (k) => { setActiveTab(k); focusAfter(viewStripRef.current); };
   const [role, setRole] = useState('management');
   const [period, setPeriod] = useState('monthly');
   const [customFrom, setCustomFrom] = useState('');
@@ -332,6 +335,7 @@ export default function Analytics() {
 
   const TABS = [
     { key: 'reports',    label: 'Standard reports', show: true },
+    { key: 'builder',    label: 'Report builder', show: true },
     { key: 'kpi',        label: 'Feeder KPIs (PFC)', show: true },
     { key: 'saidi',      label: 'SAIDI/SAIFI', show: true },
     { key: 'sms',        label: 'SMS & Escalation', show: true },
@@ -433,9 +437,10 @@ export default function Analytics() {
 
       {/* ── Tab strip ── */}
       {/* Selection was shown by colour only; aria-pressed lets NVDA say which view is on (WCAG 1.3.1, 4.1.2). */}
-      <div role="group" aria-label="Analytics view" style={{ display: 'flex', gap: 2, flexWrap: 'wrap', borderBottom: '2px solid var(--line-2)', marginBottom: 16 }}>
+      {/* Choosing a view moves focus into it (focusAfter), so Tab continues in the view, not along the strip. */}
+      <div role="group" aria-label="Analytics view" ref={viewStripRef} style={{ display: 'flex', gap: 2, flexWrap: 'wrap', borderBottom: '2px solid var(--line-2)', marginBottom: 16 }}>
         {TABS.map(t => (
-          <button key={t.key} aria-pressed={activeTab === t.key} onClick={() => setActiveTab(t.key)} style={{
+          <button key={t.key} aria-pressed={activeTab === t.key} onClick={() => openView(t.key)} style={{
             padding: '8px 14px', border: 'none', borderBottom: `2px solid ${activeTab === t.key ? '#0a5de4' : 'transparent'}`,
             marginBottom: -2, background: 'transparent', fontWeight: activeTab === t.key ? 700 : 400,
             fontSize: 13, cursor: 'pointer', color: activeTab === t.key ? '#0a5de4' : 'var(--fg)',
@@ -989,6 +994,7 @@ export default function Analytics() {
         </div>
       )}
       {activeTab === 'reports' && <StandardReports />}
+      {activeTab === 'builder' && <ReportBuilder />}
       {activeTab === 'pfc' && <FeederKpiPanel />} 
 
       {/* Drill-down panel (shared) */}
