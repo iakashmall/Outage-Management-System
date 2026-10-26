@@ -105,7 +105,7 @@ const SMS_STATUS = {
   sending: { label: '→ Sending', color: '#0a5de4' },
   failed: { label: '✕ Failed', color: '#c4271b' },
 };
-const SMS_KIND = { escalation: ['ESCALATION', '#9a580b'], officer: ['OFFICER', '#6366f1'], callback: ['CALLBACK', '#0d9488'], customer: ['CUSTOMER', '#5e6d82'] };
+const SMS_KIND = { feeder_manager: ['FEEDER MGR', '#b4235a'], escalation: ['ESCALATION', '#9a580b'], officer: ['OFFICER', '#6366f1'], callback: ['CALLBACK', '#0d9488'], customer: ['CUSTOMER', '#5e6d82'] };
 const fmtMinutes = (m) => (m < 60 ? `${m} min` : m < 1440 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${Math.floor(m / 1440)} d ${Math.floor((m % 1440) / 60)} h`);
 const fmtTs = (ts) => new Date(ts).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
 const EMPTY_SMS = { recipient: '', phone: '', message: '', feeder: '', incidentId: '' };
