@@ -252,6 +252,16 @@ tbody tr.click{cursor:pointer}
 .timeline li .k{font-family:var(--disp);font-size:12px;font-weight:600}
 .timeline li .n{font-size:12.5px;color:var(--ink-2);margin-top:1px}
 .timeline li .t{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:2px}
+/* a crew checklist under its timeline event (collapsed by default) */
+.timeline li .caret{margin-left:6px;padding:0 4px;border:0;background:none;cursor:pointer;
+  font-family:var(--mono);font-size:11px;color:var(--muted)}
+.timeline li .caret:hover{color:var(--ink-2)}
+.timeline li ul.sub{list-style:none;margin:4px 0 2px;padding:0 0 0 10px;border-left:1px solid var(--line-2)}
+.timeline li ul.sub li{padding:1px 0;font-size:11.5px;color:var(--ink-2)}
+.timeline li ul.sub .mark{display:inline-block;width:14px;font-weight:600}
+.timeline li ul.sub li.ok .mark{color:var(--live)}
+.timeline li ul.sub li.no .mark{color:var(--crit)}
+.timeline li ul.sub .t{display:inline;margin:0 0 0 6px}
 
 .kv-row{display:flex;justify-content:space-between;gap:12px;padding:8px 0;
   border-bottom:1px solid var(--line);font-size:13px}

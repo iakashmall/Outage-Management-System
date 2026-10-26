@@ -537,11 +537,14 @@ export async function migrate() {
       parts_used        JSONB,
       restored          TEXT CHECK (restored IN ('yes', 'partial', 'no')),
       sign_off          JSONB,
+      checklist         JSONB,
       submitted_at      TIMESTAMPTZ NOT NULL,
       received_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
       submitted_by      TEXT
     );
     CREATE INDEX IF NOT EXISTS job_completions_job_idx ON job_completions(job_id, received_at DESC);
+    -- The safety checklist the crew ticked: [{ label, checked, at }].
+    ALTER TABLE job_completions ADD COLUMN IF NOT EXISTS checklist JSONB;
 
     -- One "late update from crew not applied" timeline event per (job, what,
     -- status, client time), however often a phone resends it.
@@ -554,6 +557,52 @@ export async function migrate() {
       ts        TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY (job_id, kind, status, client_ts)
     );
+
+    -- OMS-03 daily work orders (domain/workOrder.js): one per crew per working
+    -- day, created when the crew lead starts the day. The client ids make a
+    -- resend from the phone's pending sync a replay, not a second start/close.
+    CREATE TABLE IF NOT EXISTS daily_work_orders (
+      id              TEXT PRIMARY KEY,
+      crew_id         TEXT NOT NULL REFERENCES crews(id) ON DELETE CASCADE,
+      work_date       DATE NOT NULL,
+      status          TEXT NOT NULL CHECK (status IN ('started', 'closed')),
+      members         JSONB NOT NULL,
+      start_checks    JSONB NOT NULL,
+      start_note      TEXT,
+      started_at      TIMESTAMPTZ NOT NULL,
+      started_by      TEXT,
+      start_lat       DOUBLE PRECISION,
+      start_lon       DOUBLE PRECISION,
+      start_client_id TEXT UNIQUE,
+      closed_at       TIMESTAMPTZ,
+      closed_by       TEXT,
+      close_remarks   TEXT,
+      close_sign_off  JSONB,
+      close_snapshot  JSONB,
+      close_client_id TEXT UNIQUE,
+      UNIQUE (crew_id, work_date)
+    );
+
+    -- When the assigned crew's phone first received a job, and when the crew
+    -- first opened it: the dashboard shows the crew has seen a new assignment.
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS opened_at TIMESTAMPTZ;
+
+    -- A crew asking the control room to give its job to another crew. The
+    -- crew can't move the job itself; the operator reassigns or dismisses.
+    CREATE TABLE IF NOT EXISTS reassign_requests (
+      id          TEXT PRIMARY KEY,
+      job_id      TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      incident_id TEXT,
+      crew_id     TEXT NOT NULL,
+      reason      TEXT NOT NULL,
+      status      TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'reassigned', 'dismissed')),
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+      resolved_at TIMESTAMPTZ,
+      resolved_by TEXT,
+      resolution  TEXT
+    );
+    CREATE INDEX IF NOT EXISTS reassign_requests_open_idx ON reassign_requests(status, created_at DESC);
   `);
 
   // ID sequences for incidents.id / complaints.qid. These replace the old

@@ -1,8 +1,7 @@
-// src/components/NativeMapSpike.js
-// SPIKE (branch spike/native-vector-map): the new native vector map
-// (@maplibre/maplibre-react-native), tried out next to the old Map tab, which
-// stays as it is until we swap them. It carries everything the old map does,
-// plus the whole field picture:
+// src/components/CrewMap.js
+// The crew app's Map tab: a native vector map (@maplibre/maplibre-react-native)
+// drawn from the office in-house map server through the OMS (/api/map, with
+// the crew's token). It replaced the old Leaflet/WebView map and shows:
 //   - this crew's jobs as labelled pins (colour = severity)
 //   - ALL open incidents (dots by severity) and ALL other crews (badges), from
 //     the OMS every 15 s; the last copy is kept on the phone for no signal
@@ -13,8 +12,9 @@
 //     trimmed behind the crew, "x km · y min" counting down, arrival banner,
 //     re-route when off the route
 //   - Google Maps turn-by-turn and "Route all jobs", like the old map
-//   - offline: the new map's own pack (download / resume / delete) and the
-//     road directions download the old map uses
+//   - offline: the map's own pack (download / resume / delete) and the
+//     road directions download (areaStore)
+//   - a point to look at (e.g. where a QR asset scan was made), from `focus`
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -30,7 +30,7 @@ import { isOnlineState } from '../lib/offlineNavigation';
 import { navigateTo } from '../lib/navigate';
 import { openMultiJobRoute } from '../lib/routing';
 
-const PACK_NAME = 'spike-region';
+const PACK_NAME = 'spike-region'; // name kept so packs downloaded before the rename still count
 const FLEET_CACHE_KEY = 'oms-newmap-fleet';
 const FLEET_REFRESH_MS = 15000;
 const DEHRADUN = [77.92, 30.22, 78.13, 30.42]; // used when the server has no region for this crew
@@ -108,7 +108,11 @@ async function fetchFleet() {
   return { crews: Array.isArray(crews) ? crews : [], incidents: Array.isArray(incidents) ? incidents : [], at: Date.now() };
 }
 
-export default function NativeMapSpike({ jobs = [], crew = null, initialJobId = null, onClose }) {
+// navRequest: { jobId, at } -- navigate to that job (a new `at` starts again).
+// focus: { lat, lon, title, lines?, at } -- show that point (asset scan).
+// onClose: shows a Close button (when opened full screen).
+export default function CrewMap({ jobs = [], crew = null, navRequest = null, focus = null, onClose }) {
+  const initialJobId = navRequest?.jobId || null;
   const [authed, setAuthed] = useState(null);
   const [region, setRegion] = useState({ id: 'dehradun', bbox: DEHRADUN });
   const [mapState, setMapState] = useState('loading');
@@ -134,6 +138,25 @@ export default function NativeMapSpike({ jobs = [], crew = null, initialJobId = 
   const [routingAll, setRoutingAll] = useState(false);
   const routeReq = useRef({ key: null, at: 0, seq: 0 });
   const roadsUri = oldPack?.roadsUri || null;
+  // The point from `focus` (an asset scan), shown with its own marker.
+  const [point, setPoint] = useState(focus && hasPoint(focus) ? focus : null);
+
+  // "Navigate to site" from a job while the map is already open.
+  useEffect(() => {
+    if (!navRequest?.jobId) return;
+    setPoint(null);
+    setSelected({ kind: 'job', id: navRequest.jobId });
+    setNavigating(true);
+  }, [navRequest?.jobId, navRequest?.at]);
+
+  useEffect(() => {
+    if (!focus || !hasPoint(focus)) return;
+    setNavigating(false);
+    setFollow(false);
+    setPoint(focus);
+    setSelected({ kind: 'point', id: 'focus' });
+    cameraRef.current?.flyTo({ center: [focus.lon, focus.lat], zoom: 17, duration: 900 });
+  }, [focus?.lat, focus?.lon, focus?.at]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- data on the map ------------------------------------------------------------------------
 
@@ -166,6 +189,14 @@ export default function NativeMapSpike({ jobs = [], crew = null, initialJobId = 
   // The selected thing as one shape: { kind, id, title, lines[], lat, lon, address, routable }
   const target = useMemo(() => {
     if (!selected) return null;
+    if (selected.kind === 'point') {
+      if (!point) return null;
+      return {
+        kind: 'point', id: 'focus', title: point.title || 'Selected point',
+        lines: [...(point.lines || []), `Lat ${point.lat.toFixed(6)}, Long ${point.lon.toFixed(6)}`],
+        lat: point.lat, lon: point.lon, address: point.title, routable: true,
+      };
+    }
     if (selected.kind === 'job') {
       const job = jobs.find((j) => j.id === selected.id);
       if (!job) return null;
@@ -197,7 +228,7 @@ export default function NativeMapSpike({ jobs = [], crew = null, initialJobId = 
       lines: [`${String(c.status || '').replace(/_/g, ' ')}${c.job_id ? ` · job ${c.job_id}` : ''}`, `Position ${timeAgo(c.location_updated_at)}${c.tracking_state === 'off' ? ' · tracking off' : ''}`],
       lat: c.lat, lon: c.lon, routable: false,
     };
-  }, [selected, jobs, fleet]);
+  }, [selected, jobs, fleet, point]);
   const site = target?.routable && hasPoint(target) ? { lat: target.lat, lon: target.lon } : null;
 
   // ---- effects --------------------------------------------------------------------------------
@@ -341,24 +372,35 @@ export default function NativeMapSpike({ jobs = [], crew = null, initialJobId = 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.kind, selected?.id, navigating, Boolean(here)]);
 
-  // Navigation camera: close in and tilted, then follow the arrow.
+  // Navigation camera: close in and tilted (the Camera's zoom/pitch props
+  // below), then follow the arrow. Follow goes on only after that move: in
+  // MapLibre any camera animation cancels follow mode, which used to leave
+  // the map standing still the moment navigation started.
+  const followTimer = useRef(null);
+  const followSoon = useCallback((ms = 900) => {
+    clearTimeout(followTimer.current);
+    followTimer.current = setTimeout(() => setFollow(true), ms);
+  }, []);
+  useEffect(() => () => clearTimeout(followTimer.current), []);
   useEffect(() => {
     if (!navigating) return;
-    setFollow(true);
-    cameraRef.current?.setStop({ zoom: 17, pitch: 55, duration: 800 }).catch(() => {});
-  }, [navigating]);
+    setFollow(false);
+    followSoon();
+  }, [navigating, followSoon]);
 
   // ---- actions --------------------------------------------------------------------------------
 
   const startNavigation = () => site && setNavigating(true);
   const stopNavigation = () => {
+    clearTimeout(followTimer.current);
     setNavigating(false);
     setFollow(false);
     cameraRef.current?.setStop({ pitch: 0, bearing: 0, duration: 600 }).catch(() => {});
   };
+  // Straight back to following (no camera animation first: it would cancel it).
   const recenter = () => {
+    clearTimeout(followTimer.current);
     setFollow(true);
-    if (navigating) cameraRef.current?.setStop({ zoom: 17, pitch: 55, duration: 600 }).catch(() => {});
   };
   const fitAll = () => {
     setFollow(false);
@@ -379,6 +421,7 @@ export default function NativeMapSpike({ jobs = [], crew = null, initialJobId = 
   };
   const select = (next) => {
     if (navigating) return; // stay on the job being navigated to
+    if (next?.kind !== 'point') setPoint(null);
     setSelected(next);
   };
 
@@ -442,12 +485,14 @@ export default function NativeMapSpike({ jobs = [], crew = null, initialJobId = 
   return (
     // Inside the safe area so nothing sits under the status bar or the
     // phone's navigation buttons.
-    <SafeAreaView style={styles.screen} edges={['top', 'bottom', 'left', 'right']}>
+    // Full screen: inside the safe area. In the Map tab the app's header and
+    // bottom bar already keep it clear of the status bar and buttons.
+    <SafeAreaView style={styles.screen} edges={onClose ? ['top', 'bottom', 'left', 'right'] : ['left', 'right']}>
       <View style={styles.bar}>
-        <Text style={styles.title}>{navigating ? 'Navigating to site' : 'Outage map (new)'}</Text>
+        <Text style={styles.title}>{navigating ? 'Navigating to site' : 'Outage map'}</Text>
         <View style={styles.row}>
           <Text style={[styles.badge, online ? styles.badgeOn : styles.badgeOff]}>{online ? 'Online' : 'Offline'}</Text>
-          <Pressable onPress={onClose} style={styles.btn}><Text style={styles.btnText}>Close</Text></Pressable>
+          {onClose ? <Pressable onPress={onClose} style={styles.btn}><Text style={styles.btnText}>Close</Text></Pressable> : null}
         </View>
       </View>
 
@@ -482,6 +527,7 @@ export default function NativeMapSpike({ jobs = [], crew = null, initialJobId = 
             <Camera
               ref={cameraRef}
               initialViewState={{ bounds: [w, s, e, n] }}
+              {...(navigating ? { zoom: 17, pitch: 55 } : {})}
               trackUserLocation={follow ? (navigating ? 'course' : 'default') : undefined}
               onTrackUserLocationChange={(event) => {
                 if (!event.nativeEvent.trackUserLocation) setFollow(false); // the crew panned the map
@@ -551,10 +597,22 @@ export default function NativeMapSpike({ jobs = [], crew = null, initialJobId = 
                 );
               })}
 
-            {/* An incident being navigated to keeps a marker of its own. */}
-            {navigating && target?.kind === 'incident' && site ? (
+            {/* A point to look at (asset scan), with its label. */}
+            {point && selected?.kind === 'point' ? (
+              <Marker id="focus-point" lngLat={[point.lon, point.lat]} anchor="bottom">
+                <View style={styles.pinWrap}>
+                  <View style={[styles.pinLabel, { backgroundColor: '#6b3fa0' }]}>
+                    <Text style={[styles.pinText, { color: '#fff' }]} numberOfLines={1}>{point.title || 'Point'}</Text>
+                  </View>
+                  <View style={[styles.pin, styles.pinSelected, { backgroundColor: '#6b3fa0' }]} />
+                </View>
+              </Marker>
+            ) : null}
+
+            {/* An incident or point being navigated to keeps a marker of its own. */}
+            {navigating && (target?.kind === 'incident' || target?.kind === 'point') && site ? (
               <Marker id="nav-incident" lngLat={[site.lon, site.lat]} anchor="center">
-                <View style={[styles.pin, styles.pinSelected, { backgroundColor: target.color }]} />
+                <View style={[styles.pin, styles.pinSelected, { backgroundColor: target.color || '#6b3fa0' }]} />
               </Marker>
             ) : null}
 
@@ -619,7 +677,7 @@ export default function NativeMapSpike({ jobs = [], crew = null, initialJobId = 
                 <Text style={styles.btnLightText}>Google Maps</Text>
               </Pressable>
             ) : null}
-            <Pressable style={[styles.btn, styles.btnLight]} onPress={() => setSelected(null)}>
+            <Pressable style={[styles.btn, styles.btnLight]} onPress={() => { setSelected(null); setPoint(null); }}>
               <Text style={styles.btnLightText}>Clear</Text>
             </Pressable>
           </View>

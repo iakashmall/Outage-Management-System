@@ -41,17 +41,21 @@ const CHECKLIST_ITEMS = {
   ],
 };
 
+// onChange(allDone, items): items is [{ label, checked, at }], at = when that
+// item was ticked (ISO string) or null.
 export default function PriorityChecklist({ severity = "Medium", onChange }) {
   const color = SEVERITY_COLORS[severity] || SEVERITY_COLORS.Medium;
   const items = CHECKLIST_ITEMS[severity] || CHECKLIST_ITEMS.Medium;
+  // index -> the time it was ticked (truthy), or false
   const [checked, setChecked] = useState({});
 
   const toggle = (i) => {
-    setChecked((prev) => {
-      const next = { ...prev, [i]: !prev[i] };
-      onChange?.(items.every((_, idx) => next[idx]));
-      return next;
-    });
+    const next = { ...checked, [i]: checked[i] ? false : new Date().toISOString() };
+    setChecked(next);
+    onChange?.(
+      items.every((_, idx) => next[idx]),
+      items.map((label, idx) => ({ label, checked: !!next[idx], at: next[idx] || null }))
+    );
   };
 
   return (

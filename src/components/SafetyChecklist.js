@@ -11,7 +11,9 @@ const ITEMS = [
   "Permit verified",
 ];
 
+// onPass(items): items is [{ label, checked, at }], at = when that item was ticked.
 export default function SafetyChecklist({ onPass, onCancel }) {
+  // index -> the time it was ticked (truthy), or false
   const [checked, setChecked] = useState({});
   const allDone = ITEMS.every((_, i) => checked[i]);
 
@@ -22,7 +24,7 @@ export default function SafetyChecklist({ onPass, onCancel }) {
         <Pressable
           key={i}
           style={s.row}
-          onPress={() => setChecked({ ...checked, [i]: !checked[i] })}
+          onPress={() => setChecked({ ...checked, [i]: checked[i] ? false : new Date().toISOString() })}
         >
           <View style={[s.box, checked[i] && s.boxOn]}>
             {checked[i] && <Text style={s.tick}>OK</Text>}
@@ -33,7 +35,7 @@ export default function SafetyChecklist({ onPass, onCancel }) {
       <Pressable
         disabled={!allDone}
         style={[s.btn, !allDone && s.btnOff]}
-        onPress={onPass}
+        onPress={() => onPass?.(ITEMS.map((label, i) => ({ label, checked: !!checked[i], at: checked[i] || null })))}
       >
         <Text style={s.btnText}>Confirm &amp; start work</Text>
       </Pressable>

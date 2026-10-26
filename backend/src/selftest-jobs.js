@@ -58,8 +58,14 @@ const server = app.listen(0, async () => {
     return { status: r.status, body: await r.json().catch(() => ({})) };
   };
   // What the crew app sends for a status change (src/lib/api.js updateJobStatus).
-  const appStatus = (jobId, status, ts, as = 'c3') => call(as, 'PATCH', `/mobile/jobs/${jobId}/status`,
-    { status, lat: 29.94, lon: 78.15, crewId: USERS[as].crewId, ts, sentAt: new Date().toISOString() });
+  // Sent from the incident's own position: On Site / Work Started are only
+  // accepted at the site (selftest-crewfeatures.js tests that rule).
+  const sitePos = async (jobId) => {
+    const inc = await repo.incident((await repo.job(jobId))?.incident_id);
+    return inc?.lat != null ? { lat: inc.lat, lon: inc.lon } : { lat: 29.94, lon: 78.15 };
+  };
+  const appStatus = async (jobId, status, ts, as = 'c3') => call(as, 'PATCH', `/mobile/jobs/${jobId}/status`,
+    { status, ...(await sitePos(jobId)), crewId: USERS[as].crewId, ts, sentAt: new Date().toISOString() });
   const events = async (incId) => (await call('op', 'GET', `/incidents/${incId}`)).body.events || [];
   const lateEvents = async (incId) => (await events(incId)).filter((e) => /late update from crew not applied/.test(e.note));
   const updatesOf = async (jobId) => db.any('SELECT * FROM job_updates WHERE job_id=$1 ORDER BY ts', [jobId]);
@@ -220,6 +226,25 @@ const server = app.listen(0, async () => {
     check('same form resent after Work Started -> stored once, under its clientRequestId', resent.status === 201 && resent2.status === 200
       && (await repo.jobCompletions(C.job)).length === 1 && resent.body.completion.client_request_id === heldForm.clientRequestId);
 
+    console.log('-- checklists');
+    const ticks = [{ label: 'Area isolated', checked: true, at: minsAgo(3) }, { label: 'Earthing applied', checked: true, at: minsAgo(2) }];
+    const pre = await call('c3', 'POST', `/mobile/jobs/${C.job}/checklist`, { items: ticks, passedAt: minsAgo(2), sentAt: minsAgo(0) });
+    check('priority checklist recorded -> 201 applied', pre.status === 201 && pre.body.applied === true && pre.body.event?.kind === 'checklist', `(${pre.status})`);
+    const clEvents = (await events(C.inc)).filter((e) => e.kind === 'checklist');
+    const [clSummary, clJson] = (clEvents[0]?.note || '').split('\n');
+    check('... on the incident timeline, by the crew, items readable back', clEvents.length === 1 && clEvents[0].actor === 'crew03'
+      && clSummary === `Priority checklist passed (2/2) for job ${C.job}` && JSON.stringify(JSON.parse(clJson || 'null')) === JSON.stringify(ticks));
+    const preAgain = await call('c3', 'POST', `/mobile/jobs/${C.job}/checklist`, { items: ticks, passedAt: minsAgo(2), sentAt: minsAgo(0) });
+    check('... the same ticks resent -> 200 duplicate, still one event', preAgain.status === 200 && preAgain.body.duplicate === true
+      && (await events(C.inc)).filter((e) => e.kind === 'checklist').length === 1);
+    check('... items without a boolean checked -> 400', (await call('c3', 'POST', `/mobile/jobs/${C.job}/checklist`, { items: [{ label: 'x', checked: 'yes' }] })).status === 400);
+    check("... another crew's job -> 403", (await call('c4', 'POST', `/mobile/jobs/${C.job}/checklist`, { items: ticks })).status === 403);
+    check('completion with a bad checklist -> 400', (await call('c3', 'POST', `/mobile/jobs/${C.job}/completion`, { checklist: { label: 'x' } })).status === 400);
+    const withList = await call('c3', 'POST', `/mobile/jobs/${C.job}/completion`, { restored: 'yes', checklist: ticks, clientRequestId: 'cr-C-checklist' });
+    const stored = (await call('op', 'GET', `/mobile/jobs/${C.job}/completion`)).body.find((x) => x.client_request_id === 'cr-C-checklist');
+    check('completion with a checklist -> stored and read back', withList.status === 201 && stored?.checklist?.length === 2
+      && stored.checklist.every((x, i) => x.label === ticks[i].label && x.checked === ticks[i].checked && x.at === ticks[i].at)); // JSONB reorders keys
+
     console.log('-- undo inside the window');
     const reopen = await call('c3', 'POST', `/mobile/jobs/${A.job}/reopen`, {});
     check('crew reopens -> Work Started', reopen.body.applied === true && (await repo.job(A.job)).status === 'Work Started', reopen.body.reason || '');
@@ -294,6 +319,38 @@ const server = app.listen(0, async () => {
     check('planned job listed with planned:true, locked:false', (await call('c3', 'GET', '/mobile/crews/C003/jobs')).body.some((j) => j.id === 'JOB-PLANNED-T' && j.planned === true && j.locked === false));
     check('return-for-correction on a planned incident -> 409', (await call('op', 'POST', `/incidents/${po.incident_id}/return-for-correction`, { reason: 'x' })).status === 409);
     await db.none("DELETE FROM jobs WHERE id='JOB-PLANNED-T'");
+
+    console.log('Crews offered for assignment (a crew may hold several jobs)');
+    if (!(await db.oneOrNone("SELECT 1 FROM pg_extension WHERE extname='postgis'"))) {
+      console.log('  (skipped: needs PostGIS for distances)');
+    } else {
+      // Only these three crews are on shift, so the list is exactly theirs.
+      await db.none('UPDATE crews SET on_shift=false');
+      const incAt = async (lat, lon) => (await call('op', 'POST', '/incidents', { zone: 'Kankhal-2', severity: 'high', lat, lon })).body;
+      const busyInc = await incAt(29.937, 78.174);
+      await db.none(`INSERT INTO crews (id, name, lead, status, location, job_id, lat, lon, skills, on_shift) VALUES
+        ('T-FREE', 'Test Free', 'A', 'available', 'far depot', NULL, 30.05, 78.30, 'MV', true),
+        ('T-BUSY', 'Test Busy', 'B', 'in_service', 'site', $1, 29.9372, 78.1742, 'MV', true),
+        ('T-OFF',  'Test Off',  'C', 'available', 'near', NULL, 29.9371, 78.1741, 'MV', false)`, [busyInc.id]);
+      await repo.createJob({ id: 'JOB-T-BUSY', incident_id: busyInc.id, crew_id: 'T-BUSY', priority: 'Normal', status: 'On Site', address: 'x', updated_at: new Date().toISOString() });
+      const target = await incAt(29.937, 78.174);
+      const offer = (await call('op', 'GET', `/incidents/${target.id}/nearest-crews`)).body;
+      check('busy crews are offered, off-shift ones are not', offer.map((c) => c.id).join() === 'T-FREE,T-BUSY', offer.map((c) => c.id));
+      check('a free crew comes first even when farther (T-FREE ~16 km before T-BUSY ~20 m)', offer[0]?.id === 'T-FREE' && offer[0].meters_away > offer[1].meters_away, offer.map((c) => Math.round(c.meters_away)));
+      check('each crew carries its active job count (T-BUSY 1, T-FREE 0)', offer.find((c) => c.id === 'T-BUSY')?.active_jobs === 1 && offer.find((c) => c.id === 'T-FREE')?.active_jobs === 0);
+      const a1 = await call('op', 'POST', `/incidents/${target.id}/assign`, { crewId: 'T-BUSY' });
+      const busyAfter = await repo.crew('T-BUSY');
+      check('assign to a crew On Site elsewhere: job created, crew stays in_service on its current job',
+        a1.status === 200 && a1.body.job?.crew_id === 'T-BUSY' && busyAfter.status === 'in_service' && busyAfter.job_id === busyInc.id, JSON.stringify({ status: busyAfter.status, job_id: busyAfter.job_id }));
+      const again = (await call('op', 'GET', `/incidents/${(await incAt(29.937, 78.174)).id}/nearest-crews`)).body;
+      check('T-BUSY now shows 2 active jobs', again.find((c) => c.id === 'T-BUSY')?.active_jobs === 2);
+      const idleInc = await incAt(30.0, 78.25);
+      await call('op', 'POST', `/incidents/${idleInc.id}/assign`, { crewId: 'T-FREE' });
+      const freeAfter = await repo.crew('T-FREE');
+      check('assign to an idle crew: in_transit to that incident (unchanged behaviour)', freeAfter.status === 'in_transit' && freeAfter.job_id === idleInc.id, JSON.stringify({ status: freeAfter.status, job_id: freeAfter.job_id }));
+      check('assign to an off-shift crew -> 409 CREW_OFF_SHIFT', (await call('op', 'POST', `/incidents/${idleInc.id}/assign`, { crewId: 'T-OFF' })).body.code === 'CREW_OFF_SHIFT');
+      await db.none("UPDATE crews SET on_shift=true WHERE id NOT LIKE 'T-%'");
+    }
   } catch (e) {
     fails++;
     console.log('  [FAIL] unexpected error', e.stack);
