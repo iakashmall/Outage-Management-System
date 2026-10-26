@@ -14,6 +14,9 @@ import { Icon, SevBadge, StatusBadge, useLiveRefresh } from '../lib/ui.jsx';
 const OSM_FALLBACK = String(import.meta.env.VITE_BASEMAP_FALLBACK || '').toLowerCase() === 'osm';
 
 const SEVC = { critical: '#e23b2e', high: '#ef9021', medium: '#3b82f6', low: '#22b06b' };
+// Severity and crew status are also shown by a letter / mark, not by colour alone (WCAG 1.4.1).
+const SEVL = { critical: 'C', high: 'H', medium: 'M', low: 'L' };
+const crewCls = (status) => `mk-crew s-${status || 'unknown'}`;
 const CREWC = { available: '#0fb39d', in_service: '#3b82f6', in_transit: '#ef9021', on_break: '#9fb0c4', off_shift: '#9fb0c4' };
 const PALETTE = ['#3b82f6', '#0fb39d', '#e0742b', '#8b5cf6', '#22b06b', '#e0447a', '#d1a017', '#2fa3a3', '#7a9e2e', '#c2622a', '#5b6ee0', '#c94f9a'];
 const feederColor = (name) => { if (!name) return '#9fb0c4'; let h = 0; for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) & 0xffff; return PALETTE[h % PALETTE.length]; };
@@ -187,6 +190,12 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     const bounds = L.latLngBounds([b.minLat, b.minLon], [b.maxLat, b.maxLon]);
     const map = L.map(boxRef.current, { preferCanvas: true, zoomControl: false, attributionControl: true, maxZoom: 19, zoomSnap: 0.25, wheelPxPerZoomLevel: 90 });
     map.fitBounds(bounds.pad(0.05));
+    // role=application makes NVDA/JAWS switch to focus mode on the map, so the arrow / + / - keys reach
+    // Leaflet's keyboard panning and zoom instead of being used for reading (WCAG 2.1.1).
+    const box = map.getContainer();
+    box.setAttribute('role', 'application');
+    box.setAttribute('aria-roledescription', 'map');
+    box.setAttribute('aria-label', 'Network map. Arrow keys pan, plus and minus zoom. Use Search the network map to reach a marker.');
     // Basemap: vector map from the in-house map server, reached through the OMS backend (/api/map), so the
     // normal login protects it and nothing is loaded from the public internet. transformRequest attaches the
     // Bearer token to every map request (style, tiles, fonts). Leaflet layers (feeders, crews...) draw on top.
@@ -335,7 +344,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     g.clearLayers();
     inc.filter((i) => i.lat && i.lon).forEach((i) => {
       const active = !['resolved', 'closed', 'cancelled'].includes(i.status);
-      const m = L.marker([i.lat, i.lon], { icon: L.divIcon({ className: '', html: `<div class="mk-inc ${active ? 'live' : ''}" style="--c:${SEVC[i.severity]}"></div>`, iconSize: [16, 16], iconAnchor: [8, 8] }), zIndexOffset: 1000, title: `Incident ${i.id}, ${i.severity}, ${String(i.status).replace('_', ' ')}` });
+      const m = L.marker([i.lat, i.lon], { icon: L.divIcon({ className: '', html: `<div class="mk-inc ${active ? 'live' : ''}" style="--c:${SEVC[i.severity]}">${SEVL[i.severity] || ''}</div>`, iconSize: [18, 18], iconAnchor: [9, 9] }), zIndexOffset: 1000, title: `Incident ${i.id}, ${i.severity}, ${String(i.status).replace('_', ' ')}` });
       m.on('click', () => select('incident', i, i.id)); m.addTo(g);
     });
   }, [inc, ready]);
@@ -376,7 +385,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
       const color = CREWC[c.status] || '#9fb0c4';
       let e = live.get(c.id);
       if (!e) {
-        const m = L.marker([c.lat, c.lon], { icon: L.divIcon({ className: '', html: `<div class="mk-crew-wrap"><div class="mk-crew" style="--c:${color}"></div></div>`, iconSize: [16, 16], iconAnchor: [8, 8] }), zIndexOffset: 900, title: `Crew ${c.name || c.id}` });
+        const m = L.marker([c.lat, c.lon], { icon: L.divIcon({ className: '', html: `<div class="mk-crew-wrap"><div class="${crewCls(c.status)}" style="--c:${color}"></div></div>`, iconSize: [16, 16], iconAnchor: [8, 8] }), zIndexOffset: 900, title: `Crew ${c.name || c.id}` });
         e = { m, crew: c, at: Date.now(), heading: 0, raf: 0 };
         m.on('click', () => select('crew', e.crew, e.crew.name));
         // Leaflet rebuilds the icon element when the layer is toggled back on
@@ -384,6 +393,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
           const wrap = m.getElement()?.querySelector('.mk-crew-wrap');
           if (wrap) wrap.style.transform = `rotate(${e.heading}deg)`;
           wrap?.firstChild?.style.setProperty('--c', CREWC[e.crew.status] || '#9fb0c4');
+          if (wrap?.firstChild) wrap.firstChild.className = crewCls(e.crew.status);
         });
         m.addTo(g);
         live.set(c.id, e);
@@ -391,7 +401,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
       }
       e.crew = c;
       const el = e.m.getElement()?.querySelector('.mk-crew');
-      if (el) el.style.setProperty('--c', color);
+      if (el) { el.style.setProperty('--c', color); el.className = crewCls(c.status); }
       const from = e.m.getLatLng(), to = L.latLng(c.lat, c.lon);
       if (from.distanceTo(to) < 1) return;
       if (from.distanceTo(to) > 3) {
@@ -596,19 +606,17 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
             <div className="lp-h">Key</div>
             <div className="lp-kt">Incident severity</div>
             <div className="lp-kgrid">
-              <span className="lp-krow"><Sym shape="dot" color="#e23b2e" /> Critical</span>
-              <span className="lp-krow"><Sym shape="dot" color="#ef9021" /> High</span>
-              <span className="lp-krow"><Sym shape="dot" color="#3b82f6" /> Medium</span>
-              <span className="lp-krow"><Sym shape="dot" color="#22b06b" /> Low</span>
+              {['critical', 'high', 'medium', 'low'].map((k) => (
+                <span key={k} className="lp-krow"><span className="mk-inc lg-inc" style={{ '--c': SEVC[k] }} aria-hidden="true">{SEVL[k]}</span> {k[0].toUpperCase() + k.slice(1)}</span>
+              ))}
             </div>
             <div className="lp-kt">Crew status</div>
             <div className="lp-kgrid">
-              <span className="lp-krow"><Sym shape="tri" color="#0fb39d" /> Available</span>
-              <span className="lp-krow"><Sym shape="tri" color="#ef9021" /> In transit</span>
-              <span className="lp-krow"><Sym shape="tri" color="#3b82f6" /> In service</span>
-              <span className="lp-krow"><Sym shape="tri" color="#9fb0c4" /> On break</span>
+              {[['available', 'Available'], ['in_transit', 'In transit (bar)'], ['in_service', 'In service (dot)'], ['on_break', 'On break / off shift (hollow)']].map(([k, l]) => (
+                <span key={k} className="lp-krow"><span className="lg-crew" aria-hidden="true"><span className={crewCls(k)} style={{ '--c': CREWC[k] }} /></span> {l}</span>
+              ))}
             </div>
-            <div className="lp-knote">Active incidents show a pulsing ring. Feeder colour identifies its circuit.</div>
+            <div className="lp-knote">Active incidents show a pulsing ring. Feeder colour identifies its circuit; hover or select a line for its name.</div>
           </div>
 
           <div className="lp-hint">Drag to pan · scroll to zoom · click a feeder to trace its circuit</div>
@@ -777,10 +785,3 @@ function CrewTrailInfo({ pts, win, lastFix, onShow }) {
 
 function KV({ k, v, mono }) { return <div className="kv-row"><span className="k">{k}</span><span className={`v ${mono ? 'mono' : ''}`}>{v || '—'}</span></div>; }
 
-function Sym({ shape, color }) {
-  if (shape === 'line') return <span className="lg-sym lg-line" style={{ background: color }} />;
-  if (shape === 'dia') return <span className="lg-sym lg-dia" style={{ background: color }} />;
-  if (shape === 'sq') return <span className="lg-sym lg-sq" style={{ background: color }} />;
-  if (shape === 'tri') return <span className="lg-sym lg-tri" style={{ borderBottomColor: color }} />;
-  return <span className="lg-sym lg-dot" style={{ background: color }} />;
-}

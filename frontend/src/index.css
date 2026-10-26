@@ -1015,3 +1015,21 @@ button.kh-more:hover{text-decoration:underline}
 }
 /* The screen container takes focus only as a starting point for Tab; no box on it. */
 .content:focus,.content:focus-visible{box-shadow:none}
+
+/* Header may sit after <main> in the DOM (tab order); keep it visually on top. */
+.main>.cmd{order:1}.main>.tape{order:2}.main>.content{order:3}.main>.powered-by{order:4}
+/* Active option in the header incident search (arrow keys). */
+.ms-item.active{background:var(--surface-2,#eef2f8);box-shadow:inset 3px 0 0 var(--focus-ring)}
+/* Tables are one Tab stop (lib/tableGate.js); box-shadow does not always paint on <table>. */
+[data-tgate]:focus-visible{outline:3px solid var(--focus-ring);outline-offset:2px}
+/* Map markers carry a non-colour cue too (WCAG 1.4.1): severity letter, crew-status mark. */
+.mk-inc{width:18px;height:18px;display:flex;align-items:center;justify-content:center;color:#fff;font:800 9.5px/1 var(--sans,system-ui);text-shadow:0 0 2px rgba(0,0,0,.45)}
+.mk-crew{position:relative}
+.mk-crew::after{content:"";position:absolute}
+.mk-crew.s-in_service::after{left:-2.5px;top:7px;width:5px;height:5px;border-radius:50%;background:#fff}
+.mk-crew.s-in_transit::after{left:-4px;top:8.5px;width:8px;height:2.5px;background:#fff}
+.mk-crew.s-on_break::after,.mk-crew.s-off_shift::after{left:-4.5px;top:4.5px;width:0;height:0;border-left:4.5px solid transparent;border-right:4.5px solid transparent;border-bottom:8px solid #fff}
+.lg-inc{flex:none;border-width:1.5px;box-shadow:none}
+.lg-crew{flex:none;display:inline-flex;width:16px;height:14px;justify-content:center}
+/* The scrolling track is transformed, so it painted over the LIVE badge; keep the badge on top. */
+.tape .badge{position:relative;z-index:1;flex:none}

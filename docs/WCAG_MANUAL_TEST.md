@@ -45,7 +45,7 @@ Focus visible, 3.2.1/3.2.2 no unexpected context change.
 | A4 | Tab to **New incident**, **Enter** | Drawer opens, focus on its **Close (X)** | |
 | A5 | Fill the form: zone, severity, type, feeder, customers, cause. Use arrow keys in selects | Every field reachable in a logical top-to-bottom order; Tab wraps inside the drawer, never to the page behind | |
 | A6 | Tab to **Create incident**, **Enter** | Incident is created, a toast appears, drawer closes, focus returns to **New incident** | |
-| A7 | Use the search box to find the new incident (type its ID), then Tab to it in the list and press **Enter** | Incident detail drawer opens | |
+| A7 | Header **Search incidents**: type the new incident's ID, **↓** to it, **Enter**. Then on **Incidents**, Tab onto the table (one stop), **Enter**, Tab row by row to it, **Enter** | Tab passes the search box and each table in one stop; inside, Tab / ↑↓ move a row at a time; the detail drawer opens | |
 | A8 | In the drawer, Tab through everything | Status buttons, ETA field, **Update ETA**, crew buttons, message box, photos - all reachable, focus visible, nothing skipped | |
 | A9 | Under **Assign crew - nearest first**, Tab to a crew button, **Enter** | Crew assigned, status moves to dispatched, toast announces it | |
 | A10 | Change status with the status buttons (e.g. In progress → Resolved / Accept - verified restored) | Each change works with Enter / Space; the timeline updates | |
@@ -53,8 +53,9 @@ Focus visible, 3.2.1/3.2.2 no unexpected context change.
 | A12 | Close the drawer with **Esc** | Drawer closes; focus returns to the incident row you opened | |
 | A13 | **Dispatch** → **Unassigned jobs** card for your own new incident: Tab to its crew dropdown, change the crew with ↑/↓ (Alt+↓ opens the list), then Tab past it to **Dispatch** and press Enter | Crew chosen and dispatched without a mouse; a toast confirms it and the job leaves the list. NVDA reads "Crew for INC-…" and "Dispatch selected crew to INC-…" | |
 | A14 | **TCS / IVR**: on a call, open **Reject**, type a reason, submit; then open another and press **Esc** | Drawer works fully by keyboard; Esc closes and returns focus | |
-| A15 | **Analytics**: switch tabs; in **Feeder PQ KPIs** change View / Period / Phase; in **SMS & Escalation** use **+ Compose SMS** and Tab into the scrollable tables, scroll them with arrow keys | All controls reachable; tables scroll with arrows once focused | |
-| A16 | Throughout: was there **any** moment the focus outline disappeared or you didn't know where you were? | No | |
+| A15 | **Analytics**: switch tabs; in **Feeder PQ KPIs** change View / Period / Phase; in **SMS & Escalation** use **+ Compose SMS**, Tab onto each table and press **Esc** / Tab to pass it | All controls reachable; each table is one Tab stop (Enter to go in, Esc to leave) | |
+| A16 | On any screen other than Dashboard, Tab from the nav rail; then press **Esc** inside the screen | Focus goes rail → screen content (header search/clock/profile come last); Esc returns to the screen's rail button | |
+| A17 | Throughout: was there **any** moment the focus outline disappeared or you didn't know where you were? | No | |
 
 ---
 
@@ -72,7 +73,7 @@ Start NVDA, open the app, keep **Speech viewer** open.
 | B2 | **D** (landmarks) | "Primary navigation" landmark, then the main content | |
 | B3 | **Tab** through the nav rail | Each button read by name, current screen announced as current ("Incidents, current page" or similar) | |
 | B4 | **H** on Dashboard, Incidents, Analytics | Headings exist and describe the sections; nothing important is only visual | |
-| B5 | Dashboard: Tab into the **Active incidents table** region, then use **Ctrl+Alt+arrows** in the table | Region named; table headers read with each cell (ID, Severity, Zone…) | |
+| B5 | Dashboard: Tab onto the **Active incidents table** ("Press Enter to move into the table"), then use **Ctrl+Alt+arrows** in browse mode | Region named with the hint; table headers read with each cell (ID, Severity, Zone…) | |
 | B6 | Severity / status badges in any table | Read as words ("critical", "open"), not just colour | |
 | B7 | Open **New incident** | "New incident, dialog" announced; each field read with its label | |
 | B8 | Submit **New incident** with a required field empty | The error is announced without moving focus by hand | |
@@ -94,13 +95,13 @@ WCAG: 1.4.1 Use of colour, 1.4.11 Non-text contrast, 2.1.1 Keyboard,
 
 | # | Do | Expected | Result |
 |---|---|---|---|
-| C1 | Tab into the map | The map area receives visible focus | |
+| C1 | Tab into the map | Visible focus; NVDA switches to focus mode and reads "Network map. Arrow keys pan…" and the Enter hint | |
 | C2 | Arrow keys | Map pans | |
 | C3 | **+** / **-** keys, and Tab to the **zoom buttons** (top right) + Enter | Map zooms both ways | |
 | C4 | Layer panel: Tab to each layer checkbox, toggle with **Space** | Layers switch; NVDA reads each checkbox name and state | |
-| C5 | Reach an incident / crew / asset marker **without the mouse** | Possible, and its details panel opens (if impossible: Fail, note which marker types) | |
+| C5 | Reach a marker **without the mouse**: on the map press **Enter**, then Tab through markers (Esc leaves); or use **Search the network map** | Tab skips markers until Enter; the details panel opens for the chosen one | |
 | C6 | Details panel: **Trace electrical section** and the panel's **Close** | Both work by keyboard; NVDA reads the panel content | |
-| C7 | Colour only? Look at incident markers, crew symbols, feeder lines | Severity / crew status is also shown by **shape, icon or label**, not by colour alone (the legend shows shapes for crews - check incidents and feeders too) | |
+| C7 | Colour only? Look at incident markers, crew symbols, feeder lines (try a greyscale screenshot) | Incidents carry a letter (C/H/M/L); crews a mark (filled / dot / bar / hollow); feeders are named on hover or select | |
 | C8 | Markers against the base map | Markers and lines are distinguishable from the map (≥ 3:1 visually; use a contrast checker on a screenshot if unsure) | |
 | C9 | With the map focused, does Tab still get **out** of it to the rest of the page? | Yes - no keyboard trap | |
 
@@ -131,6 +132,6 @@ Orientation.
    (or the remaining ones are accepted and documented as known
    limitations). An external audit / SOC 2 track is P8.7b.
 
-| Run | Date | Tester | A (16) | B (16) | C (9) | D (4) | Open Fails |
+| Run | Date | Tester | A (17) | B (16) | C (9) | D (4) | Open Fails |
 |---|---|---|---|---|---|---|---|
-| 1 | | | /16 | /16 | /9 | /4 | |
+| 1 | 2026-10-26 | in-house (operator login, NVDA) | 17/17 | 16/16 | 9/9 | 4/4 | none |

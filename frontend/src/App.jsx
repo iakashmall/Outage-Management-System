@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef, Component } from 'react';
+import { useTableGates } from './lib/tableGate.js';
 import { motion, AnimatePresence } from 'motion/react';
 import { socket } from './lib/api.js';
 import { Icon, useConnection, useToasts, toast, hhmm } from './lib/ui.jsx';
@@ -119,6 +120,7 @@ export default function App() {
   // Choosing a screen in the rail moves focus to that screen, so the next Tab
   // reaches its first control instead of the header controls again (WCAG 2.4.1, 2.4.3).
   const mainRef = useRef(null);
+  useTableGates(mainRef);
   const goTab = (id) => { setTab(id); requestAnimationFrame(() => mainRef.current?.focus({ preventScroll: true })); };
   // Esc inside a screen returns focus to that screen's button in the rail - unless Esc already
   // has a job there: closing a dialog/drawer, or leaving a field the user is typing in.
@@ -191,6 +193,26 @@ export default function App() {
   const active = nav.find((n) => n[0] === tab) || nav[0];
   const Screen = active[3];
 
+  const header = (
+        <header className="cmd">
+          <div>
+            <h1>{active[1]}</h1>
+            <div className="sub">Uttarakhand Power Corp . Ganga Corridor Control Centre</div>
+          </div>
+          <div className="grow" />
+          <div className="conn" title={up ? 'Live link to control-room backend' : 'ReconnectingΓÇª'}>
+            <span className={`dot ${up ? 'up' : 'down'}`} />
+            {up ? 'SCADA link live' : 'Reconnecting'}
+          </div>
+          <div className="clock mono">{clock}</div>
+             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 12 }}>
+               <div style={{ marginLeft: 12, width: 260, position: 'relative', display: 'flex', alignItems: 'center' }}>
+                 <IncidentSearch onOpen={(inc) => openIncident(inc.id)} />
+               </div>
+               <ProfileMenu />
+             </div>
+           </header>
+  );
   return (
     <div className="shell">
       <a className="skip-link" href="#main-content" onClick={(e) => { e.preventDefault(); mainRef.current?.focus(); }}>Skip to main content</a>
@@ -227,24 +249,10 @@ export default function App() {
           </div>
         </div>
 
-        <header className="cmd">
-          <div>
-            <h1>{active[1]}</h1>
-            <div className="sub">Uttarakhand Power Corp . Ganga Corridor Control Centre</div>
-          </div>
-          <div className="grow" />
-          <div className="conn" title={up ? 'Live link to control-room backend' : 'ReconnectingΓÇª'}>
-            <span className={`dot ${up ? 'up' : 'down'}`} />
-            {up ? 'SCADA link live' : 'Reconnecting'}
-          </div>
-          <div className="clock mono">{clock}</div>
-             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 12 }}>
-               <div style={{ marginLeft: 12, width: 260, position: 'relative', display: 'flex', alignItems: 'center' }}>
-                 <IncidentSearch onOpen={(inc) => openIncident(inc.id)} />
-               </div>
-               <ProfileMenu />
-             </div>
-           </header>
+        {/* Header controls (search, clock, link status, profile) come right after the rail only on the
+            Dashboard. On other screens they are rendered after <main> - CSS order keeps them on top -
+            so Tab goes rail -> screen content, and the header is still reachable at the end (WCAG 2.4.3). */}
+        {tab === 'dashboard' && header}
 
         <LiveTape />
 
@@ -266,6 +274,7 @@ export default function App() {
             </motion.div>
           </AnimatePresence>
         </main>
+        {tab !== 'dashboard' && header}
 
         <div className="powered-by">
           <img src="/spintech-logo.png" alt="" />

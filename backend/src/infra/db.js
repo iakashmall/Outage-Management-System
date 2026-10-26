@@ -603,6 +603,17 @@ export async function migrate() {
       resolution  TEXT
     );
     CREATE INDEX IF NOT EXISTS reassign_requests_open_idx ON reassign_requests(status, created_at DESC);
+
+    -- Stored monthly reliability indices (POST /analytics/snapshot writes, GET /analytics/monthly reads).
+    -- repo.js used this table but nothing created it, so the monthly chart always failed with a 500.
+    CREATE TABLE IF NOT EXISTS monthly_indices (
+      month_key   TEXT PRIMARY KEY,
+      saidi       NUMERIC,
+      saifi       NUMERIC,
+      caidi       NUMERIC,
+      maifi       NUMERIC,
+      computed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
   `);
 
   // ID sequences for incidents.id / complaints.qid. These replace the old
