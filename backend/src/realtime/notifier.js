@@ -4,6 +4,7 @@ import { bus, TOPICS } from '../domain/bus.js';
 import { db } from '../infra/db.js';
 import { repo } from '../infra/repo.js';
 import { deriveCallState, cleanSubstation } from '../domain/callState.js';
+import { sendSmsVia, maskPhone } from './sms.js';
 
 export const transport = nodemailer.createTransport({
   host: process.env.BREVO_SMTP_HOST,
@@ -68,8 +69,8 @@ async function sendSms(incidentId, body) {
     await record(incidentId, 'sms', to, null, body, 'skipped-optout', null);
     return;
   }
-  console.log(`[notifier] SMS (console only) -> customer: ${body}`);
-  await record(incidentId, 'sms', to, null, body, 'logged', null);
+  const r = await sendSmsVia({ to, body, label: 'customer' });
+  await record(incidentId, 'sms', to, null, body, r.status, r.error);
 }
 
 // ---- Restoration callbacks (OMS-02) ----
@@ -78,11 +79,6 @@ async function sendSms(incidentId, body) {
 // notifications. Phone numbers are only held in memory: the DB row, logs and
 // timeline get a masked number. Idempotent per (incident, contact_ref) via a
 // unique index, so a retry or a second reclose never sends twice.
-const maskPhone = (p) => {
-  const d = String(p || '').replace(/\D/g, '');
-  return d ? '*'.repeat(Math.max(0, d.length - 4)) + d.slice(-4) : null;
-};
-
 async function claimCallback(incidentId, contactRef, recipient, body, status) {
   const row = await db.oneOrNone(
     `INSERT INTO notifications (id, incident_id, channel, recipient, subject, body, status, error, ts, contact_ref)

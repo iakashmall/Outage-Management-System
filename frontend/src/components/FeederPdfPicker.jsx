@@ -58,7 +58,7 @@ export default function FeederPdfPicker({ feeders, initial = [], onExport, disab
             <b>Feeders in the PDF</b>
             <span className={picked.size > MAX ? 'fp-over' : 'muted'}>{picked.size} selected{picked.size > MAX ? ` · max ${MAX}` : ''}</span>
           </div>
-          <input className="fp-search" placeholder="Search feeder or substation" value={q} onChange={(e) => setQ(e.target.value)} autoFocus />
+          <input className="fp-search" placeholder="Search feeder or substation" value={q} onChange={(e) => setQ(e.target.value)} autoFocus /* eslint-disable-line jsx-a11y/no-autofocus -- opened by the user's own click */ />
           <div className="fp-list">
             {groups.map(([s, fs]) => {
               const all = fs.every((f) => picked.has(f));

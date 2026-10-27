@@ -12,7 +12,7 @@
 
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { api } from '../lib/api.js';
-import { useLiveRefresh } from '../lib/ui.jsx';
+import { useLiveRefresh, toast, SrTable } from '../lib/ui.jsx';
 import FeederKpiPanel from '../components/FeederKpiPanel.jsx';
 // ─────────────────────────────────────────────────────────────
 // Constants
@@ -95,18 +95,18 @@ const SAMPLE_OPERATORS = [
 ];
 
 // Simulated SMS/escalation data
-const SAMPLE_SMS = [
-  { id: 1, ts: '10:42', feeder: 'MYP-01', recipient: 'Lineman B2 – Ram Lal', phone: '98765xxxxx', message: 'Fault on MYP-01 near pole 47. Attend immediately.', status: 'delivered', incidentId: 'INC-0041' },
-  { id: 2, ts: '10:45', feeder: 'MYP-01', recipient: 'AE Haridwar – S. Rawat', phone: '97564xxxxx', message: 'OMS INC-0041: feeder MYP-01 tripped, 320 customers affected.', status: 'delivered', incidentId: 'INC-0041' },
-  { id: 3, ts: '11:00', feeder: 'BWN-03', recipient: 'Lineman C1 – D. Kumar', phone: '96123xxxxx', message: 'Voltage sag alert: BWN-03. Investigate capacitor bank.', status: 'sent', incidentId: 'INC-0038' },
-  { id: 4, ts: '11:22', feeder: 'MYP-01', recipient: 'SE Haridwar – A. Gupta', phone: '99001xxxxx', message: 'ESCALATION: INC-0041 unresolved >90 min. Restoration SLA breached.', status: 'delivered', incidentId: 'INC-0041', escalation: true },
-];
-
-const SAMPLE_ESCALATIONS = [
-  { id: 1, incidentId: 'INC-0041', feeder: 'MYP-01', openedMin: 97, slaMin: 90, level: 'AE → SE', status: 'escalated', customers: 320 },
-  { id: 2, incidentId: 'INC-0038', feeder: 'BWN-03', openedMin: 45, slaMin: 90, level: 'Lineman → AE', status: 'pending', customers: 140 },
-  { id: 3, incidentId: 'INC-0035', feeder: 'LJW-02', openedMin: 155, slaMin: 90, level: 'SE → CE', status: 'escalated', customers: 510 },
-];
+// SMS log status / kind display (FR-OMS-021). 'logged' = recorded but no SMS
+// gateway is configured yet (SMS_DRIVER=console on the backend).
+const SMS_STATUS = {
+  sent: { label: '✓ Sent', color: '#177648' },
+  logged: { label: '● Logged (no gateway)', color: '#0a5de4' },
+  sending: { label: '→ Sending', color: '#0a5de4' },
+  failed: { label: '✕ Failed', color: '#c4271b' },
+};
+const SMS_KIND = { escalation: ['ESCALATION', '#9a580b'], officer: ['OFFICER', '#6366f1'], callback: ['CALLBACK', '#0d9488'], customer: ['CUSTOMER', '#5e6d82'] };
+const fmtMinutes = (m) => (m < 60 ? `${m} min` : m < 1440 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${Math.floor(m / 1440)} d ${Math.floor((m % 1440) / 60)} h`);
+const fmtTs = (ts) => new Date(ts).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
+const EMPTY_SMS = { recipient: '', phone: '', message: '', feeder: '', incidentId: '' };
 
 // ─────────────────────────────────────────────────────────────
 // KPI metadata registry
@@ -132,11 +132,11 @@ const KPI_META = [
 ];
 
 const KPI_GROUPS = {
-  voltage_events: { label: 'Voltage Events', color: '#3b82f6' },
-  current_events: { label: 'Current Events', color: '#ef9021' },
+  voltage_events: { label: 'Voltage Events', color: '#0a5de4' },
+  current_events: { label: 'Current Events', color: '#9a580b' },
   sag_stress:     { label: 'Sag & Stress',   color: '#8b5cf6' },
   extremes:       { label: 'Extremes',       color: '#0fb39d' },
-  imbalance:      { label: 'Imbalance',      color: '#e23b2e' },
+  imbalance:      { label: 'Imbalance',      color: '#c4271b' },
 };
 
 // Threshold for colour-coding
@@ -158,6 +158,7 @@ function Sparkbars({ data }) {
   const max = Math.max(...data, 1);
   const W = 640, H = 180, pad = 28, bw = (W - pad * 2) / data.length;
   return (
+    <>
     <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto' }} role="img" aria-label="Monthly SAIDI trend">
       {[0.25, 0.5, 0.75, 1].map((g) => (
         <line key={g} x1={pad} x2={W - pad} y1={H - pad - (H - pad * 2) * g} y2={H - pad - (H - pad * 2) * g} stroke="var(--line-2)" strokeWidth={0.5} />
@@ -169,22 +170,24 @@ function Sparkbars({ data }) {
         return (
           <g key={i}>
             <rect x={x} y={y} width={w} height={h} rx={3}
-              fill={last ? '#3b82f6' : 'var(--faint)'}
+              fill={last ? '#0a5de4' : 'var(--faint)'}
               opacity={last ? 1 : 0.7}
             />
             <text x={x + w / 2} y={H - pad + 14} fontSize={9} textAnchor="middle" fill="var(--muted)">{MONTHS[i]}</text>
-            {last && <text x={x + w / 2} y={y - 6} fontSize={10} textAnchor="middle" fill="#3b82f6" fontWeight="600">{v}</text>}
+            {last && <text x={x + w / 2} y={y - 6} fontSize={10} textAnchor="middle" fill="#0a5de4" fontWeight="600">{v}</text>}
           </g>
         );
       })}
     </svg>
+    <SrTable caption="Monthly SAIDI" head={['Month', 'SAIDI']} rows={data.map((v, i) => [MONTHS[i], v])} />
+    </>
   );
 }
 
 // ─────────────────────────────────────────────────────────────
 // Phase badge
 // ─────────────────────────────────────────────────────────────
-const PHASE_COLORS = { R: '#e23b2e', Y: '#d1a017', B: '#3b82f6', T: '#22b06b' };
+const PHASE_COLORS = { R: '#c4271b', Y: '#83640e', B: '#0a5de4', T: '#177648' };
 function PhasePill({ ph }) {
   return (
     <span style={{
@@ -199,7 +202,7 @@ function PhasePill({ ph }) {
 // Status dot
 // ─────────────────────────────────────────────────────────────
 function StatusDot({ s }) {
-  const c = { on_duty: '#22b06b', standby: '#d1a017', on_leave: '#9fb0c4', off: '#9fb0c4' }[s] || '#9fb0c4';
+  const c = { on_duty: '#177648', standby: '#83640e', on_leave: '#9fb0c4', off: '#9fb0c4' }[s] || '#9fb0c4';
   return <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: c, flexShrink: 0 }} />;
 }
 
@@ -208,7 +211,7 @@ function StatusDot({ s }) {
 // ─────────────────────────────────────────────────────────────
 function KPICell({ kpiKey, value, unit }) {
   const st = kpiStatus(kpiKey, value);
-  const c = { warn: '#e23b2e', med: '#ef9021', ok: 'var(--fg)' }[st];
+  const c = { warn: '#c4271b', med: '#9a580b', ok: 'var(--fg)' }[st];
   return (
     <td style={{ color: c, fontWeight: st !== 'ok' ? 600 : 400, fontVariantNumeric: 'tabular-nums', fontSize: 13 }}>
       {value}<span style={{ fontSize: 10, color: 'var(--muted)', marginLeft: 2 }}>{unit}</span>
@@ -238,11 +241,13 @@ export default function Analytics() {
   const [selectedFeeder, setSelectedFeeder] = useState('All feeders');
   const [activePhase, setActivePhase] = useState('T');
   const [activeKpiGroup, setActiveKpiGroup] = useState('voltage_events');
-  const [smsLog] = useState(SAMPLE_SMS);
-  const [escalations] = useState(SAMPLE_ESCALATIONS);
+  const [smsLog, setSmsLog] = useState([]);
+  const [smsDriver, setSmsDriver] = useState('');
+  const [escalations, setEscalations] = useState([]);
+  const [smsSending, setSmsSending] = useState(false);
   const [operators] = useState(SAMPLE_OPERATORS);
   const [smsComposeOpen, setSmsComposeOpen] = useState(false);
-  const [smsDraft, setSmsDraft] = useState({ recipient: '', message: '', feeder: '' });
+  const [smsDraft, setSmsDraft] = useState(EMPTY_SMS);
 
   const load = () => {
     api.indicators().then(setInd);
@@ -290,12 +295,34 @@ export default function Analytics() {
     onLeave: operators.filter(o => o.shift === s.key && o.status === 'on_leave').length,
   })), [operators]);
 
-  const sendSMS = useCallback((e) => {
+  const loadSms = useCallback(() => {
+    api.smsLog().then((d) => { setSmsLog(d.rows); setSmsDriver(d.driver); }).catch(() => {});
+    api.escalations().then(setEscalations).catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (activeTab !== 'sms') return undefined;
+    loadSms();
+    const t = setInterval(loadSms, 60000); // SLA clocks tick even without events
+    return () => clearInterval(t);
+  }, [activeTab, loadSms]);
+  useLiveRefresh(['oms.sms.logged', 'oms.incident.created', 'oms.incident.updated'], () => { if (activeTab === 'sms') loadSms(); });
+
+  const sendSMS = useCallback(async (e) => {
     e.preventDefault();
-    alert(`SMS dispatched to ${smsDraft.recipient} for feeder ${smsDraft.feeder || 'N/A'}.\n\n"${smsDraft.message}"\n\n(Integration: Twilio gateway — FR-OMS-021)`);
-    setSmsComposeOpen(false);
-    setSmsDraft({ recipient: '', message: '', feeder: '' });
-  }, [smsDraft]);
+    setSmsSending(true);
+    try {
+      const feeder = smsDraft.feeder === 'All feeders' ? '' : smsDraft.feeder;
+      const r = await api.sendSms({ ...smsDraft, feeder });
+      toast(r.status === 'failed' ? `SMS to ${r.recipient} failed` : `SMS to ${r.recipient} ${r.status === 'sent' ? 'sent' : 'logged (no SMS gateway configured)'}`);
+      setSmsComposeOpen(false);
+      setSmsDraft(EMPTY_SMS);
+      loadSms();
+    } catch (err) {
+      toast(err.message || 'Could not send SMS');
+    } finally {
+      setSmsSending(false);
+    }
+  }, [smsDraft, loadSms]);
 
   // Role-based visibility
   const showManagement = ['management', 'ce', 'functional'].includes(role);
@@ -352,10 +379,10 @@ export default function Analytics() {
         <div style={{ display: 'flex', gap: 6, marginTop: 14, flexWrap: 'wrap', alignItems: 'center' }}>
           {PERIODS.map(p => (
             <button key={p.key} onClick={() => setPeriod(p.key)} style={{
-              padding: '4px 12px', border: `1.5px solid ${period === p.key ? '#3b82f6' : 'var(--line-2)'}`,
+              padding: '4px 12px', border: `1.5px solid ${period === p.key ? '#0a5de4' : 'var(--line-2)'}`,
               borderRadius: 20, fontSize: 12, fontWeight: period === p.key ? 600 : 400,
-              background: period === p.key ? '#3b82f620' : 'transparent',
-              color: period === p.key ? '#3b82f6' : 'var(--fg)', cursor: 'pointer',
+              background: period === p.key ? '#0a5de420' : 'transparent',
+              color: period === p.key ? '#0a5de4' : 'var(--fg)', cursor: 'pointer',
             }}>{p.label}</button>
           ))}
           {period === 'custom' && (
@@ -382,14 +409,14 @@ export default function Analytics() {
           return (
             <div key={c.k} style={{
               background: 'var(--surface)', border: '1px solid var(--line-2)', borderRadius: 10, padding: '14px 16px',
-              borderLeft: `3px solid ${over ? '#e23b2e' : '#3b82f6'}`,
+              borderLeft: `3px solid ${over ? '#c4271b' : '#0a5de4'}`,
             }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
                 <span style={{ fontWeight: 700, fontSize: 13 }}>{c.k}</span>
                 {c.tgt != null && (
                   <span style={{
                     fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 10,
-                    background: over ? '#e23b2e22' : '#22b06b22', color: over ? '#e23b2e' : '#22b06b',
+                    background: over ? '#c4271b22' : '#17764822', color: over ? '#c4271b' : '#177648',
                   }}>{over ? 'OVER' : 'OK'}</span>
                 )}
               </div>
@@ -406,9 +433,9 @@ export default function Analytics() {
       <div style={{ display: 'flex', gap: 2, flexWrap: 'wrap', borderBottom: '2px solid var(--line-2)', marginBottom: 16 }}>
         {TABS.map(t => (
           <button key={t.key} onClick={() => setActiveTab(t.key)} style={{
-            padding: '8px 14px', border: 'none', borderBottom: `2px solid ${activeTab === t.key ? '#3b82f6' : 'transparent'}`,
+            padding: '8px 14px', border: 'none', borderBottom: `2px solid ${activeTab === t.key ? '#0a5de4' : 'transparent'}`,
             marginBottom: -2, background: 'transparent', fontWeight: activeTab === t.key ? 700 : 400,
-            fontSize: 13, cursor: 'pointer', color: activeTab === t.key ? '#3b82f6' : 'var(--fg)',
+            fontSize: 13, cursor: 'pointer', color: activeTab === t.key ? '#0a5de4' : 'var(--fg)',
             borderRadius: '4px 4px 0 0',
           }}>{t.label}</button>
         ))}
@@ -421,7 +448,7 @@ export default function Analytics() {
         <div>
           <div style={{ display: 'flex', gap: 10, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
             {/* Feeder selector */}
-            <select value={selectedFeeder} onChange={e => setSelectedFeeder(e.target.value)}
+            <select aria-label="Feeder" value={selectedFeeder} onChange={e => setSelectedFeeder(e.target.value)}
               style={{ padding: '6px 12px', border: '1px solid var(--line-2)', borderRadius: 6, fontSize: 13, background: 'var(--surface)' }}>
               {feederList.map(f => <option key={f}>{f}</option>)}
             </select>
@@ -455,7 +482,7 @@ export default function Analytics() {
             {KPI_META.filter(k => k.group === activeKpiGroup).map(meta => {
               if (!meta.phases && meta.key === 'FLIF') {
                 const st = kpiStatus('FLIF', feederKPIs.FLIF);
-                const c = { warn: '#e23b2e', med: '#ef9021', ok: '#22b06b' }[st];
+                const c = { warn: '#c4271b', med: '#9a580b', ok: '#177648' }[st];
                 return (
                   <div key={meta.key} style={{
                     background: 'var(--surface)', border: `1px solid ${c}44`, borderRadius: 10, padding: '14px 16px',
@@ -471,8 +498,8 @@ export default function Analytics() {
               }
               const val = feederKPIs.phases?.[activePhase]?.[meta.key];
               const st = kpiStatus(meta.key, val);
-              const c = { warn: '#e23b2e', med: '#ef9021', ok: '#22b06b' }[st];
-              const gc = KPI_GROUPS[meta.group]?.color || '#3b82f6';
+              const c = { warn: '#c4271b', med: '#9a580b', ok: '#177648' }[st];
+              const gc = KPI_GROUPS[meta.group]?.color || '#0a5de4';
               return (
                 <div key={meta.key} style={{
                   background: 'var(--surface)', border: `1px solid var(--line-2)`, borderRadius: 10, padding: '14px 16px',
@@ -522,7 +549,7 @@ export default function Analytics() {
                           {(() => {
                             const val = feederKPIs.phases?.[ph]?.[meta.key];
                             const st = kpiStatus(meta.key, val);
-                            const c = { warn: '#e23b2e', med: '#ef9021', ok: 'var(--fg)' }[st];
+                            const c = { warn: '#c4271b', med: '#9a580b', ok: 'var(--fg)' }[st];
                             return <span style={{ color: c, fontWeight: st !== 'ok' ? 700 : 400 }}>{val}</span>;
                           })()}
                         </td>
@@ -532,11 +559,11 @@ export default function Analytics() {
                   {activeKpiGroup === 'imbalance' && (
                     <tr>
                       <td style={{ padding: '9px 14px', fontWeight: 600, fontSize: 12 }}>
-                        <span style={{ color: '#e23b2e' }}>FLIF</span>
+                        <span style={{ color: '#c4271b' }}>FLIF</span>
                         <span style={{ color: 'var(--muted)', fontWeight: 400, marginLeft: 6 }}>Load Imbalance Factor</span>
                       </td>
                       <td style={{ padding: '9px 14px', color: 'var(--muted)', fontSize: 11 }}>% (RYB)</td>
-                      <td colSpan={4} style={{ padding: '9px 14px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 700, color: kpiStatus('FLIF', feederKPIs.FLIF) === 'warn' ? '#e23b2e' : 'var(--fg)' }}>
+                      <td colSpan={4} style={{ padding: '9px 14px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 700, color: kpiStatus('FLIF', feederKPIs.FLIF) === 'warn' ? '#c4271b' : 'var(--fg)' }}>
                         {feederKPIs.FLIF}
                       </td>
                     </tr>
@@ -557,8 +584,8 @@ export default function Analytics() {
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 14, marginBottom: 20 }}>
             {[
               { label: 'Planned',   saidi: saidiPlanned,   saifi: saifiPlanned,   color: '#0fb39d', badge: 'PLANNED' },
-              { label: 'Unplanned', saidi: saidiUnplanned, saifi: saifiUnplanned, color: '#ef9021', badge: 'UNPLANNED' },
-              { label: 'Total',     saidi: saidiTotal,     saifi: saifiTotal,     color: '#3b82f6', badge: 'TOTAL' },
+              { label: 'Unplanned', saidi: saidiUnplanned, saifi: saifiUnplanned, color: '#9a580b', badge: 'UNPLANNED' },
+              { label: 'Total',     saidi: saidiTotal,     saifi: saifiTotal,     color: '#0a5de4', badge: 'TOTAL' },
             ].map(col => (
               <div key={col.label} style={{
                 background: 'var(--surface)', border: `1px solid ${col.color}44`,
@@ -603,7 +630,7 @@ export default function Analytics() {
                   <div style={{
                     height: '100%', borderRadius: 4,
                     width: `${Math.min(100, ((ind?.customersAffected || 0) / (ind?.customersServed || 1)) * 100).toFixed(1)}%`,
-                    background: '#e23b2e',
+                    background: '#c4271b',
                   }} />
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--muted)', textAlign: 'center' }}>
@@ -632,44 +659,40 @@ export default function Analytics() {
       ══════════════════════════════════════════════════════ */}
       {activeTab === 'sms' && (
         <div style={{ display: 'grid', gap: 16 }}>
-          {/* Escalation tracker */}
+          {/* Escalation tracker (live: active incidents with an SLA clock) */}
           <div className="card">
             <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--line-2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <h3 style={{ margin: 0, fontSize: 14 }}>Escalation tracker</h3>
-              <span style={{ fontSize: 11, color: 'var(--muted)' }}>Auto-escalate if SLA &gt; 90 min</span>
+              <span style={{ fontSize: 11, color: 'var(--muted)' }}>Breach → AE · +60 min → SE · +120 min → CE (one SMS per level)</span>
             </div>
-            <div style={{ overflowX: 'auto' }}>
+            {/* Scrollable region must be focusable so keyboard users can scroll it (WCAG 2.1.1). */}
+            {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
+            <div tabIndex={0} role="region" aria-label="Escalation tracker" style={{ overflowX: 'auto', maxHeight: 360 }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                 <thead>
                   <tr style={{ background: 'var(--surface-2, #f5f7fb)' }}>
-                    {['Incident', 'Feeder', 'Open (min)', 'SLA (min)', 'Breach', 'Customers', 'Escalation level', 'Status'].map(h => (
+                    {['Incident', 'Feeder', 'Open', 'SLA', 'Breach', 'Customers', 'Escalation level', 'Status'].map(h => (
                       <th key={h} style={{ padding: '9px 14px', textAlign: 'left', fontWeight: 600, fontSize: 12, borderBottom: '1px solid var(--line-2)', whiteSpace: 'nowrap' }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
+                  {escalations.length === 0 && <tr><td colSpan={8} style={{ padding: '16px 14px', color: 'var(--muted)', fontSize: 13 }}>No active incidents with an SLA clock.</td></tr>}
                   {escalations.map((e, i) => {
-                    const breached = e.openedMin > e.slaMin;
+                    const breached = e.overMin > 0;
+                    const st = { escalated: ['⬆ Escalated', '#9a580b'], due: ['⚠ Due', '#c4271b'], pending: ['⏳ Within SLA', '#0a5de4'] }[e.status];
                     return (
-                      <tr key={e.id} style={{ background: i % 2 ? 'var(--surface-2, #f8fafc)' : 'transparent', borderBottom: '1px solid var(--line-2)' }}>
+                      <tr key={e.incidentId} style={{ background: i % 2 ? 'var(--surface-2, #f8fafc)' : 'transparent', borderBottom: '1px solid var(--line-2)' }}>
                         <td style={{ padding: '9px 14px', fontFamily: 'monospace', fontSize: 12 }}>{e.incidentId}</td>
                         <td style={{ padding: '9px 14px', fontWeight: 600 }}>{e.feeder}</td>
-                        <td style={{ padding: '9px 14px', fontVariantNumeric: 'tabular-nums', color: breached ? '#e23b2e' : 'var(--fg)', fontWeight: breached ? 700 : 400 }}>{e.openedMin}</td>
-                        <td style={{ padding: '9px 14px', fontVariantNumeric: 'tabular-nums', color: 'var(--muted)' }}>{e.slaMin}</td>
+                        <td style={{ padding: '9px 14px', fontVariantNumeric: 'tabular-nums', color: breached ? '#c4271b' : 'var(--fg)', fontWeight: breached ? 700 : 400, whiteSpace: 'nowrap' }}>{fmtMinutes(e.openedMin)}</td>
+                        <td style={{ padding: '9px 14px', fontVariantNumeric: 'tabular-nums', color: 'var(--muted)', whiteSpace: 'nowrap' }}>{fmtMinutes(e.slaMin)}</td>
                         <td style={{ padding: '9px 14px' }}>
-                          <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 7px', borderRadius: 10, background: breached ? '#e23b2e22' : '#22b06b22', color: breached ? '#e23b2e' : '#22b06b' }}>
-                            {breached ? `+${e.openedMin - e.slaMin} min` : 'Within SLA'}
-                          </span>
+                          <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 7px', borderRadius: 10, background: breached ? '#c4271b22' : '#17764822', color: breached ? '#c4271b' : '#177648', whiteSpace: 'nowrap' }}>{breached ? `+${fmtMinutes(e.overMin)}` : 'Within SLA'}</span>
                         </td>
                         <td style={{ padding: '9px 14px', fontVariantNumeric: 'tabular-nums' }}>{e.customers.toLocaleString()}</td>
                         <td style={{ padding: '9px 14px', fontSize: 12 }}>{e.level}</td>
-                        <td style={{ padding: '9px 14px' }}>
-                          <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 7px', borderRadius: 10,
-                            background: e.status === 'escalated' ? '#ef902122' : '#3b82f622',
-                            color: e.status === 'escalated' ? '#ef9021' : '#3b82f6' }}>
-                            {e.status === 'escalated' ? '⬆ Escalated' : '⏳ Pending'}
-                          </span>
-                        </td>
+                        <td style={{ padding: '9px 14px' }}><span style={{ fontSize: 11, fontWeight: 700, padding: '2px 7px', borderRadius: 10, background: `${st[1]}22`, color: st[1], whiteSpace: 'nowrap' }}>{st[0]}</span></td>
                       </tr>
                     );
                   })}
@@ -683,7 +706,9 @@ export default function Analytics() {
             <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--line-2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
                 <h3 style={{ margin: 0, fontSize: 14 }}>SMS gateway — linemen &amp; officers</h3>
-                <p style={{ margin: '2px 0 0', fontSize: 12, color: 'var(--muted)' }}>Via Twilio · FR-OMS-021 · WFM map indication on dispatch</p>
+                <p style={{ margin: '2px 0 0', fontSize: 12, color: 'var(--muted)' }}>
+                  FR-OMS-021 · gateway: {smsDriver === 'console' ? 'none configured (messages are logged, not delivered)' : smsDriver || '…'}
+                </p>
               </div>
               <button onClick={() => setSmsComposeOpen(!smsComposeOpen)}
                 style={{ padding: '6px 14px', background: '#0f2847', color: '#fff', border: 'none', borderRadius: 7, fontWeight: 600, fontSize: 13, cursor: 'pointer' }}>
@@ -692,66 +717,77 @@ export default function Analytics() {
             </div>
 
             {smsComposeOpen && (
-              <div style={{ padding: '16px', borderBottom: '1px solid var(--line-2)', background: '#3b82f608' }}>
-                <form onSubmit={sendSMS} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 2fr auto', gap: 10, alignItems: 'flex-end' }}>
+              <div style={{ padding: '16px', borderBottom: '1px solid var(--line-2)', background: '#0a5de408' }}>
+                <form onSubmit={sendSMS} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10, alignItems: 'flex-end' }}>
                   <div>
-                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }}>Recipient / Role</label>
-                    <input value={smsDraft.recipient} onChange={e => setSmsDraft(d => ({ ...d, recipient: e.target.value }))} placeholder="Lineman / AE / SE …"
+                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }} htmlFor="sms-recipient">Recipient / Role *</label>
+                    <input id="sms-recipient" required maxLength={80} value={smsDraft.recipient} onChange={e => setSmsDraft(d => ({ ...d, recipient: e.target.value }))} placeholder="Lineman / AE / SE …"
                       style={{ width: '100%', padding: '7px 10px', border: '1px solid var(--line-2)', borderRadius: 6, fontSize: 13, boxSizing: 'border-box' }} />
                   </div>
                   <div>
-                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }}>Feeder</label>
-                    <select value={smsDraft.feeder} onChange={e => setSmsDraft(d => ({ ...d, feeder: e.target.value }))}
+                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }} htmlFor="sms-phone">Phone *</label>
+                    <input id="sms-phone" required type="tel" inputMode="tel" autoComplete="off" value={smsDraft.phone} onChange={e => setSmsDraft(d => ({ ...d, phone: e.target.value }))} placeholder="+91 98xxxxxxxx"
+                      style={{ width: '100%', padding: '7px 10px', border: '1px solid var(--line-2)', borderRadius: 6, fontSize: 13, boxSizing: 'border-box' }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }} htmlFor="sms-feeder">Feeder</label>
+                    <select id="sms-feeder" value={smsDraft.feeder} onChange={e => setSmsDraft(d => ({ ...d, feeder: e.target.value }))}
                       style={{ width: '100%', padding: '7px 10px', border: '1px solid var(--line-2)', borderRadius: 6, fontSize: 13, boxSizing: 'border-box', background: 'var(--surface)' }}>
                       {feederList.map(f => <option key={f}>{f}</option>)}
                     </select>
                   </div>
                   <div>
-                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }}>Message</label>
-                    <input value={smsDraft.message} onChange={e => setSmsDraft(d => ({ ...d, message: e.target.value }))} placeholder="Alert text …"
+                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }} htmlFor="sms-incident">Incident (optional)</label>
+                    <input id="sms-incident" value={smsDraft.incidentId} onChange={e => setSmsDraft(d => ({ ...d, incidentId: e.target.value }))} placeholder="INC-2026-…"
                       style={{ width: '100%', padding: '7px 10px', border: '1px solid var(--line-2)', borderRadius: 6, fontSize: 13, boxSizing: 'border-box' }} />
                   </div>
-                  <button type="submit" style={{ padding: '8px 16px', background: '#22b06b', color: '#fff', border: 'none', borderRadius: 6, fontWeight: 700, fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap' }}>
-                    Send
+                  <div style={{ gridColumn: '1 / -1' }}>
+                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }} htmlFor="sms-message">Message * (3–500 characters)</label>
+                    <input id="sms-message" required minLength={3} maxLength={500} value={smsDraft.message} onChange={e => setSmsDraft(d => ({ ...d, message: e.target.value }))} placeholder="Alert text …"
+                      style={{ width: '100%', padding: '7px 10px', border: '1px solid var(--line-2)', borderRadius: 6, fontSize: 13, boxSizing: 'border-box' }} />
+                  </div>
+                  <button type="submit" disabled={smsSending} style={{ padding: '8px 16px', background: '#177648', color: '#fff', border: 'none', borderRadius: 6, fontWeight: 700, fontSize: 13, cursor: smsSending ? 'wait' : 'pointer', whiteSpace: 'nowrap', justifySelf: 'start' }}>
+                    {smsSending ? 'Sending…' : 'Send'}
                   </button>
                 </form>
                 <p style={{ margin: '8px 0 0', fontSize: 11, color: 'var(--muted)' }}>
-                  ↳ On dispatch, crew location will be indicated on the WFM map (INT-004/005).
+                  ↳ Linked to an incident, the SMS also appears on that incident's timeline.
                 </p>
               </div>
             )}
 
-            <div style={{ overflowX: 'auto' }}>
+            {/* Scrollable region must be focusable so keyboard users can scroll it (WCAG 2.1.1). */}
+            {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
+            <div tabIndex={0} role="region" aria-label="SMS log" style={{ overflowX: 'auto', maxHeight: 420 }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                 <thead>
                   <tr style={{ background: 'var(--surface-2, #f5f7fb)' }}>
-                    {['Time', 'Incident', 'Feeder', 'Recipient', 'Message preview', 'Status'].map(h => (
+                    {['Time', 'Incident', 'Feeder', 'Recipient', 'Message', 'Status'].map(h => (
                       <th key={h} style={{ padding: '9px 14px', textAlign: 'left', fontWeight: 600, fontSize: 12, borderBottom: '1px solid var(--line-2)', whiteSpace: 'nowrap' }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {smsLog.map((s, i) => (
-                    <tr key={s.id} style={{ background: i % 2 ? 'var(--surface-2, #f8fafc)' : 'transparent', borderBottom: '1px solid var(--line-2)' }}>
-                      <td style={{ padding: '9px 14px', fontFamily: 'monospace', fontSize: 12, color: 'var(--muted)' }}>{s.ts}</td>
-                      <td style={{ padding: '9px 14px', fontFamily: 'monospace', fontSize: 12 }}>
-                        {s.incidentId}
-                        {s.escalation && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, background: '#ef902122', color: '#ef9021', borderRadius: 8, padding: '1px 5px' }}>ESCALATION</span>}
-                      </td>
-                      <td style={{ padding: '9px 14px', fontWeight: 600 }}>{s.feeder}</td>
-                      <td style={{ padding: '9px 14px', fontSize: 12 }}>{s.recipient}</td>
-                      <td style={{ padding: '9px 14px', fontSize: 12, color: 'var(--muted)', maxWidth: 280 }}>
-                        <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.message}</span>
-                      </td>
-                      <td style={{ padding: '9px 14px' }}>
-                        <span style={{
-                          fontSize: 11, fontWeight: 700, padding: '2px 7px', borderRadius: 10,
-                          background: s.status === 'delivered' ? '#22b06b22' : '#3b82f622',
-                          color: s.status === 'delivered' ? '#22b06b' : '#3b82f6',
-                        }}>{s.status === 'delivered' ? '✓ Delivered' : '→ Sent'}</span>
-                      </td>
-                    </tr>
-                  ))}
+                  {smsLog.length === 0 && <tr><td colSpan={6} style={{ padding: '16px 14px', color: 'var(--muted)', fontSize: 13 }}>No SMS recorded yet.</td></tr>}
+                  {smsLog.map((s, i) => {
+                    const st = SMS_STATUS[s.status] || { label: `– ${s.status.replace(/^skipped-/, 'Skipped: ').replace(/-/g, ' ')}`, color: '#5e6d82' };
+                    const [kind, kindColor] = SMS_KIND[s.kind] || SMS_KIND.customer;
+                    return (
+                      <tr key={s.id} style={{ background: i % 2 ? 'var(--surface-2, #f8fafc)' : 'transparent', borderBottom: '1px solid var(--line-2)' }}>
+                        <td style={{ padding: '9px 14px', fontFamily: 'monospace', fontSize: 12, color: 'var(--muted)', whiteSpace: 'nowrap' }}>{fmtTs(s.ts)}</td>
+                        <td style={{ padding: '9px 14px', fontFamily: 'monospace', fontSize: 12, whiteSpace: 'nowrap' }}>
+                          {s.incident_id || '—'}
+                          <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, background: `${kindColor}22`, color: kindColor, borderRadius: 8, padding: '1px 5px' }}>{kind}</span>
+                        </td>
+                        <td style={{ padding: '9px 14px', fontWeight: 600 }}>{s.feeder || '—'}</td>
+                        <td style={{ padding: '9px 14px', fontSize: 12 }}>{s.recipient || '—'}</td>
+                        <td style={{ padding: '9px 14px', fontSize: 12, color: 'var(--muted)', maxWidth: 320 }}>
+                          <span title={s.body} style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.body}</span>
+                        </td>
+                        <td style={{ padding: '9px 14px' }} title={s.error || undefined}><span style={{ fontSize: 11, fontWeight: 700, padding: '2px 7px', borderRadius: 10, background: `${st.color}22`, color: st.color, whiteSpace: 'nowrap' }}>{st.label}</span></td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -776,11 +812,11 @@ export default function Analytics() {
                   <div style={{ fontSize: 24, fontWeight: 800 }}>{sh.operators.length}</div>
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
-                  <span style={{ fontSize: 11, padding: '3px 8px', borderRadius: 10, background: '#22b06b22', color: '#22b06b', fontWeight: 600 }}>
+                  <span style={{ fontSize: 11, padding: '3px 8px', borderRadius: 10, background: '#17764822', color: '#177648', fontWeight: 600 }}>
                     {sh.onDuty} on duty
                   </span>
                   {sh.standby > 0 && (
-                    <span style={{ fontSize: 11, padding: '3px 8px', borderRadius: 10, background: '#d1a01722', color: '#d1a017', fontWeight: 600 }}>
+                    <span style={{ fontSize: 11, padding: '3px 8px', borderRadius: 10, background: '#83640e22', color: '#83640e', fontWeight: 600 }}>
                       {sh.standby} standby
                     </span>
                   )}
@@ -812,7 +848,7 @@ export default function Analytics() {
                   {operators.map((op, i) => {
                     const sh = SHIFTS.find(s => s.key === op.shift);
                     const statusLabel = { on_duty: 'On duty', standby: 'Standby', on_leave: 'On leave', off: 'Off' }[op.status] || op.status;
-                    const statusColor = { on_duty: '#22b06b', standby: '#d1a017', on_leave: 'var(--muted)', off: 'var(--muted)' }[op.status] || 'var(--muted)';
+                    const statusColor = { on_duty: '#177648', standby: '#83640e', on_leave: 'var(--muted)', off: 'var(--muted)' }[op.status] || 'var(--muted)';
                     return (
                       <tr key={op.id} style={{ background: i % 2 ? 'var(--surface-2, #f8fafc)' : 'transparent', borderBottom: '1px solid var(--line-2)' }}>
                         <td style={{ padding: '9px 14px' }}><StatusDot s={op.status} /></td>

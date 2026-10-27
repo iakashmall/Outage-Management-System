@@ -8,15 +8,15 @@
 
 :root{
   --paper:#eef1f4; --paper-2:#f7f9fb; --surface:#ffffff; --surface-2:#fbfcfe;
-  --ink:#0f1b2d; --ink-2:#33465f; --muted:#64748b; --faint:#9fb0c4;
+  --ink:#0f1b2d; --ink-2:#33465f; --muted:#5e6d82; --faint:#566e8b;
   --line:#dbe3ec; --line-2:#c8d4e0;
   --navy:#0f2847; --navy-2:#22456e;
   --live:#0e9f8e; --live-bg:#e2f6f2;
   --copper:#c56a2c; --copper-bg:#fbeadc;
-  --crit:#d7382a; --crit-bg:#fdeceb;
-  --high:#e08a1e; --high-bg:#fdf1de;
-  --med:#2f6fd6; --med-bg:#e7f0fd;
-  --low:#2a9d5c; --low-bg:#e5f6ec;
+  --crit:#c93326; --crit-bg:#fdeceb;
+  --high:#9a5f15; --high-bg:#fdf1de;
+  --med:#2868cd; --med-bg:#e7f0fd;
+  --low:#217b48; --low-bg:#e5f6ec;
   --r:14px; --r-sm:10px;
   --shadow:0 1px 2px rgba(15,27,45,.04), 0 2px 12px rgba(15,27,45,.05);
   --shadow-lg:0 12px 40px rgba(15,27,45,.12);
@@ -439,7 +439,7 @@ tr.row-hot td{background:var(--crit-bg)}
 .ms-empty{padding:12px 14px;font-size:12.5px;color:var(--faint)}
 .ms-item{display:flex;align-items:center;gap:9px;width:100%;text-align:left;border:none;background:#fff;padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--line)}
 .ms-item:last-child{border-bottom:none}
-.ms-item:hover{background:var(--paper)}
+.ms-item:hover,.ms-item.active{background:var(--paper)}
 .ms-tag{flex:none;font-family:var(--disp,sans-serif);font-size:9.5px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:#fff;padding:2px 7px;border-radius:6px;min-width:62px;text-align:center}
 .tag-ss{background:#99b7e0}.tag-feeder{background:#3b82f6}.tag-incident{background:#e23b2e}.tag-crew{background:#0fb39d}
 .tag-ptx{background:#e0742b}.tag-dt{background:#3b82f6}.tag-switch{background:#8b5cf6}.tag-rmu{background:#7a9e2e}.tag-fuse{background:#b98a5e}
@@ -734,7 +734,7 @@ body{
 .ms-box,.ms-results,.ms-item{
   background:#ffffff;
 }
-.ms-item:hover{
+.ms-item:hover,.ms-item.active{
   background:var(--teal-wash);
 }
 .ms-clear:hover{
@@ -812,7 +812,7 @@ body{
 .sw-topoLines{background:#0e7490}
 .sw-topoStruct{background:#6b7a90;border-radius:50%}
 .sw-topoEquip{background:#2563eb;border-radius:2px;box-shadow:0 0 0 2px #fff inset}
-.lp-sub{font-size:10.5px;color:var(--ink-3,#7b8aa0);padding:0 2px 4px;line-height:1.35}
+.lp-sub{font-size:10.5px;color:var(--ink-3,#5b697e);padding:0 2px 4px;line-height:1.35}
 .map-fit.topo{background:#0e7490;color:#fff;border-color:#0e7490}
 .map-fit.topo:hover{background:#0b5e75}
 .trace-box{margin-top:12px;padding:10px 11px;border-radius:10px;background:#fff7ed;border:1px solid #fed7aa}
@@ -988,3 +988,6 @@ button.kh-more:hover{text-decoration:underline}
 .fp-err{color:#e23b2e;font-size:12px}
 .fp-foot{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .fp-foot .muted{font-size:11.5px}
+
+/* Visually hidden, still read by screen readers (chart data tables). */
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
