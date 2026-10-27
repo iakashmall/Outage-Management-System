@@ -6,7 +6,7 @@ export const SITE_STATUSES = ['On Site', 'Work Started'];
 
 export const siteRadiusM = () => {
   const m = Number(process.env.SITE_RADIUS_M);
-  return Number.isFinite(m) && m > 0 ? m : 100;
+  return Number.isFinite(m) && m > 0 ? m : 50;
 };
 
 const finite = (n) => n !== null && n !== '' && Number.isFinite(Number(n));

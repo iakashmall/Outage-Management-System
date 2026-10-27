@@ -38,6 +38,7 @@ import { getLocation } from './lib/location';
 import { uploadCapturedPhoto } from './lib/photos';
 import { siteBlock, SITE_STATUSES } from './lib/siteCheck';
 import { setupAlerts, findNewJobs, findNewMessages, alertNewJobs, alertNewMessages, reportDelivered, isOwnMessage } from './lib/alerts';
+import { watchMessages } from './lib/liveMessages';
 import { queueUpdate, queueScan, queueCompletion, queueChecklist, queueWorkOrder, keepUndeliveredCompletion, getUndeliveredCompletion, clearUndeliveredCompletion, isRetryable, isRefusal, flushQueue, getQueueLength, getQueueItems } from './lib/offlineQueue';
 import { localDate, workOrderId, viewWorkOrder, dayJobs, summarize, startPayload, closePayload, cleanMembers } from './lib/workOrder';
 import { getCachedWorkOrder, cacheWorkOrder, getPendingWorkOrder, setPendingWorkOrder, getLastMembers, saveLastMembers, clearWorkOrderCache } from './lib/workOrderStore';
@@ -631,7 +632,8 @@ function NativeAppScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobs]);
 
-  // OMS messages are polled while the authenticated crew app is connected.
+  // OMS messages arrive live over the backend socket; the poll is the
+  // fallback for when the socket is down.
   useEffect(() => {
     if (!authenticated || !isAuthenticated() || !crew.id) {
       setCrewMessages([]);
@@ -658,9 +660,11 @@ function NativeAppScreen() {
     };
     loadMessages();
     const interval = setInterval(loadMessages, MESSAGE_POLL_MS);
+    const unwatch = watchMessages(loadMessages);
     return () => {
       cancelled = true;
       clearInterval(interval);
+      unwatch();
     };
   }, [authenticated, crew.id, showGlimpse]);
 
@@ -830,6 +834,19 @@ function NativeAppScreen() {
       await enqueue();
     }
   }, [refresh, addNotice, reloadPending, syncPending, applyServerJob]);
+
+  // "Mark On Site" on the map when the crew reaches the site: the same fresh
+  // GPS site check as the job screen (the server checks it too), then the
+  // job opens so the crew carries on with the photo and Work Started.
+  // Returns null when done, else the message for the map to show.
+  const markOnSiteFromMap = useCallback(async (job) => {
+    const here = await getLocation({ allowCached: false }).catch(() => ({}));
+    const blocked = siteBlock(job, 'On Site', here);
+    if (blocked) return blocked;
+    await handleAdvance(job, 'On Site');
+    openPage({ tab: 'Jobs', jobId: job.id });
+    return null;
+  }, [handleAdvance, openPage]);
 
   // OMS-03: start or end the crew's day. Sent at once when there is signal
   // and nothing older is waiting; otherwise queued behind the waiting items
@@ -1023,7 +1040,7 @@ function NativeAppScreen() {
         // The map fills the screen between the header and the bottom bar.
         <View style={{ flex: 1, paddingBottom: 46 + insets.bottom }}>
           {notice ? <View style={styles.mapNotice}><NoticeBanner notice={notice} onDismiss={() => setNotice('')} /></View> : null}
-          <CrewMap jobs={liveJobs} crew={crew} navRequest={mapNav} focus={mapFocus} />
+          <CrewMap jobs={liveJobs} crew={crew} navRequest={mapNav} focus={mapFocus} onMarkOnSite={markOnSiteFromMap} />
         </View>
       ) : (
       <ScrollView contentContainerStyle={[styles.content, { paddingBottom: 100 + insets.bottom }]}>
@@ -1147,6 +1164,7 @@ function NativeAppScreen() {
             onDismissNotice={() => setNotice('')}
             onQueued={reloadPending}
             onMessageSent={reloadMessages}
+            crewMessages={crewMessages}
             glimpse={glimpse}
             onGlimpse={openGlimpse}
             onDismissGlimpse={() => setGlimpse(null)}
@@ -1605,7 +1623,7 @@ function PhotoCamera({ tag, onCapture, onClose }) {
   );
 }
 
-function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNavigate, onShowOnMap, onMessageSent, glimpse, onGlimpse, onDismissGlimpse, notice, onDismissNotice }) {
+function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNavigate, onShowOnMap, onMessageSent, crewMessages, glimpse, onGlimpse, onDismissGlimpse, notice, onDismissNotice }) {
   const [showSafety, setShowSafety] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
   const [showPhotoCamera, setShowPhotoCamera] = useState(false);
@@ -1881,6 +1899,15 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
     }
   };
 
+  // While the panel is open, a new message in the crew inbox (live or
+  // polled) refreshes this job's thread too, without the loading line.
+  const latestCrewMessageId = crewMessages?.[crewMessages.length - 1]?.id;
+  useEffect(() => {
+    if (!messagesOpen || !latestCrewMessageId) return;
+    getJobMessages(job.id).then((items) => Array.isArray(items) && setOmsMessages(items)).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [latestCrewMessageId]);
+
   const handleAssetScan = async (rawValue) => {
     setAssetScanSaving(true);
     setMessage('Saving asset scan…');
@@ -2090,7 +2117,10 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
           </View>
         )}
 
-        {checklistDone && (
+        {/* Only once the crew has marked En Route, so the control room knows
+            they left before they navigate. (A blocked On Site check has its
+            own Navigate button below.) */}
+        {checklistDone && job.status === 'En Route' && (
         <Pressable style={styles.secondaryBtn} onPress={() => {
           onNavigate(job);
         }}>

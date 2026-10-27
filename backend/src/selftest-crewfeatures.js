@@ -19,7 +19,7 @@ if (!process.env.DATABASE_URL) {
   process.exit(2);
 }
 process.env.ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'selftest-only-key';
-delete process.env.SITE_RADIUS_M; // the default 100 m
+delete process.env.SITE_RADIUS_M; // the default 50 m
 
 await migrate();
 await seed({ force: true });

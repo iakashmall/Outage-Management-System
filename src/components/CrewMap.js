@@ -28,6 +28,7 @@ import { getInstalledPack, downloadPack, cancelPackDownload, getPackStatus, subs
 import { getRoadRoute, formatDistance, formatDuration } from '../lib/roadRouting';
 import { isOnlineState } from '../lib/offlineNavigation';
 import { navigateTo } from '../lib/navigate';
+import { SITE_RADIUS_M } from '../lib/siteCheck';
 import { openMultiJobRoute } from '../lib/routing';
 
 const PACK_NAME = 'spike-region'; // name kept so packs downloaded before the rename still count
@@ -111,7 +112,9 @@ async function fetchFleet() {
 // navRequest: { jobId, at } -- navigate to that job (a new `at` starts again).
 // focus: { lat, lon, title, lines?, at } -- show that point (asset scan).
 // onClose: shows a Close button (when opened full screen).
-export default function CrewMap({ jobs = [], crew = null, navRequest = null, focus = null, onClose }) {
+// onMarkOnSite(job): marks an En Route job On Site from the map once the crew
+// is within SITE_RADIUS_M; resolves to null when done, else a message to show.
+export default function CrewMap({ jobs = [], crew = null, navRequest = null, focus = null, onClose, onMarkOnSite }) {
   const initialJobId = navRequest?.jobId || null;
   const [authed, setAuthed] = useState(null);
   const [region, setRegion] = useState({ id: 'dehradun', bbox: DEHRADUN });
@@ -390,6 +393,21 @@ export default function CrewMap({ jobs = [], crew = null, navRequest = null, foc
 
   // ---- actions --------------------------------------------------------------------------------
 
+  const [markingOnSite, setMarkingOnSite] = useState(false);
+  const [onSiteMessage, setOnSiteMessage] = useState('');
+  const markOnSite = async (job) => {
+    if (markingOnSite) return;
+    setMarkingOnSite(true);
+    setOnSiteMessage('');
+    try {
+      const blocked = await onMarkOnSite(job);
+      if (blocked) setOnSiteMessage(blocked);
+      else stopNavigation();
+    } finally {
+      setMarkingOnSite(false);
+    }
+  };
+
   const startNavigation = () => site && setNavigating(true);
   const stopNavigation = () => {
     clearTimeout(followTimer.current);
@@ -471,6 +489,10 @@ export default function CrewMap({ jobs = [], crew = null, navRequest = null, foc
   const left = progress ? progress.left : null;
   const arrived = Boolean(site) && ((finite(left) && left < ARRIVED_M) || (finite(straight) && straight < ARRIVED_M + 10));
   const eta = route && finite(left) && route.meters > 0 ? (route.seconds * left) / route.meters : null;
+  // At the site of this crew's En Route job (same radius the job screen and
+  // server allow On Site in): offer to mark it On Site from here.
+  const targetJob = target?.kind === 'job' ? jobs.find((j) => j.id === target.id) : null;
+  const canMarkOnSite = Boolean(onMarkOnSite) && targetJob?.status === 'En Route' && finite(straight) && straight <= SITE_RADIUS_M;
   const oldDownloading = oldPackStatus.phase === 'downloading' || oldPackStatus.phase === 'checking';
 
   const distanceLine = (() => {
@@ -666,6 +688,12 @@ export default function CrewMap({ jobs = [], crew = null, navRequest = null, foc
               No internet: follow the map. {route ? 'The blue line is the road route.' : 'The dashed line points to the site.'} Your position keeps updating without signal.
             </Text>
           ) : null}
+          {canMarkOnSite ? (
+            <Pressable style={[styles.btn, styles.btnGo, markingOnSite && { opacity: 0.6 }]} onPress={() => markOnSite(targetJob)} disabled={markingOnSite}>
+              <Text style={styles.btnText}>{markingOnSite ? 'Checking your position…' : 'Mark On Site'}</Text>
+            </Pressable>
+          ) : null}
+          {onSiteMessage ? <Text style={styles.offlineNote}>{onSiteMessage}</Text> : null}
           <View style={styles.row}>
             {site ? (
               <Pressable style={[styles.btn, styles.btnWide]} onPress={startNavigation}>
@@ -685,6 +713,12 @@ export default function CrewMap({ jobs = [], crew = null, navRequest = null, foc
       ) : null}
       {navigating ? (
         <View style={styles.sheet}>
+          {canMarkOnSite ? (
+            <Pressable style={[styles.btn, styles.btnGo, markingOnSite && { opacity: 0.6 }]} onPress={() => markOnSite(targetJob)} disabled={markingOnSite}>
+              <Text style={styles.btnText}>{markingOnSite ? 'Checking your position…' : 'Mark On Site'}</Text>
+            </Pressable>
+          ) : null}
+          {onSiteMessage ? <Text style={styles.offlineNote}>{onSiteMessage}</Text> : null}
           <View style={styles.row}>
             <Pressable style={[styles.btn, styles.btnStop, styles.btnWide]} onPress={stopNavigation}>
               <Text style={styles.btnText}>End navigation</Text>
@@ -801,6 +835,7 @@ const styles = StyleSheet.create({
   btn: { backgroundColor: '#173355', paddingHorizontal: 12, paddingVertical: 7, borderRadius: 8 },
   btnWide: { flex: 1, alignItems: 'center' },
   btnStop: { backgroundColor: '#d7382a' },
+  btnGo: { backgroundColor: '#2a9d5c', alignItems: 'center', paddingVertical: 12 },
   btnLight: { backgroundColor: '#eef2f7' },
   btnText: { color: '#fff', fontWeight: '600', fontSize: 13 },
   btnLightText: { color: '#173355', fontWeight: '600', fontSize: 13 },

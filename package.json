@@ -58,7 +58,8 @@
     "react-native-safe-area-context": "~5.7.0",
     "react-native-web": "^0.21.2",
     "react-router-dom": "^7.18.2",
-    "sharp": "^0.35.4"
+    "sharp": "^0.35.4",
+    "socket.io-client": "^4.8.3"
   },
   "devDependencies": {
     "@maplibre/maplibre-gl-leaflet": "0.1.4",
