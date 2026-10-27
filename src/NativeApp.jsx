@@ -38,6 +38,7 @@ import { getLocation } from './lib/location';
 import { uploadCapturedPhoto } from './lib/photos';
 import { siteBlock, SITE_STATUSES } from './lib/siteCheck';
 import { setupAlerts, findNewJobs, findNewMessages, alertNewJobs, alertNewMessages, reportDelivered, isOwnMessage } from './lib/alerts';
+import { watchMessages } from './lib/liveMessages';
 import { queueUpdate, queueScan, queueCompletion, queueChecklist, queueWorkOrder, keepUndeliveredCompletion, getUndeliveredCompletion, clearUndeliveredCompletion, isRetryable, isRefusal, flushQueue, getQueueLength, getQueueItems } from './lib/offlineQueue';
 import { localDate, workOrderId, viewWorkOrder, dayJobs, summarize, startPayload, closePayload, cleanMembers } from './lib/workOrder';
 import { getCachedWorkOrder, cacheWorkOrder, getPendingWorkOrder, setPendingWorkOrder, getLastMembers, saveLastMembers, clearWorkOrderCache } from './lib/workOrderStore';
@@ -631,7 +632,8 @@ function NativeAppScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobs]);
 
-  // OMS messages are polled while the authenticated crew app is connected.
+  // OMS messages arrive live over the backend socket; the poll is the
+  // fallback for when the socket is down.
   useEffect(() => {
     if (!authenticated || !isAuthenticated() || !crew.id) {
       setCrewMessages([]);
@@ -658,9 +660,11 @@ function NativeAppScreen() {
     };
     loadMessages();
     const interval = setInterval(loadMessages, MESSAGE_POLL_MS);
+    const unwatch = watchMessages(loadMessages);
     return () => {
       cancelled = true;
       clearInterval(interval);
+      unwatch();
     };
   }, [authenticated, crew.id, showGlimpse]);
 
@@ -1147,6 +1151,7 @@ function NativeAppScreen() {
             onDismissNotice={() => setNotice('')}
             onQueued={reloadPending}
             onMessageSent={reloadMessages}
+            crewMessages={crewMessages}
             glimpse={glimpse}
             onGlimpse={openGlimpse}
             onDismissGlimpse={() => setGlimpse(null)}
@@ -1605,7 +1610,7 @@ function PhotoCamera({ tag, onCapture, onClose }) {
   );
 }
 
-function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNavigate, onShowOnMap, onMessageSent, glimpse, onGlimpse, onDismissGlimpse, notice, onDismissNotice }) {
+function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNavigate, onShowOnMap, onMessageSent, crewMessages, glimpse, onGlimpse, onDismissGlimpse, notice, onDismissNotice }) {
   const [showSafety, setShowSafety] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
   const [showPhotoCamera, setShowPhotoCamera] = useState(false);
@@ -1880,6 +1885,15 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
       setMessagesLoading(false);
     }
   };
+
+  // While the panel is open, a new message in the crew inbox (live or
+  // polled) refreshes this job's thread too, without the loading line.
+  const latestCrewMessageId = crewMessages?.[crewMessages.length - 1]?.id;
+  useEffect(() => {
+    if (!messagesOpen || !latestCrewMessageId) return;
+    getJobMessages(job.id).then((items) => Array.isArray(items) && setOmsMessages(items)).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [latestCrewMessageId]);
 
   const handleAssetScan = async (rawValue) => {
     setAssetScanSaving(true);
