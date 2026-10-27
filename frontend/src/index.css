@@ -365,6 +365,7 @@ tr.row-hot td{background:var(--crit-bg)}
 .sw-rmus{background:#7a9e2e}.sw-fuses{background:#b98a5e;border-radius:50%}.sw-incidents{background:#e23b2e;border-radius:50%}
 .sw-crews{background:#0fb39d;clip-path:polygon(50% 0,100% 100%,0 100%);border-radius:0}
 .lp-label{flex:1}.lp-count{font-family:var(--mono);font-size:11px;color:var(--faint)}
+.lp-hidden{font-size:10.5px;color:var(--muted);font-weight:400}
 .lp-clear{margin:6px 8px 0;width:calc(100% - 16px);border:1px solid var(--line);background:var(--paper);color:var(--ink-2);border-radius:8px;padding:7px;font-size:12px;cursor:pointer}
 .lp-clear:hover{background:var(--surface)}
 .lp-hint{margin:8px 8px 2px;padding-top:10px;border-top:1px solid var(--line);font-size:10.5px;line-height:1.5;color:var(--faint)}
@@ -809,9 +810,9 @@ body{
 .brand-img { width: 30px !important; height: 30px !important; }
 .rail .brand { width: 44px !important; height: 44px !important; }
 /* ---- Network map: CIM topology layers + section trace ---- */
-.sw-topoLines{background:#0e7490}
+.sw-topo{background:#0e7490;box-shadow:0 0 0 2px #fff inset}
+.lp-rawnote{position:relative;padding-right:26px}.lp-rawnote .ms-clear{position:absolute;top:8px;right:0}
 .sw-topoStruct{background:#6b7a90;border-radius:50%}
-.sw-topoEquip{background:#2563eb;border-radius:2px;box-shadow:0 0 0 2px #fff inset}
 .lp-sub{font-size:10.5px;color:var(--ink-3,#5b697e);padding:0 2px 4px;line-height:1.35}
 .map-fit.topo{background:#0e7490;color:#fff;border-color:#0e7490}
 .map-fit.topo:hover{background:#0b5e75}

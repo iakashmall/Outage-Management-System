@@ -28,13 +28,15 @@ const LAYER_GROUPS = [
     ['switches', 'Switches', false], ['rmus', 'RMUs', false], ['fuses', 'Drop-out fuses', false]]],
   ['Operations', [['incidents', 'Incidents', true], ['crews', 'Crews', true], ['trails', 'Crew trails', false], ['scans', 'Asset scans (crew QR, 7 days)', true]]],
 ];
-// CIM topology (network.* PostGIS schema) -- real connectivity data, imported
-// from a CIM RDF/XML export. Separate from the Haridwar layers above, which
-// still come from network.json.
-LAYER_GROUPS.splice(1, 0, ['Topology · CIM (Dehradun)', [
-  ['topoLines', 'Lines (ACLineSegment)', true],
+// CIM topology (network.* PostGIS schema) -- connectivity data imported from a
+// CIM export or inferred from GIS. Separate from the Haridwar layers above,
+// which still come from network.json. The heading shown names the imported
+// substations (topoTitle below); this key only identifies the group.
+LAYER_GROUPS.splice(1, 0, ['Topology · CIM', [
+  // one control for lines and devices (groups topoLines + topoEquip): they are
+  // one layer, never useful apart
+  ['topo', 'Lines & devices', true],
   ['topoStruct', 'Poles & junctions', true],
-  ['topoEquip', 'Transformers, fuses, switches', true],
 ]]);
 const ALL = LAYER_GROUPS.flatMap(([, ls]) => ls);
 const TOPO_STYLE = {
@@ -59,6 +61,12 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
   const [sel, setSel] = useState(null);
   const [selFeeder, setSelFeeder] = useState(null);
   const [layers, setLayers] = useState(Object.fromEntries(ALL.map(([k, , on]) => [k, on])));
+  // Raw GIS lines inside an imported-topology area are hidden by default (the
+  // topology draws them, cleaned). Once the user toggles "HT network" /
+  // "Feeder lines" themselves, that choice covers those segments too.
+  const [rawTouched, setRawTouched] = useState({ htLines: false, feeders: false });
+  const [rawUnderTopo, setRawUnderTopo] = useState({ htLines: 0, feeders: 0 });
+  const [rawNoteDismissed, setRawNoteDismissed] = useState(false);
   const [ready, setReady] = useState(false);
   const [query, setQuery] = useState('');
   const [openResults, setOpenResults] = useState(false);
@@ -80,6 +88,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
   const groups = useRef({});
   const crewMarkers = useRef(new Map()); // crew id -> { m, crew, at, heading, raf }
   const feederIdx = useRef({});
+  const rawSegs = useRef({ htLines: [], feeders: [] }); // raw GIS segments, see the build effect
   const hiRef = useRef(null);
   const topoIdx = useRef({});       // mrid -> { layer, isLine, base, latlng }
   const traceLayer = useRef(null);  // origin / boundary markers for the active trace
@@ -110,6 +119,10 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
   useEffect(() => { if (sel && sel.kind === 'incident') setSel((s) => ({ ...s, ...(inc.find((i) => i.id === s.id) || {}) })); }, [inc]); // eslint-disable-line
 
   const topoOk = !!(topo && !topo.error && topo.features && topo.features.length);
+  // Substations with imported topology, from the API -- nothing here names a place.
+  const topoAreas = topoOk ? topo.meta?.areas || [] : [];
+  const topoTitle = topoAreas.length === 1 ? `Topology · ${clean(topoAreas[0].name) || topoAreas[0].code}`
+    : topoAreas.length > 1 ? `Topology · ${topoAreas.length} imported substations` : 'Topology · CIM';
   const topoCounts = useMemo(() => {
     const m = { topoLines: 0, topoStruct: 0, topoEquip: 0 };
     if (topoOk) topo.features.forEach((f) => { m[topoGroupOf(f.properties.cls)]++; });
@@ -231,12 +244,18 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     if (!ready || !mapRef.current || !net || groups.current.built) return;
     const map = mapRef.current;
     const mk = () => L.layerGroup();
-    ['htLines', 'feeders', 'substations', 'powerTx', 'distTx', 'switches', 'rmus', 'fuses'].forEach((k) => (groups.current[k] = mk()));
+    ['htLines', 'feeders', 'substations', 'powerTx', 'distTx', 'switches', 'rmus', 'fuses', 'htLinesTopo', 'feedersTopo'].forEach((k) => (groups.current[k] = mk()));
 
-    net.htLines.forEach((l) => L.polyline(l.path, { color: '#3f5a86', weight: 2, opacity: 0.9, interactive: false }).addTo(groups.current.htLines));
+    // Raw segments are remembered so the effect below can move the ones that
+    // imported topology already draws into htLinesTopo / feedersTopo.
+    rawSegs.current = { htLines: [], feeders: [] };
+    net.htLines.forEach((l, index) => {
+      const pl = L.polyline(l.path, { color: '#3f5a86', weight: 2, opacity: 0.9, interactive: false }).addTo(groups.current.htLines);
+      rawSegs.current.htLines.push({ index, layers: [pl] });
+    });
 
     feederIdx.current = {};
-    net.feederLines.forEach((l) => {
+    net.feederLines.forEach((l, index) => {
       const col = feederColor(l.feeder);
       // wide, invisible "hit" line so the feeder is easy to hover/click...
       const hit = L.polyline(l.path, { color: col, weight: 14, opacity: 0, interactive: true });
@@ -247,6 +266,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
       const pl = L.polyline(l.path, { color: col, weight: 3, opacity: 0.92, interactive: false });
       pl.addTo(groups.current.feeders);
       (feederIdx.current[l.feeder] = feederIdx.current[l.feeder] || []).push(pl);
+      rawSegs.current.feeders.push({ index, layers: [hit, pl] });
     });
 
     net.fuses.forEach((a) => L.circleMarker([a.lat, a.lon], { radius: 2.5, color: '#b98a5e', weight: 0, fillOpacity: 0.85 }).addTo(groups.current.fuses));
@@ -278,7 +298,9 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
       if (f.geometry.type === 'LineString') {
         const latlngs = f.geometry.coordinates.map(([lo, la]) => [la, lo]);
         latlngs.forEach((ll) => bounds.extend(ll));
-        const base = { color: '#0e7490', weight: 3, opacity: 0.9 };
+        // coloured by the assigned feeder (cleaned, from network.feeders) with the
+        // same hash as the raw feeder layer; teal when the line has no feeder
+        const base = { color: p.feederId ? feederColor(p.feederId) : '#0e7490', weight: 3, opacity: 0.9 };
         // wide invisible line so a thin cable is easy to click, thin visible line on top
         const hit = L.polyline(latlngs, { color: '#0e7490', weight: 14, opacity: 0, interactive: true });
         hit.on('click', () => selectTopo(p, latlngs[0]));
@@ -300,7 +322,9 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     });
     map.__topoBounds = bounds.isValid() ? bounds : null;
     groups.current.topoBuilt = true;
-    ['topoLines', 'topoStruct', 'topoEquip'].forEach((k) => { if (layers[k]) groups.current[k].addTo(map); });
+    // devices drawn above lines: topoEquip is added after topoLines
+    groups.current.topo = L.layerGroup([groups.current.topoLines, groups.current.topoEquip]);
+    ['topo', 'topoStruct'].forEach((k) => { if (layers[k]) groups.current[k].addTo(map); });
   }, [ready, topo]); // eslint-disable-line
 
   // section trace: highlight the electrical section, mark the origin and boundary switches, dim the rest
@@ -417,6 +441,26 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     live.forEach((e, id) => { if (!seen.has(id)) { cancelAnimationFrame(e.raf); g.removeLayer(e.m); live.delete(id); } });
   }, [crews, ready]);
 
+  // Sort raw segments: one whose own line was imported into the topology (the
+  // API lists them by index, matched by id -- not by position) is already
+  // drawn, cleaned, by the topology layer, so it moves to htLinesTopo /
+  // feedersTopo. Every other raw line stays exactly as before.
+  useEffect(() => {
+    if (!ready || !groups.current.built) return;
+    const imported = topoOk ? topo.meta?.rawImported || {} : {};
+    const sets = { htLines: new Set(imported.htLines || []), feeders: new Set(imported.feederLines || []) };
+    const moved = { htLines: 0, feeders: 0 };
+    for (const k of ['htLines', 'feeders']) {
+      for (const seg of rawSegs.current[k]) {
+        const hide = sets[k].has(seg.index);
+        const [from, to] = hide ? [groups.current[k], groups.current[`${k}Topo`]] : [groups.current[`${k}Topo`], groups.current[k]];
+        seg.layers.forEach((pl) => { if (from.hasLayer(pl)) { from.removeLayer(pl); to.addLayer(pl); } });
+        if (hide) moved[k]++;
+      }
+    }
+    setRawUnderTopo(moved);
+  }, [ready, topo]); // eslint-disable-line
+
   // toggle layers on/off
   useEffect(() => {
     const map = mapRef.current; if (!map || !groups.current.built) return;
@@ -425,7 +469,14 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
       if (on && !map.hasLayer(g)) g.addTo(map);
       if (!on && map.hasLayer(g)) map.removeLayer(g);
     });
-  }, [layers, ready]);
+    // raw segments under imported topology: only on an explicit user choice
+    ['htLines', 'feeders'].forEach((k) => {
+      const g = groups.current[`${k}Topo`]; if (!g) return;
+      const on = layers[k] && rawTouched[k];
+      if (on && !map.hasLayer(g)) g.addTo(map);
+      if (!on && map.hasLayer(g)) map.removeLayer(g);
+    });
+  }, [layers, rawTouched, ready]);
 
   // ---- crew trails ---------------------------------------------------------------
   // The path each crew's phone has reported (GET /mobile/crews/:id/track), drawn from the
@@ -520,8 +571,15 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     catch (e) { setTrace({ found: false, reason: e.message || 'Trace failed' }); }
     finally { setTraceBusy(false); }
   }
-  const fitTopo = () => { const m = mapRef.current; if (m && m.__topoBounds) m.flyToBounds(m.__topoBounds.pad(0.15), { duration: 0.6 }); };
-  function pickFeeder(name) { setSelFeeder(name); setSel({ kind: 'feeder', ...feeders[name] }); }
+  // Jump to one imported substation's topology (its bbox from the API), or to
+  // all of it when no area is given.
+  const fitTopo = (area) => {
+    const m = mapRef.current; if (!m) return;
+    const b = area?.bbox?.every(Number.isFinite) ? L.latLngBounds([area.bbox[1], area.bbox[0]], [area.bbox[3], area.bbox[2]]) : m.__topoBounds;
+    if (b) m.flyToBounds(b.pad(0.15), { duration: 0.6 });
+  };
+  // Picking a feeder is an explicit ask to see its raw lines, even under topology.
+  function pickFeeder(name) { setSelFeeder(name); setSel({ kind: 'feeder', ...feeders[name] }); setRawTouched((t) => ({ ...t, feeders: true })); }
   const fitAll = () => { const m = mapRef.current; if (m && m.__bounds) m.flyToBounds(m.__bounds.pad(0.05), { duration: 0.5 }); };
 
   function highlight(lat, lon) {
@@ -532,8 +590,15 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
   }
   // fly the map to a searched item and reveal / highlight it
   // Fly to a region chosen from the OMS's own GIS data (substation areas, zones, divisions).
+  // 'topo:<mrid>' (or 'topo:*' for all) jumps to imported topology instead,
+  // switching the topology layers on so there is something to see there.
   function goRegion(id) {
     setRegionId(id);
+    if (id.startsWith('topo:')) {
+      setLayers((l) => ({ ...l, topo: true, topoStruct: true }));
+      fitTopo(topoAreas.find((a) => `topo:${a.mrid}` === id));
+      return;
+    }
     const r = regions.find((x) => x.id === id);
     const map = mapRef.current;
     if (!r || !map) return;
@@ -560,6 +625,10 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
   if (!net) return <div className="empty"><span className="disp">Loading network…</span>Reading the Haridwar GIS model.</div>;
   if (net.error) return <div className="screen-error"><h2>Network unavailable</h2><p>Could not load the topology from the backend.</p></div>;
   const c = net.counts || {};
+  // Both raw line layers actually on screen (ticked, and not entirely hidden
+  // under imported topology) -- they never visually join, so say why.
+  const rawShowing = (k, total) => layers[k] && (rawTouched[k] || rawUnderTopo[k] < (total || 0));
+  const rawBothShowing = rawShowing('htLines', c.htLines) && rawShowing('feeders', c.feederLines);
   const plottedInc = inc.filter((i) => i.lat && i.lon);
 
   return (
@@ -573,18 +642,32 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
         <div className="layer-panel">
           {LAYER_GROUPS.filter(([group]) => topoOk || !group.startsWith('Topology')).map(([group, ls]) => (
             <div key={group} className="lp-group">
-              <div className="lp-h">{group}</div>
-              {group.startsWith('Topology') && <div className="lp-sub">From CIM import · click any item, then “Trace electrical section”</div>}
+              <div className="lp-h">{group.startsWith('Topology') ? topoTitle : group}</div>
+              {group.startsWith('Topology') && <div className="lp-sub">From imported topology · click any item, then “Trace electrical section”</div>}
               {ls.map(([k, label]) => {
-                const n = k.startsWith('topo') ? topoCounts[k] : k === 'incidents' ? plottedInc.length : k === 'crews' ? crews.length : k === 'trails' ? Object.values(trails).filter((p) => p && p.length).length : (c[k === 'feeders' ? 'feederLines' : k] || 0);
+                const n = k === 'topo' ? topoCounts.topoLines + topoCounts.topoEquip : k.startsWith('topo') ? topoCounts[k] : k === 'incidents' ? plottedInc.length : k === 'crews' ? crews.length : k === 'trails' ? Object.values(trails).filter((p) => p && p.length).length : (c[k === 'feeders' ? 'feederLines' : k] || 0);
                 return (
                   <label key={k} className={`lp-row ${layers[k] ? 'on' : ''}`}>
-                    <input type="checkbox" checked={!!layers[k]} onChange={() => setLayers((l) => ({ ...l, [k]: !l[k] }))} />
-                    <span className={`lp-swatch sw-${k}`} /><span className="lp-label">{label}</span>
+                    <input type="checkbox" checked={!!layers[k]} onChange={() => {
+                      setLayers((l) => ({ ...l, [k]: !l[k] }));
+                      if (k in rawTouched) setRawTouched((t) => ({ ...t, [k]: true }));
+                    }} />
+                    <span className={`lp-swatch sw-${k}`} /><span className="lp-label">{label}
+                      {k in rawTouched && !rawTouched[k] && rawUnderTopo[k] > 0 && (
+                        <span className="lp-hidden" title="Drawn by the imported topology layer instead. Untick and tick again to show the raw lines too.">
+                          {' '}· {rawUnderTopo[k].toLocaleString()} under topology</span>)}
+                      {k === 'topo' && (
+                        <span className="lp-hidden">{' '}· {topoCounts.topoLines.toLocaleString()} lines, {topoCounts.topoEquip.toLocaleString()} devices</span>)}
+                    </span>
                     <span className="lp-count">{n && n.toLocaleString ? n.toLocaleString() : n}</span>
                   </label>
                 );
               })}
+              {group === 'Network' && rawBothShowing && !rawNoteDismissed && (
+                <div className="lp-hint lp-rawnote" role="note">
+                  HT network and Feeder lines are two separate raw extracts and won’t visually connect — see them merged and corrected under Topology instead.
+                  <button className="ms-clear" aria-label="Dismiss note" onClick={() => setRawNoteDismissed(true)}><Icon name="x" size={12} /></button>
+                </div>)}
               {group === 'Operations' && trailsOn && (
                 <TrailPanel crews={crews} trails={trails} trailCrew={trailCrew} trailWin={trailWin} setTrailWin={setTrailWin}
                   busy={trailBusy} failed={trailFailed} onFocus={focusTrail} onAll={() => setTrailCrew(null)} />)}
@@ -655,7 +738,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
                 ))}
               </div>
             )}
-            {regions.length > 0 && (
+            {(regions.length > 0 || topoAreas.length > 0) && (
               <select className="ms-box" aria-label="Go to region" value={regionId} onChange={(e) => goRegion(e.target.value)}
                 style={{ marginTop: 6, width: '100%', fontSize: 13, color: 'var(--ink)', cursor: 'pointer' }}>
                 <option value="">Go to region…</option>
@@ -667,13 +750,17 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
                     </optgroup>
                   ) : null;
                 })}
+                {topoAreas.length > 0 && (
+                  <optgroup label="Imported topology">
+                    {topoAreas.length > 1 && <option value="topo:*">All imported topology</option>}
+                    {topoAreas.map((a) => <option key={a.mrid} value={`topo:${a.mrid}`}>{clean(a.name) || a.code} · {a.equipment.toLocaleString()}</option>)}
+                  </optgroup>)}
               </select>
             )}
           </div>
 
           <div className="map-tools">
             <button className="map-fit" onClick={fitAll} title="Fit whole network"><Icon name="map" size={15} /> Fit</button>
-            {topoOk && <button className="map-fit topo" onClick={fitTopo} title="Jump to the CIM topology (Dehradun Ring Road)"><Icon name="pin" size={15} /> Dehradun</button>}
           </div>
 
           {sel && (
