@@ -42,9 +42,11 @@ data" there, and a what-if needs an explicit `sourceMrid`.
 - Even the in-line ones rarely separate anything (measured with what-if on
   every one of the 332):
   - 179 are in orphaned fragments, so there is no default source (422);
-  - 148 have another path around them, including 38 bridged in parallel by
-    another device across the same cut and the rest bypassed through loops
-    in the inferred graph;
+  - 148 have another path around them: 33 are bridged in parallel by another
+    device across the same cut, and 115 are bypassed through loops in the
+    inferred graph. Each loop closes at one junction node; in 15 of them that
+    node joins lines of different feeders, and in 71 it spans more than 3 m
+    (line-end joins chain, so one node can span up to about 20 m);
   - only **5** actually cut devices off when opened.
 - Sections are often small because connectivity is missing. The map adds a
   note when a section has fewer than 10 members.
