@@ -11,6 +11,8 @@ import { buildCsv, buildPdf } from '../domain/reports.js';
 import { REPORTS, buildStandardReport, standardReportCsv } from '../domain/standardReports.js';
 import { fieldList, OPS, runReport, reportCsv, feederSummaries, validateSpec } from '../domain/reportBuilder.js';
 import { smsFeederManager } from '../realtime/feederManagers.js';
+import { deepHealth, intervalS as uptimeIntervalS } from '../realtime/uptime.js';
+import { computeUptime, allowedDownMin, TARGET_PCT } from '../domain/uptime.js';
 import { MAX_LOCATION_BATCH, parseLocationBatch, newestLivePoint, parseTileParams } from '../domain/locations.js';
 import { createRouter } from '../domain/roadRouter.js';
 import { mapProxy } from './mapProxy.js';
@@ -909,6 +911,20 @@ api.get('/reports/standard/:kind', async (req, res) => {
     return res.send(standardReportCsv(r));
   }
   res.json(r);
+});
+
+// ---------- P8.6g availability report (Admin -> System uptime) ----------
+// Uptime for 24 h / 7 d / 30 d against the 99.9% target, per component, with outage periods.
+api.get('/uptime', async (req, res) => {
+  const now = Date.now();
+  const rows = await db.any("SELECT ts, status, components FROM uptime_checks WHERE ts > now() - interval '30 days' ORDER BY ts");
+  const windows = [['24h', 1], ['7d', 7], ['30d', 30]].map(([key, days]) => {
+    const from = new Date(now - days * 86400000).toISOString();
+    const r = computeUptime(rows, { from, to: new Date(now).toISOString(), intervalS: uptimeIntervalS() });
+    return { key, days, ...r, allowedDownMin: allowedDownMin(days * 86400000), meetsTarget: r.pct === null ? null : r.pct >= TARGET_PCT };
+  });
+  res.json({ target: TARGET_PCT, intervalS: uptimeIntervalS(), current: await deepHealth(), windows,
+    outages: windows[2].outages.slice(-50).reverse(), firstSample: rows[0]?.ts || null });
 });
 
 // ---------- Feeder managers (Admin -> Feeder managers) ----------

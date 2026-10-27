@@ -4,6 +4,7 @@ import { Icon, timeAgo, useConnection, useLiveRefresh } from '../lib/ui.jsx';
 import { useT, tOr } from '../lib/i18n.js';
 import FeederRatingsCard from '../components/FeederRatingsCard.jsx';
 import FeederManagersCard from '../components/FeederManagersCard.jsx';
+import UptimeCard from '../components/UptimeCard.jsx';
 
 const USERS = [
   { name: 'A. Kulkarni', role: 'Control Room Operator', zone: 'Dehradun', active: true },
@@ -93,6 +94,7 @@ export default function Admin() {
         </div>
       </div>
 
+      <UptimeCard />
       <FeederManagersCard />
       <FeederRatingsCard />
 

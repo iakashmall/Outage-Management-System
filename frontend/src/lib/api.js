@@ -102,6 +102,7 @@ export const api = {
   exportReliabilityReport,
   standardReport: (kind, params = {}) => req('GET', `/reports/standard/${kind}?${new URLSearchParams(clean(params))}`),
   exportStandardReport,
+  uptime: () => req('GET', '/uptime'),
   feederManagers: () => req('GET', '/feeder-managers'),
   setFeederManager: (feeder, b) => req('PUT', `/feeder-managers/${encodeURIComponent(feeder)}`, b),
   removeFeederManager: (feeder) => req('DELETE', `/feeder-managers/${encodeURIComponent(feeder)}`),

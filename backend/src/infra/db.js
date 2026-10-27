@@ -604,6 +604,14 @@ export async function migrate() {
     );
     CREATE INDEX IF NOT EXISTS reassign_requests_open_idx ON reassign_requests(status, created_at DESC);
 
+    -- P8.6g availability samples, one per UPTIME_INTERVAL_S (realtime/uptime.js).
+    CREATE TABLE IF NOT EXISTS uptime_checks (
+      ts         TIMESTAMPTZ NOT NULL,
+      status     TEXT NOT NULL CHECK (status IN ('up', 'degraded', 'down')),
+      components JSONB NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS uptime_checks_ts_idx ON uptime_checks (ts);
+
     -- Feeder managers: who gets the outage / restoration SMS for a feeder and the
     -- report-builder summaries (Admin -> Feeder managers). Phone is kept in full
     -- because it is needed to send; the API only ever returns it masked.
