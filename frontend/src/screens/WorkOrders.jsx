@@ -9,6 +9,7 @@ import { workOrderApi } from '../lib/workOrderApi.js';
 import { keycloak } from '../lib/auth.js';
 import { hhmm, useLiveRefresh } from '../lib/ui.jsx';
 import { PrioBadge, inp } from './DispatchWorkload.jsx';
+import { locale, t, tOr, useT } from '../lib/i18n.js';
 
 // Same values as CARRY_REASONS in the crew app (src/lib/workOrder.js).
 const REASON_TEXT = {
@@ -25,10 +26,11 @@ const addDays = (date, n) => {
   d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().slice(0, 10);
 };
-const dayText = (date) => new Date(`${date}T12:00:00Z`).toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+const dayText = (date) => new Date(`${date}T12:00:00Z`).toLocaleDateString(locale(), { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 const shortId = (id) => (id ? String(id).replace(/^INC-\d{4}-0*/, 'INC-') : '—');
 
 export default function WorkOrders() {
+  useT();
   const [today, setToday] = useState(null);   // the server's working day, from the first answer
   const [date, setDate] = useState(null);
   const [data, setData] = useState(null);
@@ -78,31 +80,31 @@ export default function WorkOrders() {
       <div className="card">
         <div className="card-h" style={{ flexWrap: 'wrap', gap: 10 }}>
           <div>
-            <h3>Daily work orders</h3>
-            <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>{date ? dayText(date) : 'Loading…'} · read-only, crews start and end their day in the crew app</div>
+            <h3>{t('wo.title')}</h3>
+            <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>{date ? dayText(date) : t('wo.loading')} · {t('wo.readOnly')}</div>
           </div>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-            <button className="btn sm" onClick={() => pick(addDays(date, -1))} disabled={!date} aria-label="Previous day">‹</button>
+            <button className="btn sm" onClick={() => pick(addDays(date, -1))} disabled={!date} aria-label={t('wo.prevDay')}>‹</button>
             <input type="date" style={{ ...inp, width: 150 }} value={date || ''} max={today || undefined}
-              onChange={(e) => pick(e.target.value)} aria-label="Work date" />
-            <button className="btn sm" onClick={() => pick(addDays(date, 1))} disabled={!date || isToday} aria-label="Next day">›</button>
-            <button className="btn sm" onClick={() => pick(today)} disabled={!today || isToday}>Today</button>
+              onChange={(e) => pick(e.target.value)} aria-label={t('wo.workDate')} />
+            <button className="btn sm" onClick={() => pick(addDays(date, 1))} disabled={!date || isToday} aria-label={t('wo.nextDay')}>›</button>
+            <button className="btn sm" onClick={() => pick(today)} disabled={!today || isToday}>{t('wo.today')}</button>
           </div>
         </div>
         {data && !error && (
           <div className="card-b" style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', fontSize: 12.5 }}>
-            <span className="chip chip-crit" style={{ fontWeight: 700 }}>{count('not_started')} not started</span>
-            <span className="chip chip-minor">{count('started')} in progress</span>
-            <span className="chip chip-ok">{count('closed')} day ended</span>
-            <span style={{ color: 'var(--muted)' }}>{crews.length} crew{crews.length === 1 ? '' : 's'}</span>
-            {nobody && <span style={{ color: 'var(--muted)' }}>· Nobody started a day on this date.</span>}
+            <span className="chip chip-crit" style={{ fontWeight: 700 }}>{t('wo.nNotStarted', { n: count('not_started') })}</span>
+            <span className="chip chip-minor">{t('wo.nInProgress', { n: count('started') })}</span>
+            <span className="chip chip-ok">{t('wo.nDayEnded', { n: count('closed') })}</span>
+            <span style={{ color: 'var(--muted)' }}>{t(crews.length === 1 ? 'wo.crewOne' : 'wo.crewMany', { n: crews.length })}</span>
+            {nobody && <span style={{ color: 'var(--muted)' }}>{t('wo.nobody')}</span>}
           </div>
         )}
       </div>
 
       {error ? <ErrorCard error={error} onRetry={() => load(date)} />
-        : !data ? <div className="card"><div className="card-b empty">Loading work orders…</div></div>
-        : !crews.length ? <div className="card"><div className="card-b empty"><span className="disp">No crews set up</span>Add crews from the Dispatch tab.</div></div>
+        : !data ? <div className="card"><div className="card-b empty">{t('wo.loadingWo')}</div></div>
+        : !crews.length ? <div className="card"><div className="card-b empty"><span className="disp">{t('wo.noCrews')}</span>{t('wo.addFromDispatch')}</div></div>
         : (
           <div style={{ display: 'grid', gap: 10, opacity: loading ? 0.55 : 1, transition: 'opacity .15s' }} aria-busy={loading}>
             {crews.map((c) => <CrewDay key={c.crew.id} entry={c} isToday={isToday} />)}
@@ -113,21 +115,22 @@ export default function WorkOrders() {
 }
 
 function ErrorCard({ error, onRetry }) {
+  useT();
   let title, text, action;
   if (error.status === 401) {
-    title = 'Your session has expired';
-    text = 'Sign in again to see the work orders.';
-    action = <button className="btn primary sm" onClick={() => keycloak.login()}>Sign in</button>;
+    title = t('wo.e401t');
+    text = t('wo.e401');
+    action = <button className="btn primary sm" onClick={() => keycloak.login()}>{t('wo.signIn')}</button>;
   } else if (error.status === 403) {
-    title = "Your login can't view work orders";
-    text = 'This screen is for the control room (operator, coordinator or admin roles).';
+    title = t('wo.e403t');
+    text = t('wo.e403');
   } else if (error.code === 'BAD_DATE') {
-    title = 'That date is not valid';
+    title = t('wo.badDate');
     text = error.message;
   } else {
-    title = error.status ? `The server could not load the work orders (${error.status})` : "Can't reach the server";
-    text = error.status ? error.message : 'Check the connection, then try again.';
-    action = <button className="btn sm" onClick={onRetry}>Retry</button>;
+    title = error.status ? t('wo.eServer', { s: error.status }) : t('wo.eReach');
+    text = error.status ? error.message : t('wo.eCheck');
+    action = <button className="btn sm" onClick={onRetry}>{t('wo.retry')}</button>;
   }
   return (
     <div className="card" style={{ borderLeft: '3px solid var(--crit)' }} role="alert">
@@ -160,7 +163,9 @@ function dayRows({ workOrder: w, jobs }, isToday) {
 
 function CrewDay({ entry, isToday }) {
   const { crew, workOrder: w } = entry;
-  const [label, chip] = STATUS[w.status] || [w.status, 'chip-muted'];
+  useT();
+  const [label0, chip] = STATUS[w.status] || [w.status, 'chip-muted'];
+  const label = tOr(`wo.st.${w.status}`, label0);
   const notStarted = w.status === 'not_started';
   const closed = w.status === 'closed';
   const rows = dayRows(entry, isToday);
@@ -173,28 +178,28 @@ function CrewDay({ entry, isToday }) {
           <div>
             <span style={{ fontWeight: 600 }}>{crew.name}</span>
             <span className="mono" style={{ color: 'var(--muted)', fontSize: 11.5, marginLeft: 6 }}>{crew.id}</span>
-            <span style={{ color: 'var(--muted)', fontSize: 12.5 }}> · lead {crew.lead || '—'}</span>
+            <span style={{ color: 'var(--muted)', fontSize: 12.5 }}>{t('wo.lead', { name: crew.lead || '—' })}</span>
           </div>
           <span className={`chip ${chip}`} style={{ fontWeight: 700 }}>{label}</span>
         </div>
 
         <div style={{ fontSize: 12.5, color: 'var(--ink-2)', display: 'grid', gap: 2 }}>
-          {notStarted ? <div style={{ color: 'var(--crit)', fontWeight: 600 }}>No start of day recorded.</div> : (
+          {notStarted ? <div style={{ color: 'var(--crit)', fontWeight: 600 }}>{t('wo.noStart')}</div> : (
             <div>
-              Started {hhmm(w.started_at)}{w.started_by ? ` by ${w.started_by}` : ''}
-              {closed && <> · Ended {hhmm(w.closed_at)}</>}
-              {closed && <> · Signed off by <b>{w.close_sign_off?.name || '—'}</b></>}
+              {t('wo.started', { t: hhmm(w.started_at) })}{w.started_by ? t('wo.by', { name: w.started_by }) : ''}
+              {closed && <>{t('wo.ended', { t: hhmm(w.closed_at) })}</>}
+              {closed && <>{t('wo.signedOff')}<b>{w.close_sign_off?.name || '—'}</b></>}
             </div>
           )}
-          {members.length > 0 && <div>Crew: {members.join(', ')}</div>}
-          {w.start_note && <div>Start note: {w.start_note}</div>}
-          {!closed && !isToday && <div style={{ color: 'var(--high)', fontWeight: 600 }}>This day was never closed: there is no end-of-day report. Only jobs finished that day are shown.</div>}
+          {members.length > 0 && <div>{t('wo.crew', { list: members.join(', ') })}</div>}
+          {w.start_note && <div>{t('wo.startNote', { note: w.start_note })}</div>}
+          {!closed && !isToday && <div style={{ color: 'var(--high)', fontWeight: 600 }}>{t('wo.neverClosed')}</div>}
         </div>
 
         {rows.length ? (
           <table className="tbl" style={{ width: '100%', fontSize: 12.5 }}>
             <thead>
-              <tr><th style={{ width: 28 }}>#</th><th>Job</th><th>Incident</th><th>Priority</th><th>Outcome</th>{closed && <th>Reason carried over</th>}</tr>
+              <tr><th style={{ width: 28 }}>#</th><th>{t('wo.colJob')}</th><th>{t('wo.colIncident')}</th><th>{t('wo.colPriority')}</th><th>{t('wo.colOutcome')}</th>{closed && <th>{t('wo.colCarried')}</th>}</tr>
             </thead>
             <tbody>
               {rows.map((r) => (
@@ -203,10 +208,10 @@ function CrewDay({ entry, isToday }) {
                   <td className="mono">{r.jobId}</td>
                   <td className="mono">{shortId(r.incidentId)}</td>
                   <td>{r.priority ? <PrioBadge priority={r.priority} /> : <span style={{ color: 'var(--muted)' }}>—</span>}</td>
-                  <td>{r.done ? <span className="chip chip-ok">Done</span> : r.outcome}</td>
+                  <td>{r.done ? <span className="chip chip-ok">{t('wo.done')}</span> : tOr(`drw.job.${r.outcome}`, r.outcome)}</td>
                   {closed && (
                     <td>
-                      {r.carried ? (r.reason ? REASON_TEXT[r.reason] || r.reason : <span style={{ color: 'var(--muted)' }}>No reason given</span>) : ''}
+                      {r.carried ? (r.reason ? tOr(`wo.reason.${r.reason}`, REASON_TEXT[r.reason] || r.reason) : <span style={{ color: 'var(--muted)' }}>{t('wo.noReason')}</span>) : ''}
                       {r.note && <span style={{ color: 'var(--muted)' }}> ({r.note})</span>}
                     </td>
                   )}
@@ -214,12 +219,12 @@ function CrewDay({ entry, isToday }) {
               ))}
             </tbody>
           </table>
-        ) : <div style={{ fontSize: 12.5, color: 'var(--muted)' }}>No jobs for this day.</div>}
+        ) : <div style={{ fontSize: 12.5, color: 'var(--muted)' }}>{t('wo.noJobs')}</div>}
 
         {closed && (
           <div style={{ fontSize: 12.5 }}>
-            <span className="eyebrow" style={{ marginRight: 6 }}>Remarks</span>
-            {w.close_remarks || <span style={{ color: 'var(--muted)' }}>None</span>}
+            <span className="eyebrow" style={{ marginRight: 6 }}>{t('wo.remarks')}</span>
+            {w.close_remarks || <span style={{ color: 'var(--muted)' }}>{t('wo.none')}</span>}
           </div>
         )}
       </div>

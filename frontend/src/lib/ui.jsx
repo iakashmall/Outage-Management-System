@@ -1,8 +1,32 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
+import { useT, t as tr, tOr } from './i18n.js';
 import { socket } from './api.js';
 
 // Text alternative for a chart (WCAG 1.1.1 / 1.3.1): the same numbers as a
 // table that only assistive technology sees. The SVG itself stays role="img".
+// Clickable table rows are mouse-only (a <tr> can't take focus). Put one of these
+// in the row's first cell: same action, reachable by Tab, named for screen readers
+// (WCAG 2.1.1). It stops propagation so the row's own click doesn't fire twice.
+// After a view button opens its view, move focus to the first control of that view
+// (the first focusable after `anchor`), so the next Tab goes on into the view instead of
+// through the remaining view buttons (WCAG 2.4.3). Runs after the view has rendered.
+export function focusAfter(anchor) {
+  const sel = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea, [tabindex]:not([tabindex="-1"])';
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (!anchor) return;
+    const root = anchor.closest('main') || document;
+    const next = [...root.querySelectorAll(sel)].find((el) => !anchor.contains(el) && anchor.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING && !el.closest('.sr-only'));
+    next?.focus();
+  }));
+}
+
+export function RowButton({ label, onActivate, children, ...rest }) {
+  return (
+    <button type="button" className="row-open" aria-label={label}
+      onClick={(e) => { e.stopPropagation(); onActivate(); }} {...rest}>{children}</button>
+  );
+}
+
 export function SrTable({ caption, head, rows }) {
   return (
     <table className="sr-only">
@@ -73,39 +97,41 @@ export const Icon = ({ name, size = 20 }) => {
   return <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true">{paths[name]}</svg>;
 };
 
-export const SevBadge = ({ sev }) => <span className={`badge-sev sev-${sev}`}>{sev}</span>;
+// Labels translate (P8.7c); the class keeps the data value so colours don't change.
+export const SevBadge = ({ sev }) => { useT(); return <span className={`badge-sev sev-${sev}`}>{tOr(`sev.${sev}`, sev)}</span>; };
 export const StatusBadge = ({ status }) => {
-  const label = { in_progress: 'In Progress', pending: 'Pending Verification', notified: 'Customers notified' }[status] ||
-    status.charAt(0).toUpperCase() + status.slice(1);
+  const { t } = useT();
+  const key = `st.${status}`;
+  const label = t(key) !== key ? t(key) : status.charAt(0).toUpperCase() + status.slice(1).replace(/_/g, ' ');
   return <span className={`badge-st st-${status}`}>{label}</span>;
 };
 
 // Crew status dot shared by the roster views. Off shift is drawn as a hollow
 // ring so it reads differently from a crew that is merely on a break.
 const CREW_STATUS_COLOR = { available: 'var(--live)', in_service: 'var(--med)', in_transit: 'var(--high)', on_break: 'var(--faint)' };
-export const CrewDot = ({ status, size = 9 }) => (
+export const CrewDot = ({ status, size = 9 }) => { useT(); return (
   status === 'off_shift'
-    ? <span title="Off shift" style={{ width: size, height: size, borderRadius: '50%', flex: '0 0 auto', boxSizing: 'border-box', border: '2px solid var(--muted)' }} />
-    : <span title={status} style={{ width: size, height: size, borderRadius: '50%', flex: '0 0 auto', background: CREW_STATUS_COLOR[status] || 'var(--faint)' }} />
-);
+    ? <span title={tr('crew.dot.off_shift')} style={{ width: size, height: size, borderRadius: '50%', flex: '0 0 auto', boxSizing: 'border-box', border: '2px solid var(--muted)' }} />
+    : <span title={tOr(`crew.dot.${status}`, status)} style={{ width: size, height: size, borderRadius: '50%', flex: '0 0 auto', background: CREW_STATUS_COLOR[status] || 'var(--faint)' }} />
+); };
 
 // OMS-03: a crew offered for assignment may already be working (GET
 // /incidents/:id/nearest-crews lists every on-shift crew): " · on site · 2 jobs".
 const CREW_STATUS_TEXT = { in_transit: 'en route', in_service: 'on site', on_break: 'on break' };
 export const crewBusyText = (c) => {
   if (c.status === 'available' && !c.active_jobs) return '';
-  const st = CREW_STATUS_TEXT[c.status] || (c.status === 'available' ? '' : c.status);
-  const jobs = c.active_jobs ? `${c.active_jobs} job${c.active_jobs === 1 ? '' : 's'}` : '';
+  const st = CREW_STATUS_TEXT[c.status] ? tr(`crew.busy.${c.status}`) : (c.status === 'available' ? '' : tOr(`crew.lc.${c.status}`, c.status));
+  const jobs = c.active_jobs ? tr(c.active_jobs === 1 ? 'crew.job1' : 'crew.jobs', { n: c.active_jobs }) : '';
   return [st, jobs].filter(Boolean).map((s) => ` · ${s}`).join('');
 };
 
 export const timeAgo = (iso) => {
   if (!iso) return '—';
   const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
+  if (s < 60) return tr('ago.s', { n: s });
+  if (s < 3600) return tr('ago.m', { n: Math.floor(s / 60) });
+  if (s < 86400) return tr('ago.h', { n: Math.floor(s / 3600) });
+  return tr('ago.d', { n: Math.floor(s / 86400) });
 };
 export const hhmm = (iso) => iso ? new Date(iso).toTimeString().slice(0, 5) : '—';
 

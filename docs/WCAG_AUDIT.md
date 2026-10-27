@@ -298,3 +298,31 @@ jsx-a11y lint, and are to be confirmed by that manual run:
   the monthly SAIDI bars each carry a screen-reader-only data table
   (`SrTable` in `lib/ui.jsx`); decorative reliability-ring graphics are
   `aria-hidden` (their values are already text).
+
+## Round 4 -- manual keyboard and NVDA walkthrough (2026-10-26)
+
+`WCAG_MANUAL_TEST.md` was run end to end with an operator login, keyboard
+only and NVDA. Every Fail found was fixed and re-tested in the same run;
+the final result is **A 17/17, B 16/16, C 9/9, D 4/4 - no open Fails.**
+
+Found and fixed during the run:
+
+| Problem found | WCAG | Fix |
+|---|---|---|
+| Incident drawer ignored Esc; focus did not move in or back to the row | 2.1.2, 2.4.3 | vaul `handleOnly` + `autoFocus`; opener refocused on close |
+| After choosing a screen, Tab went back through the header | 2.4.1, 2.4.3 | Skip link; focus moves into `<main>`; header comes after the content on screens other than Dashboard |
+| Esc gave no way back to navigation | 2.4.3 | Esc inside a screen returns to its rail button |
+| Clickable rows were mouse-only | 2.1.1 | `RowButton` in the first cell |
+| Every row / search result / map marker was a Tab stop | 2.4.3 | Tables, the map and the header search are one stop each; Enter goes in, Esc leaves (`lib/tableGate.js`, combobox search) |
+| NVDA kept arrow keys and Enter on the map / tables (browse mode) | 2.1.1 | Map is `role="application"`; a click on a table also opens it |
+| Analytics selectors read as plain buttons | 4.1.2 | `aria-pressed` + named groups |
+| Live event tape spoke every GPS ping | 2.2.2 | No longer a live region; readable on demand |
+| Dispatch crew select / button unnamed per incident | 2.4.6 | Labels include the incident ID |
+| Focus outline thin on dark surfaces | 2.4.7 | Box-shadow focus ring; solid outline on tables |
+| Incident severity and crew status by colour only | 1.4.1 | Severity letter on incidents, status mark on crews, key updated |
+
+NVDA-side note: after the splash screen, NVDA may need **Insert+F5** before
+landmark navigation (D) works; the landmarks themselves were verified in the
+accessibility tree.
+
+**P8.7a status: Done.** An external audit is P8.7b.

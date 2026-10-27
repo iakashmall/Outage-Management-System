@@ -1,10 +1,12 @@
 import { useRef } from 'react';
 import { Icon, useDialog } from '../lib/ui.jsx';
+import { useT, t as tr, tOr } from '../lib/i18n.js';
 
 // Full-screen "About" page opened from the GridQ mark in the rail. Plain
 // fixed-position overlay (no router in this app) styled with the same
 // design tokens as the rest of the shell — see index.css :root block.
 export default function AboutOverlay({ onClose }) {
+  useT();
   const dlg = useRef(null);
   useDialog(dlg, onClose);
 
@@ -16,7 +18,7 @@ export default function AboutOverlay({ onClose }) {
       tabIndex={-1}
       role="dialog"
       aria-modal="true"
-      aria-label="About GridQ"
+      aria-label={tr('app.about')}
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
       style={{
         position: 'fixed', inset: 0, zIndex: 2200,
@@ -41,7 +43,7 @@ export default function AboutOverlay({ onClose }) {
           </div>
           <button
             onClick={onClose}
-            aria-label="Close"
+            aria-label={tr('inc.close')}
             style={{
               position: 'absolute', top: 16, right: 16, width: 30, height: 30, borderRadius: 8,
               border: '1px solid rgba(255,255,255,.35)', background: 'rgba(255,255,255,.12)',
@@ -53,34 +55,32 @@ export default function AboutOverlay({ onClose }) {
         </div>
 
         <div style={{ padding: '22px 26px 26px', display: 'flex', flexDirection: 'column', gap: 20 }}>
-          <Section title="Software">
-            <Row k="Name" v="GridQ Action.NET ADMS — Outage Management System" />
-            <Row k="Version" v="1.0.0" />
-            <Row k="Build" v="2026.07.1.0" />
-            <Row k="Date of Deployment" v="" />
+          <Section title={tr('about.software')}>
+            <Row k={tr('about.name')} v={tr('about.nameV')} />
+            <Row k={tr('about.version')} v="1.0.0" />
+            <Row k={tr('about.build')} v="2026.07.1.0" />
+            <Row k={tr('about.deployDate')} v="" />
             
           </Section>
 
           
-          <Section title="License">
+          <Section title={tr('about.license')}>
             <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.6 }}>
-              Confidential &amp; Proprietary. This software and its documentation are provided
-              for the exclusive use of Uttarakhand Power Corporation Limited under the RDSS
-              scheme and may not be copied, distributed, or disclosed without written consent from Sharika SpinTech Pvt. Ltd.
+              {tr('about.licenseText')}
             </p>
           </Section>
 
-          <Section title="Company">
-            <Row k="Software OEM" v="Sharika SpinTech Pvt. Ltd." />
-            <Row k="Technology partner" v="Sharika Enterprises Limited" />
+          <Section title={tr('about.company')}>
+            <Row k={tr('about.oem')} v="Sharika SpinTech Pvt. Ltd." />
+            <Row k={tr('about.partner')} v="Sharika Enterprises Limited" />
             
           </Section>
 
-          <Section title="Client & scheme">
-            <Row k="End client" v="Uttarakhand Power Corporation Ltd. (UPCL)" />
-            <Row k="Scheme" v="Ganga Corridor(RDSS)" />
-            <Row k="Nodal agency" v="Power Finance Corporation Ltd." />
-            <Row k="Town" v="Dehradun, Haridwar, Rishikesh" />
+          <Section title={tr('about.client')}>
+            <Row k={tr('about.endClient')} v={tr('about.endClientV')} />
+            <Row k={tr('about.scheme')} v={tr('about.schemeV')} />
+            <Row k={tr('about.nodal')} v={tr('about.nodalV')} />
+            <Row k={tr('about.town')} v={tr('about.townV')} />
 
           </Section>
         </div>

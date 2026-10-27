@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { SrTable } from '../lib/ui.jsx';
+import { t, useT, locale } from '../lib/i18n.js';
 
 // Charts for the PFC feeder KPI panel. Hand-drawn SVG, no chart library,
 // same approach as the SAIDI bars in screens/Analytics.jsx.
@@ -8,6 +9,7 @@ import { SrTable } from '../lib/ui.jsx';
 
 const COLORS = { R: '#d7382a', Y: '#d99a14', B: '#2f6fd6', T: '#0f2847' };
 const NAMES = { R: 'R', Y: 'Y', B: 'B', T: 'Total' };
+const nm = (p) => (p === 'T' ? t('kc.total') : NAMES[p]);
 // Which rating field draws the dashed limit line for an index.
 const LIMIT = { FMXV: 'v_hi_pct', FMNV: 'v_lo_pct', FVSM: 'v_sag_pct', FMXC: 'i_hi_pct', FMNC: 'i_lo_pct' };
 
@@ -25,9 +27,9 @@ function niceTicks(lo, hi, n = 5) {
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const shortLabel = (label, granularity) => (granularity === 'hour' ? label : `${+label.slice(8, 10)} ${MONTHS[+label.slice(5, 7) - 1]}`);
+const shortLabel = (label, granularity) => (granularity === 'hour' ? label : `${+label.slice(8, 10)} ${t(`kc.m${+label.slice(5, 7) - 1}`) || MONTHS[+label.slice(5, 7) - 1]}`);
 
-const numFmt = (v) => (v == null ? '—' : Math.abs(v) >= 10000 ? Math.round(v).toLocaleString('en-IN') : String(Math.round(v * 10) / 10));
+const numFmt = (v) => (v == null ? '—' : Math.abs(v) >= 10000 ? Math.round(v).toLocaleString(locale()) : String(Math.round(v * 10) / 10));
 
 // Counts, durations and stress that are 0 everywhere: say so in words, since a
 // flat line at 0 reads like missing data. (null for anything else.)
@@ -36,13 +38,14 @@ export function allZeroMessage(def, values, granularity) {
   const xs = values.filter((v) => v != null);
   if (!xs.length || xs.some((v) => v !== 0)) return null;
   const what = def.name.replace(/^Feeder\s+/i, '').replace(/\s*\(.*\)$/, '');
-  const when = granularity === 'hour' ? 'on this day' : 'in this period';
-  if (/incidents$/i.test(what)) return `No ${what} ${when}.`;
-  if (/duration$/i.test(what)) return `No time spent with ${what.replace(/\s*duration$/i, '')} ${when}.`;
-  return `No ${what} ${when} (0 throughout).`;
+  const when = t(granularity === 'hour' ? 'kc.onDay' : 'kc.inPeriod');
+  if (/incidents$/i.test(what)) return t('kc.zeroInc', { what, when });
+  if (/duration$/i.test(what)) return t('kc.zeroDur', { what: what.replace(/\s*duration$/i, ''), when });
+  return t('kc.zero', { what, when });
 }
 
 export function TrendChart({ points, def, granularity, rating }) {
+  useT();
   const [hover, setHover] = useState(null);
   const phases = def.phased === false ? [null] : ['R', 'Y', 'B', 'T'];
   const keyOf = (p) => (p ? `${def.code}_${p}` : def.code);
@@ -62,7 +65,7 @@ export function TrendChart({ points, def, granularity, rating }) {
     return { lo: ticks[0], hi: ticks[ticks.length - 1], ticks, limit };
   }, [points, def, rating]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (!m) return <div className="empty">No data for this index in the selected period.</div>;
+  if (!m) return <div className="empty">{t('kc.noData')}</div>;
   const zero = allZeroMessage(def, points.flatMap((pt) => phases.map((p) => pt.kpis[keyOf(p)])), granularity);
   if (zero) return <div className="empty kh-zero">{zero}</div>;
 
@@ -94,12 +97,12 @@ export function TrendChart({ points, def, granularity, rating }) {
     <div className="fk-chartwrap">
       <div className="fk-legend">
         {phases.map((p) => (
-          <span key={p || 'one'}><i style={{ background: COLORS[p || 'T'], opacity: isSum && p === 'T' ? 0.35 : 1 }} />{p ? NAMES[p] : def.code}</span>
+          <span key={p || 'one'}><i style={{ background: COLORS[p || 'T'], opacity: isSum && p === 'T' ? 0.35 : 1 }} />{p ? nm(p) : def.code}</span>
         ))}
-        {m.limit != null && <span className="fk-lim"><i className="dash" />limit {m.limit}%</span>}
-        <span className="muted fk-unit">{def.unit}{granularity === 'hour' ? ' · per hour' : granularity === 'week' ? ' · per week' : ' · per day'}</span>
+        {m.limit != null && <span className="fk-lim"><i className="dash" />{t('kc.limit')} {m.limit}%</span>}
+        <span className="muted fk-unit">{def.unit}{' · '}{t(granularity === 'hour' ? 'kc.perHour' : granularity === 'week' ? 'kc.perWeek' : 'kc.perDay')}</span>
       </div>
-      <svg viewBox={`0 0 ${W} ${H}`} className="fk-svg" role="img" aria-label={`${def.name} trend`}
+      <svg viewBox={`0 0 ${W} ${H}`} className="fk-svg" role="img" aria-label={t('kc.trend', { name: def.name })}
         onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
         {m.ticks.map((t) => (
           <g key={t}>
@@ -133,13 +136,13 @@ export function TrendChart({ points, def, granularity, rating }) {
         })}
         {hover != null && <line x1={x(hover)} x2={x(hover)} y1={MT} y2={H - MB} className="fk-cross" />}
       </svg>
-      <SrTable caption={`${def.name} values`} head={['Period', ...phases.map((p) => (p ? NAMES[p] : def.code))]}
+      <SrTable caption={t('kc.values', { name: def.name })} head={[t('kc.period'), ...phases.map((p) => (p ? nm(p) : def.code))]}
         rows={points.map((pt) => [shortLabel(pt.label, granularity), ...phases.map((p) => pt.kpis[keyOf(p)] ?? '–')])} />
       {hp && (
         <div className="fk-tip" style={{ left: `${(x(hover) / W) * 100}%` }}>
           <b>{shortLabel(hp.label, granularity)}</b>
           {phases.map((p) => (
-            <div key={p || 'one'}><i style={{ background: COLORS[p || 'T'] }} />{p ? NAMES[p] : def.code}<span>{numFmt(hp.kpis[keyOf(p)])}</span></div>
+            <div key={p || 'one'}><i style={{ background: COLORS[p || 'T'] }} />{p ? nm(p) : def.code}<span>{numFmt(hp.kpis[keyOf(p)])}</span></div>
           ))}
         </div>
       )}
@@ -148,13 +151,14 @@ export function TrendChart({ points, def, granularity, rating }) {
 }
 
 export function WorstBars({ rows, unit, toneOf, onPick }) {
-  if (!rows.length) return <div className="empty">No data for this index in the selected period.</div>;
+  useT();
+  if (!rows.length) return <div className="empty">{t('kc.noData')}</div>;
   const max = Math.max(...rows.map((r) => Math.abs(r.value)), 1e-9);
   return (
     <div className="fk-bars" role="list">
       {rows.map((r) => (
         <div key={r.feeder} role="listitem">
-          <button className="fk-bar-row" onClick={() => onPick(r.feeder)} title="Open this feeder">
+          <button className="fk-bar-row" onClick={() => onPick(r.feeder)} title={t('kc.openFeeder')}>
             <span className="fk-bar-name mono">{r.feeder}</span>
             <span className="fk-bar-track"><span className={`fk-bar-fill fk-fill-${toneOf(r.value) || 'ok'}`} style={{ width: `${Math.max(1.5, (Math.abs(r.value) / max) * 100)}%` }} /></span>
             <span className="fk-bar-val mono">{numFmt(r.value)}<small> {unit === 'Nos' ? '' : unit}</small></span>
