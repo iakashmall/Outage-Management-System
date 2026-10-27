@@ -129,8 +129,8 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
   const topoOk = !!(topo && !topo.error && topo.features && topo.features.length);
   // Substations with imported topology, from the API -- nothing here names a place.
   const topoAreas = topoOk ? topo.meta?.areas || [] : [];
-  const topoTitle = topoAreas.length === 1 ? `Topology · ${clean(topoAreas[0].name) || topoAreas[0].code}`
-    : topoAreas.length > 1 ? `Topology · ${topoAreas.length} imported substations` : 'Topology · CIM';
+  const topoTitle = topoAreas.length === 1 ? t('map.topoOne', { name: clean(topoAreas[0].name) || topoAreas[0].code })
+    : topoAreas.length > 1 ? t('map.topoMany', { n: topoAreas.length }) : t('map.topoNone');
   const topoCounts = useMemo(() => {
     const m = { topoLines: 0, topoStruct: 0, topoEquip: 0 };
     if (topoOk) topo.features.forEach((f) => { m[topoGroupOf(f.properties.cls)]++; });
@@ -351,16 +351,16 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     if (trace.kind === 'upstream') {
       if (!trace.pathFound) return null;
       const eq = trace.path.filter((p) => p.type === 'equipment').map((p) => p.cim_mrid);
-      return { hit: new Set(eq), color: SECTION_COLOR, origin: trace.origin.cim_mrid, originTip: 'Traced from here',
-        marks: trace.switchesOnPath.map((s) => [s.cim_mrid, `Switch on path · ${s.cim_class} ${s.name || s.cim_mrid} · state unknown`]) };
+      return { hit: new Set(eq), color: SECTION_COLOR, origin: trace.origin.cim_mrid, originTip: tt('map.ttTraced'),
+        marks: trace.switchesOnPath.map((s) => [s.cim_mrid, tt('map.ttSwitchOnPath', { cls: s.cim_class, name: s.name || s.cim_mrid })]) };
     }
     if (trace.kind === 'whatif') {
       const opened = trace.assumedOpen[0]?.cim_mrid;
-      return { hit: new Set(trace.lostSupply.map((e) => e.cim_mrid)), color: SIM_COLOR, origin: opened, originTip: 'Simulated open', marks: [] };
+      return { hit: new Set(trace.lostSupply.map((e) => e.cim_mrid)), color: SIM_COLOR, origin: opened, originTip: tt('map.ttSimOpen'), marks: [] };
     }
     return { hit: new Set(trace.sectionEquipment.map((e) => e.cim_mrid)), color: SECTION_COLOR, origin: trace.origin.cim_mrid, originTip: tt('map.ttOrigin'),
       marks: trace.boundarySwitches.map((b) => [b.cim_mrid, tt('map.ttBoundary', { cls: b.cim_class, name: b.name || b.cim_mrid })]) };
-  }, [trace]);
+  }, [trace, lang]); // lang: the tooltips are translated
   useEffect(() => {
     const map = mapRef.current; if (!map || !groups.current.topoBuilt) return;
     if (traceLayer.current) { map.removeLayer(traceLayer.current); traceLayer.current = null; }
@@ -695,10 +695,10 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
                     }} />
                     <span className={`lp-swatch sw-${k}`} /><span className="lp-label">{tOr(`map.ly.${k}`, label)}
                       {k in rawTouched && !rawTouched[k] && rawUnderTopo[k] > 0 && (
-                        <span className="lp-hidden" title="Drawn by the imported topology layer instead. Untick and tick again to show the raw lines too.">
-                          {' '}· {rawUnderTopo[k].toLocaleString()} under topology</span>)}
+                        <span className="lp-hidden" title={t('map.rawHiddenTitle')}>
+                          {t('map.rawHidden', { n: rawUnderTopo[k].toLocaleString() })}</span>)}
                       {k === 'topo' && (
-                        <span className="lp-hidden">{' '}· {topoCounts.topoLines.toLocaleString()} lines, {topoCounts.topoEquip.toLocaleString()} devices</span>)}
+                        <span className="lp-hidden">{t('map.topoLinesDevices', { l: topoCounts.topoLines.toLocaleString(), d: topoCounts.topoEquip.toLocaleString() })}</span>)}
                     </span>
                     <span className="lp-count">{n && n.toLocaleString ? n.toLocaleString() : n}</span>
                   </label>
@@ -706,8 +706,8 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
               })}
               {group === 'Network' && rawBothShowing && !rawNoteDismissed && (
                 <div className="lp-hint lp-rawnote" role="note">
-                  HT network and Feeder lines are two separate raw extracts and won’t visually connect — see them merged and corrected under Topology instead.
-                  <button className="ms-clear" aria-label="Dismiss note" onClick={() => setRawNoteDismissed(true)}><Icon name="x" size={12} /></button>
+                  {t('map.rawNote')}
+                  <button className="ms-clear" aria-label={t('map.dismissNote')} onClick={() => setRawNoteDismissed(true)}><Icon name="x" size={12} /></button>
                 </div>)}
               {group === 'Operations' && trailsOn && (
                 <TrailPanel crews={crews} trails={trails} trailCrew={trailCrew} trailWin={trailWin} setTrailWin={setTrailWin}
@@ -737,7 +737,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
         </div>
 
         <div className="card map-stage">
-          {trace?.kind === 'whatif' && trace.simulation && <div className="sim-banner" role="status">Simulation - not live state</div>}
+          {trace?.kind === 'whatif' && trace.simulation && <div className="sim-banner" role="status">{t('map.simBanner')}</div>}
           <div ref={boxRef} className="leaflet-host" />
           {basemapDown && (
             <div className="map-basemap-note" role="status">
@@ -791,8 +791,8 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
                   ) : null;
                 })}
                 {topoAreas.length > 0 && (
-                  <optgroup label="Imported topology">
-                    {topoAreas.length > 1 && <option value="topo:*">All imported topology</option>}
+                  <optgroup label={t('map.importedTopo')}>
+                    {topoAreas.length > 1 && <option value="topo:*">{t('map.allImportedTopo')}</option>}
                     {topoAreas.map((a) => <option key={a.mrid} value={`topo:${a.mrid}`}>{clean(a.name) || a.code} · {a.equipment.toLocaleString()}</option>)}
                   </optgroup>)}
               </select>
@@ -900,24 +900,24 @@ function TraceCard({ trace, busy, onRun, onClear }) {
     <button key={kind} className={`trace-btn${kind === 'section' ? '' : ' ghost'}`} disabled={!!busy} onClick={() => onRun(kind)}>{busy === kind ? busyLabel : label}</button>);
   const Notes = ({ r }) => <>
     {r.truncated && <div className="trace-note" style={{ color: '#b91c1c', fontWeight: 600 }}>{r.truncatedNote || t('map.truncated')}</div>}
-    {r.inferredNote && <div className="trace-note"><b>Inferred:</b> {r.inferredNote}</div>}
+    {r.inferredNote && <div className="trace-note"><b>{t('map.inferred')}</b> {r.inferredNote}</div>}
     {r.caveat && <div className="trace-note">{r.caveat}</div>}
   </>;
   const clear = <button className="trace-btn ghost" onClick={onClear}>{t('map.clearTrace')}</button>;
 
-  if (!trace) return <>{btn('section', t('map.traceBtn'), t('map.tracing'))}{btn('upstream', 'Trace to source', t('map.tracing'))}{btn('whatif', 'Simulate opening', 'Simulating…')}</>;
+  if (!trace) return <>{btn('section', t('map.traceBtn'), t('map.tracing'))}{btn('upstream', t('map.traceUpBtn'), t('map.tracing'))}{btn('whatif', t('map.simBtn'), t('map.simulating'))}</>;
   if (trace.found === false) return <><div className="trace-note">{trace.reason}</div>{clear}</>;
 
   if (trace.kind === 'upstream') return (
     <div className="trace-box">
-      <h4>Trace to source</h4>
+      <h4>{t('map.upTitle')}</h4>
       {trace.pathFound ? <>
         <div className="trace-stat">
-          <div><b>{trace.source.hops}</b><span>hops to substation</span></div>
-          <div><b>{trace.switchesOnPath.length}</b><span>switches on path</span></div>
+          <div><b>{trace.source.hops}</b><span>{t('map.hopsToSs')}</span></div>
+          <div><b>{trace.switchesOnPath.length}</b><span>{t('map.swOnPath')}</span></div>
         </div>
-        <KV k="Substation bus" v={trace.source.node} mono />
-        <KV k="Other substations reachable" v={String(trace.alternateSourcesInComponent)} />
+        <KV k={t('map.k.ssBus')} v={trace.source.node} mono />
+        <KV k={t('map.k.otherSs')} v={String(trace.alternateSourcesInComponent)} />
         {trace.switchesOnPath.length > 0 && <div className="trace-note">{trace.switchesOnPath.map((s) => `${s.cim_class} ${s.name || s.cim_mrid}`).join(', ')}</div>}
         <div className="trace-note">{trace.switchStateNote}</div>
       </> : <div className="trace-note" style={{ fontWeight: 600 }}>{trace.reason}</div>}
@@ -928,16 +928,16 @@ function TraceCard({ trace, busy, onRun, onClear }) {
     const dt = trace.distributionTransformers;
     return (
       <div className="trace-box sim">
-        <h4>Simulate opening · not live state</h4>
+        <h4>{t('map.simTitle')}</h4>
         {trace.assumedOpen.filter((d) => !d.effective).map((d) => <div key={d.cim_mrid} className="trace-note" style={{ fontWeight: 600 }}>{d.reason}</div>)}
         <div className="trace-stat">
-          <div><b>{trace.counts.lostDevices}</b><span>devices lose supply</span></div>
-          <div><b>{dt.count}</b><span>distribution transformers</span></div>
+          <div><b>{trace.counts.lostDevices}</b><span>{t('map.lostDevices')}</span></div>
+          <div><b>{dt.count}</b><span>{t('map.distTxs')}</span></div>
         </div>
-        <KV k="kVA affected" v={dt.kvaIsLowerBound ? `≥ ${dt.kvaTotal}` : String(dt.kvaTotal)} mono />
+        <KV k={t('map.k.kvaAffected')} v={dt.kvaIsLowerBound ? `≥ ${dt.kvaTotal}` : String(dt.kvaTotal)} mono />
         <div className="trace-note">{dt.label}</div>
-        <KV k="Source" v={trace.source.mrids.join(', ')} mono />
-        {trace.source.note && <div className="trace-note">{trace.source.note}{trace.source.alternateSourcesInComponent ? ` ${trace.source.alternateSourcesInComponent} other substation(s) are reachable in this component and are not used.` : ''}</div>}
+        <KV k={t('map.k.source')} v={trace.source.mrids.join(', ')} mono />
+        {trace.source.note && <div className="trace-note">{trace.source.note}{trace.source.alternateSourcesInComponent ? t('map.otherSsUnused', { n: trace.source.alternateSourcesInComponent }) : ''}</div>}
         <div className="trace-note">{trace.assumptions.baseline}</div>
         <Notes r={trace} />{clear}
       </div>);
@@ -954,7 +954,7 @@ function TraceCard({ trace, busy, onRun, onClear }) {
       {trace.sectionEquipment.length === 1 && trace.boundarySwitches.length === 0 ? (
         <div className="trace-note">{t('map.selfOnly')}</div>
       ) : trace.sectionEquipment.length < SMALL_SECTION && (
-        <div className="trace-note">A section this small is likely limited by missing connectivity data, not by the network itself.</div>)}
+        <div className="trace-note">{t('map.smallSection')}</div>)}
       <Notes r={trace} />{clear}
     </div>);
 }

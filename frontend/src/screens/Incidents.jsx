@@ -200,7 +200,7 @@ function IncidentDrawer({ inc, onClose, onChange, showOnMap }) {
           <div className="kv-row"><span className="k">{tr('col.zone')}</span><span className="v">{inc.zone}</span></div>
           <div className="kv-row"><span className="k">{tr('col.feeder')}</span><span className="v mono">{inc.feeder || '-'}</span></div>
           {inc.tripped_equipment && (
-            <div className="kv-row"><span className="k">Tripped equipment</span><span className="v">{inc.tripped_equipment.name || 'unnamed'} <span className="mono">({inc.tripped_equipment.cim_mrid})</span></span></div>
+            <div className="kv-row"><span className="k">{tr('inc.tripped')}</span><span className="v">{inc.tripped_equipment.name || tr('inc.unnamed')} <span className="mono">({inc.tripped_equipment.cim_mrid})</span></span></div>
           )}
           <div className="kv-row"><span className="k">{tr('inc.fCustomers')}</span><span className="v mono">{(inc.customers || 0).toLocaleString()}</span></div>
           <div className="kv-row"><span className="k">{tr('inc.fCause')}</span><span className="v">{inc.cause}</span></div>
@@ -326,6 +326,7 @@ function IncidentDrawer({ inc, onClose, onChange, showOnMap }) {
 // Verification at most; resolving stays with the crew's completion.
 const PLAN_TOPICS = ['oms.switching.confirmed', 'oms.switching.rejected', 'oms.incident.updated'];
 function IncidentSwitchingPlan({ inc, onChange }) {
+  useT();
   const [view, setView] = useState(null);
   const [log, setLog] = useState([]);
   const [crews, setCrews] = useState([]);
@@ -349,11 +350,11 @@ function IncidentSwitchingPlan({ inc, onChange }) {
 
   return (
     <>
-      <div style={{ margin: '18px 0 8px' }} className="eyebrow">Switching plan</div>
+      <div style={{ margin: '18px 0 8px' }} className="eyebrow">{tr('po.tabPlan')}</div>
       {!plan && !starting ? (
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>No switching plan for this incident.</span>
-          <button className="btn sm" onClick={() => setStarting(true)}>Start switching plan</button>
+          <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>{tr('inc.noPlan')}</span>
+          <button className="btn sm" onClick={() => setStarting(true)}>{tr('inc.startPlan')}</button>
         </div>
       ) : (
         <>
@@ -364,7 +365,7 @@ function IncidentSwitchingPlan({ inc, onChange }) {
             </div>
           )}
           <div style={{ display: 'flex', gap: 6, borderBottom: '1px solid var(--line)', marginBottom: 12 }}>
-            {[['plan', 'Switching plan'], ['log', `Safety log (${log.length})`]].map(([k, label]) => (
+            {[['plan', tr('po.tabPlan')], ['log', tr('po.tabLog', { n: log.length })]].map(([k, label]) => (
               <button key={k} className="btn sm" style={{ borderBottom: tab === k ? '2px solid var(--navy)' : undefined, borderRadius: '6px 6px 0 0' }} onClick={() => setTab(k)}>{label}</button>
             ))}
           </div>
@@ -384,7 +385,7 @@ function IncidentSwitchingPlan({ inc, onChange }) {
             ))}
           {tab === 'log' && <SafetyLog log={log} />}
           <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>
-            No work permits on a fault. Confirming the last restore step moves the incident to Pending Verification at most; the crew's completion still resolves it.
+            {tr('inc.planNote')}
           </div>
         </>
       )}
