@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
 import { SevBadge, StatusBadge, toast, focusAfter } from '../lib/ui.jsx';
+import { useT, t, tOr, locale } from '../lib/i18n.js';
 
 // Analytics -> Standard reports: the five standard OMS reports (backend
 // domain/standardReports.js). One report at a time, a date range, a zone
@@ -15,35 +16,37 @@ const KINDS = [
 const PRESETS = [['7', '7 days'], ['30', '30 days'], ['90', '90 days'], ['365', '1 year']];
 const iso = (d) => d.toISOString().slice(0, 10);
 const daysAgo = (n) => iso(new Date(Date.now() - n * 86400000));
-const when = (t) => (t ? new Date(t).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—');
-const dur = (m) => (m == null ? '—' : m < 60 ? `${m} min` : m < 1440 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${Math.floor(m / 1440)} d ${Math.floor((m % 1440) / 60)} h`);
-const num = (n) => (n == null ? '—' : Number(n).toLocaleString('en-IN'));
+const when = (v) => (v ? new Date(v).toLocaleString(locale(), { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—');
+const dur = (m) => (m == null ? '—' : m < 60 ? t('sr.dur.m', { m }) : m < 1440 ? t('sr.dur.h', { h: Math.floor(m / 60), m: m % 60 }) : t('sr.dur.d', { d: Math.floor(m / 1440), h: Math.floor((m % 1440) / 60) }));
+const num = (n) => (n == null ? '—' : Number(n).toLocaleString(locale()));
 const avg = (list, f) => (list.length ? Math.round(list.reduce((s, x) => s + f(x), 0) / list.length) : null);
+const cat = (c) => (c ? tOr(`sr.cat.${c}`, c) : c);
 
 // Headline figures above each report's table.
 function statsFor(r) {
   if (r.kind === 'history') {
     const ongoing = r.rows.filter((x) => !x.resolved_at).length;
-    return [['Outages', num(r.rows.length)], ['Customers affected', num(r.rows.reduce((s, x) => s + x.customers, 0))],
-      ['Still ongoing', num(ongoing)], ['Avg duration (restored)', dur(avg(r.rows.filter((x) => x.resolved_at), (x) => x.duration_min))]];
+    return [[t('sr.s.outages'), num(r.rows.length)], [t('sr.s.custAffected'), num(r.rows.reduce((s, x) => s + x.customers, 0))],
+      [t('sr.s.ongoing'), num(ongoing)], [t('sr.s.avgDurRestored'), dur(avg(r.rows.filter((x) => x.resolved_at), (x) => x.duration_min))]];
   }
   if (r.kind === 'cause') {
     const top = r.rows[0];
-    return [['Outages', num(r.incidents)], ['Cause categories', num(r.rows.length)], ['Top cause', top ? top.category : '—'], ['Top cause share', top ? `${top.share_pct}%` : '—']];
+    return [[t('sr.s.outages'), num(r.incidents)], [t('sr.s.causeCats'), num(r.rows.length)], [t('sr.s.topCause'), top ? cat(top.category) : '—'], [t('sr.s.topShare'), top ? `${top.share_pct}%` : '—']];
   }
   if (r.kind === 'recurring') {
-    return [['Flagged', num(r.rows.length)], ['Feeders', num(r.rows.filter((x) => x.kind === 'Feeder').length)],
-      ['Devices', num(r.rows.filter((x) => x.kind === 'Device').length)], ['Rule', `${r.minCount}+ in ${r.windowDays} days`]];
+    return [[t('sr.s.flagged'), num(r.rows.length)], [t('sr.s.feeders'), num(r.rows.filter((x) => x.kind === 'Feeder').length)],
+      [t('sr.s.devices'), num(r.rows.filter((x) => x.kind === 'Device').length)], [t('sr.s.rule'), t('sr.s.ruleVal', { n: r.minCount, d: r.windowDays })]];
   }
   if (r.kind === 'worst') {
-    return [['Worst feeder', r.feeders[0]?.key || '—'], ['Its customer-minutes', num(r.feeders[0]?.customer_minutes)],
-      ['Worst device', r.devices[0]?.key || '—'], ['Its outages', num(r.devices[0]?.outages)]];
+    return [[t('sr.s.worstFeeder'), r.feeders[0]?.key || '—'], [t('sr.s.itsCm'), num(r.feeders[0]?.customer_minutes)],
+      [t('sr.s.worstDevice'), r.devices[0]?.key || '—'], [t('sr.s.itsOutages'), num(r.devices[0]?.outages)]];
   }
-  return [['Closed cases', num(r.summary.closed)], ['Avg restoration', dur(r.summary.avg_restore_min)],
-    ['SLA met', r.summary.sla_met_pct == null ? '—' : `${r.summary.sla_met_pct}%`], ['Customers restored', num(r.rows.reduce((s, x) => s + x.customers, 0))]];
+  return [[t('sr.s.closed'), num(r.summary.closed)], [t('sr.s.avgRestore'), dur(r.summary.avg_restore_min)],
+    [t('sr.s.slaMet'), r.summary.sla_met_pct == null ? '—' : `${r.summary.sla_met_pct}%`], [t('sr.s.custRestored'), num(r.rows.reduce((s, x) => s + x.customers, 0))]];
 }
 
 export default function StandardReports() {
+  const { t } = useT();
   const [kind, setKind] = useState('history');
   const pickerRef = useRef(null);
   const [preset, setPreset] = useState('90');
@@ -72,55 +75,57 @@ export default function StandardReports() {
   }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const pickPreset = (p) => { setPreset(p); setFrom(daysAgo(Number(p))); setTo(iso(new Date())); };
-  const exportCsv = () => api.exportStandardReport(kind, params).catch((e) => toast(`Export failed: ${e.message}`, 'err'));
-  const [, title, about] = KINDS.find(([k]) => k === kind);
+  const exportCsv = () => api.exportStandardReport(kind, params).catch((e) => toast(t('sr.exportFailed', { e: e.message }), 'err'));
+  const [, titleEn, aboutEn] = KINDS.find(([k]) => k === kind);
+  const title = tOr(`sr.k.${kind}`, titleEn);
+  const about = tOr(`sr.k.${kind}.about`, aboutEn);
   const shown = data && data.kind === kind ? data : null;
 
   return (
     <div className="fk sr">
-      <div className="seg sr-kinds" role="group" aria-label="Report" ref={pickerRef}>
-        {KINDS.map(([k, l]) => <button key={k} aria-pressed={kind === k} className={kind === k ? 'on' : ''} onClick={() => { setKind(k); focusAfter(pickerRef.current); }}>{l}</button>)}
+      <div className="seg sr-kinds" role="group" aria-label={t('sr.report')} ref={pickerRef}>
+        {KINDS.map(([k, l]) => <button key={k} aria-pressed={kind === k} className={kind === k ? 'on' : ''} onClick={() => { setKind(k); focusAfter(pickerRef.current); }}>{tOr(`sr.k.${k}`, l)}</button>)}
       </div>
       <p className="sr-about">{about}</p>
 
       <div className="sr-filters">
         <div className="sr-field">
-          <span className="sr-label" id="sr-period">Period</span>
+          <span className="sr-label" id="sr-period">{t('sr.period')}</span>
           <div className="sr-row">
             <div className="seg" role="group" aria-labelledby="sr-period">
-              {PRESETS.map(([p, l]) => <button key={p} aria-pressed={preset === p} className={preset === p ? 'on' : ''} onClick={() => pickPreset(p)}>{l}</button>)}
+              {PRESETS.map(([p, l]) => <button key={p} aria-pressed={preset === p} className={preset === p ? 'on' : ''} onClick={() => pickPreset(p)}>{tOr(`sr.p${p}`, l)}</button>)}
             </div>
-            <input type="date" value={from} max={to} onChange={(e) => { setFrom(e.target.value); setPreset(''); }} aria-label="From date" />
-            <span className="muted">to</span>
-            <input type="date" value={to} min={from} onChange={(e) => { setTo(e.target.value); setPreset(''); }} aria-label="To date" />
+            <input type="date" value={from} max={to} onChange={(e) => { setFrom(e.target.value); setPreset(''); }} aria-label={t('sr.fromDate')} />
+            <span className="muted">{t('sr.to')}</span>
+            <input type="date" value={to} min={from} onChange={(e) => { setTo(e.target.value); setPreset(''); }} aria-label={t('sr.toDate')} />
           </div>
         </div>
         <div className="sr-field">
-          <label className="sr-label" htmlFor="sr-zone">Zone</label>
+          <label className="sr-label" htmlFor="sr-zone">{t('sr.zone')}</label>
           <select id="sr-zone" value={zone} onChange={(e) => setZone(e.target.value)}>
-            <option value="">All zones{zones.length ? ` (${zones.length})` : ''}</option>
+            <option value="">{t('sr.allZones')}{zones.length ? ` (${zones.length})` : ''}</option>
             {zones.map((z) => <option key={z} value={z}>{z}</option>)}
           </select>
         </div>
         {kind === 'recurring' && (
           <div className="sr-field">
-            <span className="sr-label" id="sr-rule">Flag when</span>
+            <span className="sr-label" id="sr-rule">{t('sr.flagWhen')}</span>
             <div className="sr-row" role="group" aria-labelledby="sr-rule">
-              <input type="number" min={2} max={20} value={minCount} onChange={(e) => setMinCount(Number(e.target.value) || 3)} aria-label="Minimum outages" className="sr-num" />
-              <span className="muted">or more outages within</span>
-              <input type="number" min={1} max={365} value={windowDays} onChange={(e) => setWindowDays(Number(e.target.value) || 30)} aria-label="Window in days" className="sr-num" />
-              <span className="muted">days</span>
+              <input type="number" min={2} max={20} value={minCount} onChange={(e) => setMinCount(Number(e.target.value) || 3)} aria-label={t('sr.minOutages')} className="sr-num" />
+              <span className="muted">{t('sr.orMore')}</span>
+              <input type="number" min={1} max={365} value={windowDays} onChange={(e) => setWindowDays(Number(e.target.value) || 30)} aria-label={t('sr.windowDays')} className="sr-num" />
+              <span className="muted">{t('sr.daysWord')}</span>
             </div>
           </div>
         )}
         <div className="grow" />
-        <button className="btn sm" onClick={exportCsv} disabled={!shown}>Export CSV</button>
+        <button className="btn sm" onClick={exportCsv} disabled={!shown}>{t('sr.exportCsv')}</button>
       </div>
 
       <div className="fk-range" role="status">
         <b>{title}</b>
-        {shown && <span className="muted"> · {zone || 'all zones'} · {from} to {to}</span>}
-        {busy && <span className="muted"> · updating…</span>}
+        {shown && <span className="muted"> · {zone || t('sr.allZonesLc')} · {t('sr.rangeTo', { from, to })}</span>}
+        {busy && <span className="muted">{t('sr.updating')}</span>}
         {err && <span className="fk-err"> {err}</span>}
       </div>
 
@@ -152,13 +157,15 @@ function Table({ label, head, children, empty }) {
 }
 
 function History({ rows }) {
+  const { t } = useT();
+  const head = ['incident', 'opened', 'restored', 'duration', 'zone', 'feeder', 'device', 'severity', 'customers', 'cause', 'status'].map((k) => t(`sr.c.${k}`));
   return (
-    <Table label="Outage history" head={['Incident', 'Opened', 'Restored', 'Duration', 'Zone', 'Feeder', 'Device', 'Severity', 'Customers', 'Cause', 'Status']} empty={!rows.length && 'No outages in this period.'}>
+    <Table label={t('sr.t.history')} head={head} empty={!rows.length && t('sr.e.noOutages')}>
       {rows.slice(0, 500).map((r) => (
         <tr key={r.id}>
-          <td className="mono">{r.id}</td><td>{when(r.opened_at)}</td><td>{when(r.resolved_at)}</td><td>{dur(r.duration_min)}{!r.resolved_at && <span className="muted"> (ongoing)</span>}</td>
+          <td className="mono">{r.id}</td><td>{when(r.opened_at)}</td><td>{when(r.resolved_at)}</td><td>{dur(r.duration_min)}{!r.resolved_at && <span className="muted">{t('sr.ongoing')}</span>}</td>
           <td>{r.zone}</td><td className="mono">{r.feeder}</td><td className="mono">{r.device}</td>
-          <td><SevBadge sev={r.severity} /></td><td>{num(r.customers)}</td><td title={r.cause}>{r.category}</td><td><StatusBadge status={r.status} /></td>
+          <td><SevBadge sev={r.severity} /></td><td>{num(r.customers)}</td><td title={r.cause}>{cat(r.category)}</td><td><StatusBadge status={r.status} /></td>
         </tr>
       ))}
     </Table>
@@ -166,12 +173,14 @@ function History({ rows }) {
 }
 
 function Cause({ rows }) {
+  const { t } = useT();
   const max = Math.max(1, ...rows.map((r) => r.outages));
+  const head = ['cause', 'outages', 'share', 'custAffected', 'cm', 'avgDur'].map((k) => t(`sr.c.${k}`));
   return (
-    <Table label="Cause analysis" head={['Cause', 'Outages', 'Share', 'Customers affected', 'Customer-minutes', 'Avg duration']} empty={!rows.length && 'No outages in this period.'}>
+    <Table label={t('sr.t.cause')} head={head} empty={!rows.length && t('sr.e.noOutages')}>
       {rows.map((r) => (
         <tr key={r.category}>
-          <td><b>{r.category}</b></td>
+          <td><b>{cat(r.category)}</b></td>
           <td>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
               <span aria-hidden="true" style={{ display: 'inline-block', height: 8, width: Math.round((r.outages / max) * 120), background: 'var(--focus-ring)', borderRadius: 4 }} />
@@ -186,12 +195,14 @@ function Cause({ rows }) {
 }
 
 function Recurring({ rows }) {
+  const { t } = useT();
+  const head = ['type', 'feederDevice', 'zone', 'outages', 'mostInWindow', 'first', 'last', 'avgGap', 'mainCause'].map((k) => t(`sr.c.${k}`));
   return (
-    <Table label="Recurring trouble" head={['Type', 'Feeder / device', 'Zone', 'Outages', 'Most in window', 'First', 'Last', 'Avg gap', 'Main cause']} empty={!rows.length && 'Nothing recurring with these settings.'}>
+    <Table label={t('sr.t.recurring')} head={head} empty={!rows.length && t('sr.e.noRecurring')}>
       {rows.map((r) => (
         <tr key={r.kind + r.key}>
-          <td>{r.kind}</td><td className="mono">{r.key}</td><td>{r.zone}</td><td>{r.outages}</td><td><b>{r.max_in_window}</b></td>
-          <td>{when(r.first_at)}</td><td>{when(r.last_at)}</td><td>{r.avg_gap_days == null ? '—' : `${r.avg_gap_days} d`}</td><td>{r.top_cause}</td>
+          <td>{tOr(`sr.kind.${r.kind}`, r.kind)}</td><td className="mono">{r.key}</td><td>{r.zone}</td><td>{r.outages}</td><td><b>{r.max_in_window}</b></td>
+          <td>{when(r.first_at)}</td><td>{when(r.last_at)}</td><td>{r.avg_gap_days == null ? '—' : t('sr.days', { n: r.avg_gap_days })}</td><td>{cat(r.top_cause)}</td>
         </tr>
       ))}
     </Table>
@@ -199,36 +210,39 @@ function Recurring({ rows }) {
 }
 
 function Worst({ feeders, devices }) {
+  const { t } = useT();
   const rows = (list) => list.map((r) => (
     <tr key={r.key}>
       <td>{r.rank}</td><td className="mono">{r.key}</td><td>{r.zone}</td><td>{r.outages}</td><td>{r.open}</td>
       <td>{num(r.customers)}</td><td><b>{num(r.customer_minutes)}</b></td><td>{dur(r.avg_duration_min)}</td>
     </tr>
   ));
-  const head = (what) => ['Rank', what, 'Zone', 'Outages', 'Still open', 'Customers affected', 'Customer-minutes', 'Avg duration'];
+  const head = (what) => [t('sr.c.rank'), what, t('sr.c.zone'), t('sr.c.outages'), t('sr.c.stillOpen'), t('sr.c.custAffected'), t('sr.c.cm'), t('sr.c.avgDur')];
   return (
     <div style={{ display: 'grid', gap: 16 }}>
       <div>
-        <h3 style={{ margin: '4px 0 8px', fontSize: 14 }}>Worst feeders <span className="muted" style={{ fontWeight: 400 }}>· ranked by customer-minutes lost</span></h3>
-        <Table label="Worst feeders" head={head('Feeder')} empty={!feeders.length && 'No feeder outages in this period.'}>{rows(feeders)}</Table>
+        <h3 style={{ margin: '4px 0 8px', fontSize: 14 }}>{t('sr.t.worstFeeders')} <span className="muted" style={{ fontWeight: 400 }}>{t('sr.byCm')}</span></h3>
+        <Table label={t('sr.t.worstFeeders')} head={head(t('sr.c.feeder'))} empty={!feeders.length && t('sr.e.noFeeder')}>{rows(feeders)}</Table>
       </div>
       <div>
-        <h3 style={{ margin: '4px 0 8px', fontSize: 14 }}>Worst devices <span className="muted" style={{ fontWeight: 400 }}>· SCADA-tagged equipment</span></h3>
-        <Table label="Worst devices" head={head('Device (SCADA tag)')} empty={!devices.length && 'No SCADA-tagged outages in this period.'}>{rows(devices)}</Table>
+        <h3 style={{ margin: '4px 0 8px', fontSize: 14 }}>{t('sr.t.worstDevices')} <span className="muted" style={{ fontWeight: 400 }}>{t('sr.scadaEq')}</span></h3>
+        <Table label={t('sr.t.worstDevices')} head={head(t('sr.c.deviceTag'))} empty={!devices.length && t('sr.e.noScada')}>{rows(devices)}</Table>
       </div>
     </div>
   );
 }
 
 function Closed({ rows }) {
+  const { t } = useT();
+  const head = ['incident', 'opened', 'restored', 'restoreTime', 'zone', 'feeder', 'customers', 'cause', 'restoredBy', 'sla'].map((k) => t(`sr.c.${k}`));
   return (
     <>
-      <Table label="Closed cases" head={['Incident', 'Opened', 'Restored', 'Restoration time', 'Zone', 'Feeder', 'Customers', 'Cause', 'Restored by', 'SLA']} empty={!rows.length && 'No closed cases in this period.'}>
+      <Table label={t('sr.t.closed')} head={head} empty={!rows.length && t('sr.e.noClosed')}>
         {rows.slice(0, 500).map((r) => (
           <tr key={r.id}>
             <td className="mono">{r.id}</td><td>{when(r.opened_at)}</td><td>{when(r.resolved_at)}</td><td>{dur(r.duration_min)}</td>
-            <td>{r.zone}</td><td className="mono">{r.feeder}</td><td>{num(r.customers)}</td><td title={r.cause}>{r.category}</td><td>{r.restored_by || '—'}</td>
-            <td>{r.sla_met == null ? <span className="muted">no SLA</span> : r.sla_met ? 'Met' : <b style={{ color: 'var(--crit)' }}>Missed</b>}</td>
+            <td>{r.zone}</td><td className="mono">{r.feeder}</td><td>{num(r.customers)}</td><td title={r.cause}>{cat(r.category)}</td><td>{r.restored_by || '—'}</td>
+            <td>{r.sla_met == null ? <span className="muted">{t('sr.noSla')}</span> : r.sla_met ? t('sr.met') : <b style={{ color: 'var(--crit)' }}>{t('sr.missed')}</b>}</td>
           </tr>
         ))}
       </Table>

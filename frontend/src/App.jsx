@@ -15,6 +15,7 @@ import Admin from './screens/Admin.jsx';
 import PlannedOutages from './screens/PlannedOutages.jsx';
 import WorkOrders from './screens/WorkOrders.jsx';
 import { currentUser } from './lib/auth.js';
+import { useT, t, setLang, LANGS } from './lib/i18n.js';
 import IncidentSearch from './components/IncidentSearch.jsx';
 import ProfileMenu from './components/ProfileMenu.jsx';
 import AboutOverlay from './components/AboutOverlay.jsx';
@@ -28,8 +29,8 @@ class ScreenBoundary extends Component {
     if (this.state.err) {
       return (
         <div className="screen-error">
-          <h2>This screen hit an error</h2>
-          <p>The rest of the app is still working - pick another tab, or reload.</p>
+          <h2>{t('app.errTitle')}</h2>
+          <p>{t('app.errBody')}</p>
           <pre>{String(this.state.err.message || this.state.err)}</pre>
         </div>
       );
@@ -72,42 +73,43 @@ const TAPE_LABEL = {
 };
 
 function LiveTape() {
+  const { t } = useT();
   const [events, setEvents] = useState([]);
   useEffect(() => {
     const topics = Object.keys(TAPE_LABEL);
     const mk = (topic) => (p) => {
-      const [label, cls] = TAPE_LABEL[topic];
+      const [, cls] = TAPE_LABEL[topic];
       let detail = '';
       if (topic.startsWith('oms.incident')) detail = `${p.id} . ${p.zone} . ${p.status}`;
       else if (topic === 'oms.permit.changed') detail = `${p.permit_no} . ${p.crew_id} . ${p.state}`;
       else if (topic === 'oms.switching.confirmed') detail = `${p.phase} ${p.seq} . ${p.device_label} . ${p.confirmed_by}`;
       else if (topic === 'oms.switching.rejected') detail = `${p.code}`;
-      else if (topic === 'oms.planned.crew_report') detail = `${p.incidentId} . ${p.report?.crew_id} . ${p.report?.kind === 'delay' ? 'DELAY' : 'site report'}`;
+      else if (topic === 'oms.planned.crew_report') detail = `${p.incidentId} . ${p.report?.crew_id} . ${p.report?.kind === 'delay' ? t('tape.delay') : t('tape.siteReport')}`;
       else if (topic.startsWith('scada')) detail = `${p.tag} . ${p.condition}`;
       else if (topic === 'tcs.call.received') detail = `${p.customer} . ${p.category}`;
       else if (topic === 'crew.updated') detail = `${p.name} . ${p.status}`;
-      else if (topic === 'crew.job.updated') detail = `${p.id} . ${p.reassignRequest ? 'crew asks for REASSIGNMENT' : p.status}`;
-      else if (topic === 'oms.message.posted') detail = `${p.sender_role === 'field_crew' ? 'crew ' : ''}${p.sender} . ${String(p.body || '').slice(0, 60)}`;
-      else if (topic === 'crew.tracking.changed') detail = `${p.crewName} . ${p.state === 'on' ? 'tracking on' : 'tracking OFF'}`;
-      else if (topic === 'crew.location.stale') detail = `${p.crewName} . ${p.stale ? `no position for ${p.minutes} min` : 'positions resumed'}`;
-      setEvents((e) => [{ id: Math.random(), label, cls, detail, t: hhmm(new Date().toISOString()) }, ...e].slice(0, 14));
+      else if (topic === 'crew.job.updated') detail = `${p.id} . ${p.reassignRequest ? t('tape.reassign') : p.status}`;
+      else if (topic === 'oms.message.posted') detail = `${p.sender_role === 'field_crew' ? t('tape.crewPrefix') : ''}${p.sender} . ${String(p.body || '').slice(0, 60)}`;
+      else if (topic === 'crew.tracking.changed') detail = `${p.crewName} . ${p.state === 'on' ? t('tape.trackOn') : t('tape.trackOff')}`;
+      else if (topic === 'crew.location.stale') detail = `${p.crewName} . ${p.stale ? t('tape.noPos', { n: p.minutes }) : t('tape.posResumed')}`;
+      setEvents((e) => [{ id: Math.random(), topic, cls, detail, t: hhmm(new Date().toISOString()) }, ...e].slice(0, 14));
     };
     const hs = topics.map((t) => { const h = mk(t); socket.on(t, h); return [t, h]; });
     return () => hs.forEach(([t, h]) => socket.off(t, h));
   }, []);
 
-  const feed = events.length ? events : [{ id: 0, label: 'SYSTEM', cls: 'ok', detail: 'Field telemetry stream connected - awaiting events', t: hhmm(new Date().toISOString()) }];
+  const feed = events.length ? events : [{ id: 0, topic: 'system', cls: 'ok', detail: t('app.feedIdle'), t: hhmm(new Date().toISOString()) }];
   const doubled = [...feed, ...feed];
   return (
     // Not a live region: the tape updates on every crew GPS ping, and announcing each one
     // drowns out everything else for screen-reader users (WCAG 2.2.2). It stays readable in
     // browse mode; the second copy only exists for the scrolling animation, so it is hidden.
-    <section className="tape" aria-label="Live event feed">
-      <div className="badge"><i />Live</div>
+    <section className="tape" aria-label={t('app.liveFeed')}>
+      <div className="badge"><i />{t('app.live')}</div>
       <div className="track">
         {doubled.map((e, idx) => (
           <span className={`ev ${e.cls}`} key={e.id + '-' + idx} aria-hidden={idx >= feed.length || undefined}>
-            <span className="t">{e.t}</span><b>{e.label}</b> {e.detail}
+            <span className="t">{e.t}</span><b>{t(`tape.${e.topic}`)}</b> {e.detail}
           </span>
         ))}
       </div>
@@ -116,6 +118,7 @@ function LiveTape() {
 }
 
 export default function App() {
+  const { t, lang } = useT();
   const [tab, setTab] = useState('dashboard');
   // Choosing a screen in the rail moves focus to that screen, so the next Tab
   // reaches its first control instead of the header controls again (WCAG 2.4.1, 2.4.3).
@@ -139,12 +142,12 @@ export default function App() {
   // every screen, and keep it up long enough to be noticed.
   useEffect(() => {
     const onTracking = (p) => {
-      if (p.alert) toast(`${p.crewName} (${p.crewId}): location tracking is OFF, ${p.reasonText}`, 'err', 20000);
-      else if (p.state === 'on') toast(`${p.crewName} (${p.crewId}): location tracking is on`);
+      if (p.alert) toast(t('tape.tToastOff', { name: p.crewName, id: p.crewId, reason: p.reasonText }), 'err', 20000);
+      else if (p.state === 'on') toast(t('tape.tToastOn', { name: p.crewName, id: p.crewId }));
     };
     const onStale = (p) => {
-      if (p.stale) toast(`${p.crewName} (${p.crewId}): no position for ${p.minutes} min, tracking is on but the phone has stopped reporting (Location off, no signal, or app stopped)`, 'err', 20000);
-      else toast(`${p.crewName} (${p.crewId}): positions are coming in again`);
+      if (p.stale) toast(t('tape.tStale', { name: p.crewName, id: p.crewId, n: p.minutes }), 'err', 20000);
+      else toast(t('tape.tResumed', { name: p.crewName, id: p.crewId }));
     };
     socket.on('crew.tracking.changed', onTracking);
     socket.on('crew.location.stale', onStale);
@@ -166,8 +169,8 @@ export default function App() {
 
   // Crew messages and reassignment requests must be seen on every screen.
   useEffect(() => {
-    const onMessage = (m) => { if (m?.sender_role === 'field_crew') toast(`Message from crew ${m.crew_id || m.sender}${m.job_id ? ` (${m.job_id})` : ''}: ${m.body}`, 'err', 15000); };
-    const onJob = (j) => { if (j?.reassignRequest) toast(`Crew ${j.reassignRequest.crew_id} asks to be taken off ${j.id}: "${j.reassignRequest.reason}" - open the incident to reassign`, 'err', 20000); };
+    const onMessage = (m) => { if (m?.sender_role === 'field_crew') toast(t('tape.tMsg', { crew: m.crew_id || m.sender, job: m.job_id ? ` (${m.job_id})` : '', body: m.body }), 'err', 15000); };
+    const onJob = (j) => { if (j?.reassignRequest) toast(t('tape.tReassign', { crew: j.reassignRequest.crew_id, id: j.id, reason: j.reassignRequest.reason }), 'err', 20000); };
     socket.on('oms.message.posted', onMessage);
     socket.on('crew.job.updated', onJob);
     return () => { socket.off('oms.message.posted', onMessage); socket.off('crew.job.updated', onJob); };
@@ -176,12 +179,12 @@ export default function App() {
   // OMS-01: switching attempted out of order, or a permit waiting for the
   // control room, must be seen on every screen.
   useEffect(() => {
-    const onRejected = (p) => toast(`Switching step REJECTED (${p.code}): ${p.message}`, 'err', 20000);
-    const onPermit = (p) => { if (p.state === 'requested') toast(`Permit ${p.permit_no} requested by crew ${p.crew_id}: waiting for issue`, 'err', 20000); };
+    const onRejected = (p) => toast(t('tape.tRejected', { code: p.code, msg: p.message }), 'err', 20000);
+    const onPermit = (p) => { if (p.state === 'requested') toast(t('tape.tPermit', { no: p.permit_no, crew: p.crew_id }), 'err', 20000); };
     // A crew delay report waits for the control room to apply or dismiss it.
     const onCrewReport = (p) => (p.report?.kind === 'delay'
-      ? toast(`Crew ${p.report.crew_id} reports a DELAY on ${p.incidentId} (${p.zone}): open Planned outages to apply & notify`, 'err', 20000)
-      : toast(`Crew ${p.report?.crew_id} site report on ${p.incidentId}: ${p.report?.note || ''}`));
+      ? toast(t('tape.tDelay', { crew: p.report.crew_id, id: p.incidentId, zone: p.zone }), 'err', 20000)
+      : toast(t('tape.tSite', { crew: p.report?.crew_id, id: p.incidentId, note: p.report?.note || '' })));
     socket.on('oms.switching.rejected', onRejected);
     socket.on('oms.permit.changed', onPermit);
     socket.on('oms.planned.crew_report', onCrewReport);
@@ -192,41 +195,46 @@ export default function App() {
   const nav = NAV.filter((n) => !n[4] || n[4].some((r) => roles.includes(r)));
   const active = nav.find((n) => n[0] === tab) || nav[0];
   const Screen = active[3];
+  const navLabel = (id) => t(`nav.${id}`);
 
   const header = (
         <header className="cmd">
           <div>
-            <h1>{active[1]}</h1>
-            <div className="sub">Uttarakhand Power Corp . Ganga Corridor Control Centre</div>
+            <h1>{navLabel(active[0])}</h1>
+            <div className="sub">{t('app.subtitle')}</div>
           </div>
           <div className="grow" />
-          <div className="conn" title={up ? 'Live link to control-room backend' : 'ReconnectingΓÇª'}>
+          <div className="conn" title={up ? t('app.connTitleUp') : t('app.connTitleDown')}>
             <span className={`dot ${up ? 'up' : 'down'}`} />
-            {up ? 'SCADA link live' : 'Reconnecting'}
+            {up ? t('app.connLive') : t('app.reconnecting')}
           </div>
           <div className="clock mono">{clock}</div>
              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 12 }}>
                <div style={{ marginLeft: 12, width: 260, position: 'relative', display: 'flex', alignItems: 'center' }}>
                  <IncidentSearch onOpen={(inc) => openIncident(inc.id)} />
                </div>
+               {/* P8.7c: UI language; also sets <html lang> for screen readers. */}
+               <select className="lang-select" value={lang} onChange={(e) => setLang(e.target.value)} aria-label={`${t('app.language')} / Language`}>
+                 {LANGS.map(([k, l]) => <option key={k} value={k} lang={k}>{l}</option>)}
+               </select>
                <ProfileMenu />
              </div>
            </header>
   );
   return (
     <div className="shell">
-      <a className="skip-link" href="#main-content" onClick={(e) => { e.preventDefault(); mainRef.current?.focus(); }}>Skip to main content</a>
-      <nav className="rail" aria-label="Primary">
+      <a className="skip-link" href="#main-content" onClick={(e) => { e.preventDefault(); mainRef.current?.focus(); }}>{t('app.skip')}</a>
+      <nav className="rail" aria-label={t('app.primaryNav')}>
         <div className="brand" title="GridQ"><img src="/gridq-mark.png" alt="GridQ" className="brand-img" /></div>
-        {nav.map(([id, label, icon]) => (
+        {nav.map(([id, , icon]) => (
           <button key={id} className={`navbtn ${tab === id ? 'on' : ''}`}
-            onClick={() => goTab(id)} aria-current={tab === id} aria-label={label}>
+            onClick={() => goTab(id)} aria-current={tab === id} aria-label={navLabel(id)}>
             <Icon name={icon} />
-            <span className="tip">{label}</span>
+            <span className="tip">{navLabel(id)}</span>
           </button>
         ))}
         <div className="spacer" />
-        <button className="brand brand-btn" title="About GridQ" aria-label="About GridQ" onClick={() => setShowAbout(true)}>
+        <button className="brand brand-btn" title={t('app.about')} aria-label={t('app.about')} onClick={() => setShowAbout(true)}>
           <img src="/spintech-logo.png" alt="Sharika SpinTech" className="brand-img" />
         </button>
       </nav>
@@ -243,7 +251,7 @@ export default function App() {
           <div className="grow" />
           <div className="masthead-brand masthead-brand-right">
             <div className="masthead-text masthead-text-right">
-              <div className="masthead-tag">Uttarakhand Power Corporation Limited</div>
+              <div className="masthead-tag">{t('app.upcl')}</div>
             </div>
             <img src="/upcl-logo.png" alt="UPCL" className="masthead-logo" />
           </div>
@@ -258,7 +266,7 @@ export default function App() {
 
         {/* onKeyDown handles Esc bubbling up from the screen's own controls (see escToRail). */}
         {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
-        <main className="content" id="main-content" ref={mainRef} tabIndex={-1} aria-label={active[1]} onKeyDown={escToRail}>
+        <main className="content" id="main-content" ref={mainRef} tabIndex={-1} aria-label={navLabel(active[0])} onKeyDown={escToRail}>
           <AnimatePresence mode="wait">
             <motion.div
               key={tab}
@@ -278,7 +286,7 @@ export default function App() {
 
         <div className="powered-by">
           <img src="/spintech-logo.png" alt="" />
-          Powered by Sharika SpinTech
+          {t('app.poweredBy')}
         </div>
       </div>
 

@@ -3,6 +3,7 @@ import { api, socket } from '../lib/api.js';
 import { Icon, SevBadge, StatusBadge, timeAgo, hhmm, useLiveRefresh, toast, useDialog, crewBusyText, RowButton } from '../lib/ui.jsx';
 import { Drawer, DrawerContent } from '../components/ui/drawer.jsx';
 import { currentUser } from '../lib/auth.js';
+import { useT, tOr, t as tr } from '../lib/i18n.js';
 
 // Creating an incident and returning one for correction are control-room
 // actions (the API refuses other roles, OMS-03).
@@ -14,6 +15,7 @@ const SEVS = ['all', 'critical', 'high', 'medium', 'low'];
 const STATS = ['all', 'open', 'dispatched', 'in_progress', 'pending', 'resolved', 'planned'];
 
 export default function Incidents({ openId, focusIncidentId, clearFocus, showOnMap } = {}) {
+  const { t } = useT();
   const [inc, setInc] = useState([]);
   const [sev, setSev] = useState('all');
   const [st, setSt] = useState('all');
@@ -52,27 +54,27 @@ export default function Incidents({ openId, focusIncidentId, clearFocus, showOnM
   return (
     <>
       <div className="page-head">
-        <div><div className="eyebrow">Lifecycle</div><h2>Incidents</h2>
-          <p>Detect, classify, dispatch and restore - every transition audited.</p></div>
-        {isControlRoom() && <button className="btn primary" onClick={() => setShowNew(true)}><Icon name="plus" size={16} /> New incident</button>}
+        <div><div className="eyebrow">{t('inc.eyebrow')}</div><h2>{t('inc.title')}</h2>
+          <p>{t('inc.intro')}</p></div>
+        {isControlRoom() && <button className="btn primary" onClick={() => setShowNew(true)}><Icon name="plus" size={16} /> {t('inc.new')}</button>}
       </div>
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
-        {SEVS.map((s) => <button key={s} className={`pill ${sev === s ? 'on' : ''}`} onClick={() => setSev(s)}>{s === 'all' ? 'All severities' : s}</button>)}
+        {SEVS.map((s) => <button key={s} className={`pill ${sev === s ? 'on' : ''}`} onClick={() => setSev(s)}>{s === 'all' ? t('inc.allSev') : t(`sev.${s}`)}</button>)}
         <span style={{ width: 1, background: 'var(--line)', margin: '0 4px' }} />
-        {STATS.map((s) => <button key={s} className={`pill ${st === s ? 'on' : ''}`} onClick={() => setSt(s)}>{s === 'all' ? 'All statuses' : s === 'planned' ? 'Planned outages' : s.replace('_', ' ')}</button>)}
+        {STATS.map((s) => <button key={s} className={`pill ${st === s ? 'on' : ''}`} onClick={() => setSt(s)}>{s === 'all' ? t('inc.allStatus') : s === 'planned' ? t('inc.planned') : t(`st.${s}`)}</button>)}
       </div>
 
       <div className="card">
         <table>
-          <thead><tr><th>ID</th><th>Severity</th><th>Type</th><th>Zone</th><th>Feeder</th><th>Customers</th><th>Opened</th><th>Status</th></tr></thead>
+          <thead><tr>{['id', 'severity', 'type', 'zone', 'feeder', 'customers', 'opened', 'status'].map((c) => <th key={c}>{t(`col.${c}`)}</th>)}</tr></thead>
           <tbody>
             {rows.map((i) => (
               <tr key={i.id} className="click" onClick={() => open(i)}>
                 {/* The row click is for the mouse; the ID button is the keyboard / screen-reader way in (WCAG 2.1.1). */}
-                <td className="id-cell"><RowButton label={`Open incident ${i.id}`} onActivate={() => open(i)}>{i.id}</RowButton></td>
+                <td className="id-cell"><RowButton label={t('inc.open', { id: i.id })} onActivate={() => open(i)}>{i.id}</RowButton></td>
                 <td><SevBadge sev={i.severity} /></td>
-                <td>{i.type}</td>
+                <td>{tOr(`type.${i.type}`, i.type)}</td>
                 <td>{i.zone}</td>
                 <td className="mono" style={{ fontSize: 12 }}>{i.feeder || '-'}</td>
                 <td className="mono">{(i.customers || 0).toLocaleString()}</td>
@@ -80,7 +82,7 @@ export default function Incidents({ openId, focusIncidentId, clearFocus, showOnM
                 <td><StatusBadge status={i.status} /><ScadaBadges inc={i} /></td>
               </tr>
             ))}
-            {!rows.length && <tr><td colSpan={8}><div className="empty"><span className="disp">Nothing matches</span>Adjust the filters above.</div></td></tr>}
+            {!rows.length && <tr><td colSpan={8}><div className="empty"><span className="disp">{t('inc.nothing')}</span>{t('inc.adjust')}</div></td></tr>}
           </tbody>
         </table>
       </div>
@@ -93,21 +95,23 @@ export default function Incidents({ openId, focusIncidentId, clearFocus, showOnM
 
 // OMS-02: SCADA restoration markers.
 function ScadaBadges({ inc }) {
+  const { t } = useT();
   return (
     <>
-      {inc.momentary && <span className="chip chip-merged" style={{ marginLeft: 6 }}>Momentary</span>}
-      {inc.restored_by === 'SCADA' && <span className="chip chip-ok" style={{ marginLeft: 6 }}>Restored by SCADA</span>}
+      {inc.momentary && <span className="chip chip-merged" style={{ marginLeft: 6 }}>{t('inc.momentary')}</span>}
+      {inc.restored_by === 'SCADA' && <span className="chip chip-ok" style={{ marginLeft: 6 }}>{t('inc.restoredScada')}</span>}
     </>
   );
 }
 
 function predictionText(p) {
-  if (p.method === 'none') return 'Not available - feeder not in network model';
-  if (p.method === 'cim-trace') return `${p.transformers} transformers (CIM trace)`;
-  return `${p.transformers} transformers, ~${(p.customers_estimate || 0).toLocaleString()} customers (feeder-level)`;
+  if (p.method === 'none') return tr('drw.predNone');
+  if (p.method === 'cim-trace') return tr('drw.predCim', { n: p.transformers });
+  return tr('drw.predFeeder', { n: p.transformers, c: (p.customers_estimate || 0).toLocaleString() });
 }
 
 function IncidentDrawer({ inc, onClose, onChange, showOnMap }) {
+  useT();
   const [busy, setBusy] = useState(false);
   // vaul neither moves focus in (autoFocus is off by default) nor knows the row that opened it:
   // remember the opener and give focus back on close (WCAG 2.4.3).
@@ -134,23 +138,23 @@ function IncidentDrawer({ inc, onClose, onChange, showOnMap }) {
   // Timeline events whose checklist is shown; collapsed again on every open.
   const [expanded, setExpanded] = useState({});
   const doReturn = async () => {
-    if (!reason.trim()) { toast('Say what needs correcting', 'err'); return; }
+    if (!reason.trim()) { toast(tr('drw.sayWhat'), 'err'); return; }
     setBusy(true);
     try {
       await api.returnForCorrection(inc.id, reason.trim());
-      toast(`${inc.id} returned to the crew for correction`);
+      toast(tr('drw.returned', { id: inc.id }));
       setReturning(false); setReason(''); onChange(); loadReport();
     } catch (e) { toast(e.message, 'err'); } finally { setBusy(false); }
   };
 
   const doStatus = async (status) => {
     setBusy(true);
-    try { await api.setStatus(inc.id, status); toast(`${inc.id} -> ${status.replace('_', ' ')}`); onChange(); }
+    try { await api.setStatus(inc.id, status); toast(`${inc.id} -> ${tOr(`st.${status}`, status.replace('_', ' '))}`); onChange(); }
     catch (e) { toast(e.message, 'err'); } finally { setBusy(false); }
   };
   const doAssign = async (crewId) => {
     setBusy(true);
-    try { await api.assign(inc.id, crewId, 'Normal'); toast('Crew assigned'); onChange(); loadRequests(); }
+    try { await api.assign(inc.id, crewId, 'Normal'); toast(tr('drw.assigned')); onChange(); loadRequests(); }
     catch (e) { toast(e.message, 'err'); } finally { setBusy(false); }
   };
   // A crew asking to be taken off this incident's job (crew app).
@@ -159,19 +163,19 @@ function IncidentDrawer({ inc, onClose, onChange, showOnMap }) {
   useEffect(() => { loadRequests(); }, [inc.id]); // eslint-disable-line
   useLiveRefresh(['crew.job.updated', 'oms.incident.updated'], loadRequests);
   const doDismissRequest = async (r) => {
-    const note = window.prompt(`Decline ${r.crew_id}'s request? Optional note for the crew:`, '');
+    const note = window.prompt(tr('drw.declinePrompt', { crew: r.crew_id }), '');
     if (note === null) return;
     setBusy(true);
-    try { await api.dismissReassignRequest(r.id, note); toast('Request declined - the crew was told to continue'); loadRequests(); onChange(); }
+    try { await api.dismissReassignRequest(r.id, note); toast(tr('drw.declined')); loadRequests(); onChange(); }
     catch (e) { toast(e.message, 'err'); } finally { setBusy(false); }
   };
   const [ertInput, setErtInput] = useState('');
   const doSetErt = async () => {
-    if (!ertInput) { toast('Pick a date/time first', 'err'); return; }
+    if (!ertInput) { toast(tr('drw.pickDate'), 'err'); return; }
     setBusy(true);
     try {
       await api.setErt(inc.id, new Date(ertInput).toISOString());
-      toast('Restoration estimate updated - customers notified if it moved significantly');
+      toast(tr('drw.ertUpdated'));
       onChange();
     } catch (e) { toast(e.message, 'err'); } finally { setBusy(false); }
   };
@@ -181,70 +185,70 @@ function IncidentDrawer({ inc, onClose, onChange, showOnMap }) {
   return (
     <Drawer direction="right" open={true} onOpenChange={(open) => { if (!open) onClose(); }} handleOnly
       autoFocus /* eslint-disable-line jsx-a11y/no-autofocus -- vaul prop: move focus into the dialog it opens */>
-      <DrawerContent aria-label={`Incident ${inc.id} details`} style={{ width: 'min(440px, 94vw)', height: '100vh', borderRadius: 0 }}>
+      <DrawerContent aria-label={tr('drw.details', { id: inc.id })} style={{ width: 'min(440px, 94vw)', height: '100vh', borderRadius: 0 }}>
         <div className="drawer-h">
           <div>
             <div className="id-cell" style={{ fontSize: 13 }}>{inc.id}</div>
-            <div style={{ fontFamily: 'var(--disp)', fontSize: 18, fontWeight: 600, marginTop: 3 }}>{inc.type}</div>
+            <div style={{ fontFamily: 'var(--disp)', fontSize: 18, fontWeight: 600, marginTop: 3 }}>{tOr(`type.${inc.type}`, inc.type)}</div>
             <div style={{ display: 'flex', gap: 7, marginTop: 8, flexWrap: 'wrap' }}><SevBadge sev={inc.severity} /><StatusBadge status={inc.status} /><ScadaBadges inc={inc} /><LockBadge locked={locked} undoUntil={undoUntil} /></div>
           </div>
-          <button className="iconbtn" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
+          <button className="iconbtn" onClick={onClose} aria-label={tr('inc.close')}><Icon name="x" size={16} /></button>
         </div>
         <div className="drawer-b">
-          <div className="kv-row"><span className="k">Zone</span><span className="v">{inc.zone}</span></div>
-          <div className="kv-row"><span className="k">Feeder</span><span className="v mono">{inc.feeder || '-'}</span></div>
-          <div className="kv-row"><span className="k">Customers affected</span><span className="v mono">{(inc.customers || 0).toLocaleString()}</span></div>
-          <div className="kv-row"><span className="k">Cause</span><span className="v">{inc.cause}</span></div>
-          <div className="kv-row"><span className="k">Source</span><span className="v mono">{inc.source}</span></div>
+          <div className="kv-row"><span className="k">{tr('col.zone')}</span><span className="v">{inc.zone}</span></div>
+          <div className="kv-row"><span className="k">{tr('col.feeder')}</span><span className="v mono">{inc.feeder || '-'}</span></div>
+          <div className="kv-row"><span className="k">{tr('inc.fCustomers')}</span><span className="v mono">{(inc.customers || 0).toLocaleString()}</span></div>
+          <div className="kv-row"><span className="k">{tr('inc.fCause')}</span><span className="v">{inc.cause}</span></div>
+          <div className="kv-row"><span className="k">{tr('drw.source')}</span><span className="v mono">{inc.source}</span></div>
           {inc.prediction && (
             <div className="kv-row" title={inc.prediction.basis}>
-              <span className="k">Predicted downstream</span>
+              <span className="k">{tr('drw.predicted')}</span>
               <span className="v">{predictionText(inc.prediction)}</span>
             </div>
           )}
           {(inc.open_trip_tags || []).length > 0 && (
-            <div className="kv-row"><span className="k">Devices still open</span><span className="v mono" style={{ fontSize: 12 }}>{inc.open_trip_tags.join(', ')}</span></div>
+            <div className="kv-row"><span className="k">{tr('drw.devicesOpen')}</span><span className="v mono" style={{ fontSize: 12 }}>{inc.open_trip_tags.join(', ')}</span></div>
           )}
-          <div className="kv-row"><span className="k">Opened</span><span className="v mono">{hhmm(inc.opened_at)} - {timeAgo(inc.opened_at)}</span></div>
-          <div className="kv-row"><span className="k">SLA due</span><span className="v mono">{hhmm(inc.sla_due_at)}</span></div>
+          <div className="kv-row"><span className="k">{tr('col.opened')}</span><span className="v mono">{hhmm(inc.opened_at)} - {timeAgo(inc.opened_at)}</span></div>
+          <div className="kv-row"><span className="k">{tr('drw.slaDue')}</span><span className="v mono">{hhmm(inc.sla_due_at)}</span></div>
 
           <div className="kv-row">
-            <span className="k">Est. restoration</span>
-            <span className="v mono">{inc.ert ? hhmm(inc.ert) : 'Not set'}</span>
+            <span className="k">{tr('drw.estRest')}</span>
+            <span className="v mono">{inc.ert ? hhmm(inc.ert) : tr('drw.notSet')}</span>
           </div>
           <div className="kv-row" style={{ alignItems: 'center', gap: 8 }}>
             <input
               type="datetime-local"
-              aria-label="Estimated restoration date and time"
+              aria-label={tr('drw.ertAria')}
               value={ertInput}
               onChange={(e) => setErtInput(e.target.value)}
               style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid #ccc', fontSize: 13 }}
             />
-            <button className="btn sm" disabled={busy} onClick={doSetErt}>Update ETA</button>
+            <button className="btn sm" disabled={busy} onClick={doSetErt}>{tr('drw.updEta')}</button>
           </div>
 
-          <div style={{ margin: '18px 0 8px' }} className="eyebrow">Advance lifecycle</div>
+          <div style={{ margin: '18px 0 8px' }} className="eyebrow">{tr('drw.advance')}</div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             {(inc.nextStates || []).filter((s) => !(canReturn && s === 'in_progress')).map((s) => (
               <button key={s} className={`btn sm ${s === 'cancelled' ? 'danger' : 'primary'}`} disabled={busy} onClick={() => doStatus(s)}>
-                {s === 'cancelled' ? 'Cancel' : (inc.status === 'pending' && s === 'resolved') ? 'Accept - verified restored' : (inc.status === 'pending' && s === 'in_progress') ? 'Deny - send crew back' : `-> ${(inc.stateLabels?.[s] || s)}`}
+                {s === 'cancelled' ? tr('drw.cancel') : (inc.status === 'pending' && s === 'resolved') ? tr('drw.accept') : (inc.status === 'pending' && s === 'in_progress') ? tr('drw.deny') : `-> ${tOr(`st.${s}`, inc.stateLabels?.[s] || s)}`}
               </button>
             ))}
             {!inc.nextStates?.length && <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>{inc.plannedOutageId
-              ? 'Planned outage - its status follows the switching plan and work permits. Manage it in Planned outages.'
-              : 'Terminal state - no further transitions.'}</span>}
+              ? tr('drw.plannedNote')
+              : tr('drw.terminal')}</span>}
             {canReturn && !returning && (
-              <button className="btn sm danger" disabled={busy} onClick={() => setReturning(true)}>Return for correction</button>
+              <button className="btn sm danger" disabled={busy} onClick={() => setReturning(true)}>{tr('drw.rfc')}</button>
             )}
           </div>
           {canReturn && returning && (
             <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
-              <label className="eyebrow" htmlFor="rfc-reason">What needs correcting? (required, the crew sees it on the timeline)</label>
+              <label className="eyebrow" htmlFor="rfc-reason">{tr('drw.rfcLabel')}</label>
               <textarea id="rfc-reason" rows={3} maxLength={500} value={reason} onChange={(e) => setReason(e.target.value)} autoFocus // eslint-disable-line jsx-a11y/no-autofocus -- opened by the user's own click
                 style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid #ccc', fontSize: 13 }} />
               <div style={{ display: 'flex', gap: 8 }}>
-                <button className="btn sm danger" disabled={busy || !reason.trim()} onClick={doReturn}>Return to crew</button>
-                <button className="btn sm" disabled={busy} onClick={() => { setReturning(false); setReason(''); }}>Cancel</button>
+                <button className="btn sm danger" disabled={busy || !reason.trim()} onClick={doReturn}>{tr('drw.returnCrew')}</button>
+                <button className="btn sm" disabled={busy} onClick={() => { setReturning(false); setReason(''); }}>{tr('drw.cancel')}</button>
               </div>
             </div>
           )}
@@ -255,19 +259,19 @@ function IncidentDrawer({ inc, onClose, onChange, showOnMap }) {
 
           {!inc.crew_id && ['open', 'dispatched'].includes(inc.status) && (
             <>
-              <div style={{ margin: '18px 0 8px' }} className="eyebrow">Assign crew - free crews first, then nearest</div>
+              <div style={{ margin: '18px 0 8px' }} className="eyebrow">{tr('drw.assignCrew')}</div>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 {nearest.map((c) => (
                   <button key={c.id} className="btn sm" disabled={busy} onClick={() => doAssign(c.id)}>
                     {c.name} - {c.meters_away < 1000 ? `${Math.round(c.meters_away)} m` : `${(c.meters_away / 1000).toFixed(1)} km`}{crewBusyText(c)}
                   </button>
                 ))}
-                {!nearest.length && <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>No crews on shift right now.</span>}
+                {!nearest.length && <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>{tr('drw.noCrews')}</span>}
               </div>
             </>
           )}
 
-          <div style={{ margin: '20px 0 10px' }} className="eyebrow">Status timeline</div>
+          <div style={{ margin: '20px 0 10px' }} className="eyebrow">{tr('drw.timeline')}</div>
           <ul className="timeline">
             {(inc.events || []).map((e) => {
               const { text, items } = eventChecklist(e, report);
@@ -280,7 +284,7 @@ function IncidentDrawer({ inc, onClose, onChange, showOnMap }) {
                     {text}
                     {items && (
                       <button type="button" className="caret" aria-expanded={isOpen} onClick={() => setExpanded((x) => ({ ...x, [e.id]: !x[e.id] }))}>
-                        {isOpen ? '▾' : '▸'} {items.length} item{items.length === 1 ? '' : 's'}
+                        {isOpen ? '▾' : '▸'} {tr(items.length === 1 ? 'drw.item1' : 'drw.items', { n: items.length })}
                       </button>
                     )}
                   </div>
@@ -336,6 +340,7 @@ function eventChecklist(e, report) {
 // Lock state of the incident's crew job (OMS-03): while the crew can still
 // undo, and once its completion is locked.
 function LockBadge({ locked, undoUntil }) {
+  useT();
   // Re-render the moment the undo window ends, so an open drawer switches to
   // "Locked" instead of still offering an undo time in the past.
   const [, setTick] = useState(0);
@@ -345,14 +350,15 @@ function LockBadge({ locked, undoUntil }) {
     const t = setTimeout(() => setTick((n) => n + 1), until - Date.now() + 50);
     return () => clearTimeout(t);
   }, [until]);
-  if (until && until <= Date.now()) return <span className="chip chip-ok" title="The undo window is over; use Return for correction">Locked</span>;
-  if (undoUntil) return <span className="chip chip-minor" title="The crew can still reopen the job">Crew can undo until {hhmm(undoUntil)}</span>;
-  if (locked) return <span className="chip chip-ok" title="Crew writes are no longer applied; use Return for correction">Locked</span>;
+  if (until && until <= Date.now()) return <span className="chip chip-ok" title={tr('drw.lockOver')}>{tr('drw.locked')}</span>;
+  if (undoUntil) return <span className="chip chip-minor" title={tr('drw.canReopen')}>{tr('drw.undoUntil', { t: hhmm(undoUntil) })}</span>;
+  if (locked) return <span className="chip chip-ok" title={tr('drw.lockNo')}>{tr('drw.locked')}</span>;
   return null;
 }
 
 function NotAppliedChip({ reason }) {
-  return <span className="chip chip-major" style={{ marginLeft: 6 }} title="Arrived after the job was locked; kept for the record, not applied">Not applied - {reason}</span>;
+  useT();
+  return <span className="chip chip-major" style={{ marginLeft: 6 }} title={tr('drw.naTitle')}>{tr('drw.notApplied', { r: reason })}</span>;
 }
 
 const RESTORED_LABEL = { yes: 'Yes', partial: 'Partly', no: 'No' };
@@ -360,22 +366,23 @@ const RESTORED_LABEL = { yes: 'Yes', partial: 'Partly', no: 'No' };
 // Did the assigned crew get the job? Received = the crew's phone downloaded
 // it; Opened = the crew opened the job screen (crew app, first time only).
 function CrewJobsPanel({ report }) {
+  useT();
   const live = report.filter((r) => r.job.crew_id && !['Work Complete', 'Cancelled', 'Closed'].includes(r.job.status));
   if (!live.length) return null;
   return (
     <div style={{ margin: '18px 0 8px' }}>
-      <div className="eyebrow">Crew job</div>
+      <div className="eyebrow">{tr('drw.crewJob')}</div>
       {live.map(({ job }) => (
         <div key={job.id} style={{ border: '1px solid var(--line-2)', borderRadius: 8, padding: '8px 10px', margin: '8px 0', fontSize: 13, display: 'grid', gap: 3 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}><b className="mono">{job.id} - {job.crew_id}</b><span>{job.status}</span></div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}><b className="mono">{job.id} - {job.crew_id}</b><span>{tOr(`drw.job.${job.status}`, job.status)}</span></div>
           <div>
             {job.delivered_at
-              ? <span className="chip chip-ok">Received on phone {hhmm(job.delivered_at)}</span>
-              : <span className="chip chip-major" title="The crew's phone has not downloaded this job yet (app closed, no signal, or not signed in)">Not yet received by the crew's phone</span>}
+              ? <span className="chip chip-ok">{tr('drw.received', { t: hhmm(job.delivered_at) })}</span>
+              : <span className="chip chip-major" title={tr('drw.notRecvTitle')}>{tr('drw.notRecv')}</span>}
             {' '}
             {job.opened_at
-              ? <span className="chip chip-ok">Opened by crew {hhmm(job.opened_at)}</span>
-              : job.delivered_at ? <span className="chip chip-minor">Not opened yet</span> : null}
+              ? <span className="chip chip-ok">{tr('drw.openedBy', { t: hhmm(job.opened_at) })}</span>
+              : job.delivered_at ? <span className="chip chip-minor">{tr('drw.notOpened')}</span> : null}
           </div>
         </div>
       ))}
@@ -386,6 +393,7 @@ function CrewJobsPanel({ report }) {
 // Open crew requests to hand this incident's job to another crew. Granting
 // one = assigning another crew (the server then moves even a started job).
 function ReassignRequestPanel({ requests, nearest, busy, onAssign, onDismiss }) {
+  useT();
   const open = requests.filter((r) => r.status === 'open');
   if (!open.length) return null;
   return (
@@ -394,17 +402,17 @@ function ReassignRequestPanel({ requests, nearest, busy, onAssign, onDismiss }) 
         const others = nearest.filter((c) => c.id !== r.crew_id);
         return (
           <div key={r.id} style={{ display: 'grid', gap: 8 }}>
-            <div className="eyebrow" style={{ color: '#9a4b00' }}>Reassignment requested by {r.crew_name || r.crew_id} - {hhmm(r.created_at)}</div>
-            <div style={{ fontSize: 13.5 }}><b className="mono">{r.job_id}</b> ({r.job_status}): "{r.reason}"</div>
-            <div style={{ fontSize: 12, opacity: 0.75 }}>Give the job to:</div>
+            <div className="eyebrow" style={{ color: '#9a4b00' }}>{tr('drw.reqBy', { c: r.crew_name || r.crew_id, t: hhmm(r.created_at) })}</div>
+            <div style={{ fontSize: 13.5 }}><b className="mono">{r.job_id}</b> ({tOr(`drw.job.${r.job_status}`, r.job_status)}): "{r.reason}"</div>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>{tr('drw.giveTo')}</div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               {others.map((c) => (
                 <button key={c.id} className="btn sm primary" disabled={busy} onClick={() => onAssign(c.id)}>
                   {c.name} - {c.meters_away < 1000 ? `${Math.round(c.meters_away)} m` : `${(c.meters_away / 1000).toFixed(1)} km`}{crewBusyText(c)}
                 </button>
               ))}
-              {!others.length && <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>No other crew on shift right now.</span>}
-              <button className="btn sm danger" disabled={busy} onClick={() => onDismiss(r)}>Decline - crew continues</button>
+              {!others.length && <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>{tr('drw.noOther')}</span>}
+              <button className="btn sm danger" disabled={busy} onClick={() => onDismiss(r)}>{tr('drw.decline')}</button>
             </div>
           </div>
         );
@@ -414,16 +422,17 @@ function ReassignRequestPanel({ requests, nearest, busy, onAssign, onDismiss }) 
 }
 
 // Fault diagnosis answer; "Other" shows the reason the crew typed.
-const diagText = (d, key) => (d?.[key] === 'Other' && d[`${key}Other`] ? `Other: ${d[`${key}Other`]}` : d?.[key]);
+const diagText = (d, key) => (d?.[key] === 'Other' && d[`${key}Other`] ? `${tr('drw.other')}: ${d[`${key}Other`]}` : d?.[key]);
 
 // The crew's completion form for each job of the incident (newest form
 // first), plus anything the crew sent after the job was locked.
 function FieldReportPanel({ report }) {
+  useT();
   const jobs = report.filter((r) => r.completions.length || r.locked || r.undoUntil || r.notApplied.photos.length || r.notApplied.scans.length);
   if (!jobs.length) return null;
   return (
     <div style={{ margin: '20px 0 10px' }}>
-      <div className="eyebrow">Field completion report</div>
+      <div className="eyebrow">{tr('drw.fieldReport')}</div>
       {jobs.map((r) => {
         const c = r.completions[0];
         const parts = Array.isArray(c?.parts_used) ? c.parts_used : [];
@@ -431,22 +440,22 @@ function FieldReportPanel({ report }) {
         return (
           <div key={r.job.id} style={{ border: '1px solid var(--line-2)', borderRadius: 8, padding: '8px 10px', margin: '8px 0', fontSize: 13 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-              <b className="mono">{r.job.id} - {r.job.crew_id || 'unassigned'}</b>
-              <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>{r.job.status}<LockBadge locked={r.locked} undoUntil={r.undoUntil} /></span>
+              <b className="mono">{r.job.id} - {r.job.crew_id || tr('drw.unassigned')}</b>
+              <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>{tOr(`drw.job.${r.job.status}`, r.job.status)}<LockBadge locked={r.locked} undoUntil={r.undoUntil} /></span>
             </div>
-            {!c && <div style={{ opacity: 0.6, marginTop: 4 }}>No completion form sent (the crew app sends it from the next app version).</div>}
+            {!c && <div style={{ opacity: 0.6, marginTop: 4 }}>{tr('drw.noForm')}</div>}
             {c && (
               <div style={{ display: 'grid', gap: 3, marginTop: 6 }}>
-                {c.diagnosis?.symptom && <div><span style={{ opacity: 0.6 }}>Symptom:</span> {diagText(c.diagnosis, 'symptom')}</div>}
-                {c.diagnosis && <div><span style={{ opacity: 0.6 }}>Diagnosis:</span> {diagText(c.diagnosis, 'cause') || '-'}{c.diagnosis.action ? ` - ${diagText(c.diagnosis, 'action')}` : ''}</div>}
-                {c.diagnosis?.remarks && <div><span style={{ opacity: 0.6 }}>Remarks:</span> {c.diagnosis.remarks}</div>}
-                <div><span style={{ opacity: 0.6 }}>Parts used:</span> {parts.length ? parts.map((x) => `${x.name} x${x.qty}`).join(', ') : 'none'}</div>
-                <div><span style={{ opacity: 0.6 }}>Supply restored:</span> {RESTORED_LABEL[c.restored] || 'not stated'}</div>
-                {c.sign_off && <div><span style={{ opacity: 0.6 }}>Signed off by:</span> {c.sign_off.name || '-'}{c.sign_off.signedAt ? ` at ${hhmm(c.sign_off.signedAt)}` : ''}</div>}
-                <div style={{ opacity: 0.6 }}>Submitted {hhmm(c.submitted_at)}{c.submitted_by ? ` by ${c.submitted_by}` : ''}{r.completions.length > 1 ? ` - ${r.completions.length} forms (job was reopened)` : ''}</div>
+                {c.diagnosis?.symptom && <div><span style={{ opacity: 0.6 }}>{tr('drw.symptom')}</span> {diagText(c.diagnosis, 'symptom')}</div>}
+                {c.diagnosis && <div><span style={{ opacity: 0.6 }}>{tr('drw.diagnosis')}</span> {diagText(c.diagnosis, 'cause') || '-'}{c.diagnosis.action ? ` - ${diagText(c.diagnosis, 'action')}` : ''}</div>}
+                {c.diagnosis?.remarks && <div><span style={{ opacity: 0.6 }}>{tr('drw.remarks')}</span> {c.diagnosis.remarks}</div>}
+                <div><span style={{ opacity: 0.6 }}>{tr('drw.parts')}</span> {parts.length ? parts.map((x) => `${x.name} x${x.qty}`).join(', ') : tr('drw.none')}</div>
+                <div><span style={{ opacity: 0.6 }}>{tr('drw.supplyRest')}</span> {RESTORED_LABEL[c.restored] ? tr(`drw.rest.${c.restored}`) : tr('drw.notStated')}</div>
+                {c.sign_off && <div><span style={{ opacity: 0.6 }}>{tr('drw.signedBy')}</span> {c.sign_off.name || '-'}{c.sign_off.signedAt ? tr('drw.at', { t: hhmm(c.sign_off.signedAt) }) : ''}</div>}
+                <div style={{ opacity: 0.6 }}>{tr('drw.submitted', { t: hhmm(c.submitted_at) })}{c.submitted_by ? tr('drw.by', { u: c.submitted_by }) : ''}{r.completions.length > 1 ? tr('drw.nForms', { n: r.completions.length }) : ''}</div>
               </div>
             )}
-            {late > 0 && <div style={{ marginTop: 6 }}><NotAppliedChip reason="job locked" /> {late} item(s) arrived after the lock - see photos and scans below.</div>}
+            {late > 0 && <div style={{ marginTop: 6 }}><NotAppliedChip reason={tr('drw.jobLocked')} /> {tr('drw.lateItems', { n: late })}</div>}
           </div>
         );
       })}
@@ -455,15 +464,16 @@ function FieldReportPanel({ report }) {
 }
 
 function NewIncident({ onClose, onCreated }) {
+  const { t } = useT();
   const [f, setF] = useState({ zone: '', severity: 'high', type: 'Power Outage', feeder: '', customers: 100, cause: 'Unknown' });
   const [busy, setBusy] = useState(false);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const dlg = useRef(null);
   useDialog(dlg, onClose);
   const submit = async () => {
-    if (!f.zone) { toast('Zone is required', 'err'); return; }
+    if (!f.zone) { toast(t('inc.zoneRequired'), 'err'); return; }
     setBusy(true);
-    try { const i = await api.createIncident({ ...f, customers: Number(f.customers) }); toast('Incident created'); onCreated(i); }
+    try { const i = await api.createIncident({ ...f, customers: Number(f.customers) }); toast(t('inc.created')); onCreated(i); }
     catch (e) { toast(e.message, 'err'); setBusy(false); }
   };
   const field = (label, node) => <label style={{ display: 'block', marginBottom: 12 }}><div className="eyebrow" style={{ marginBottom: 5 }}>{label}</div>{node}</label>;
@@ -473,28 +483,29 @@ function NewIncident({ onClose, onCreated }) {
     <>
       {/* Mouse-only backdrop; keyboard users close via Escape or the Close button. */}
       <div className="drawer-mask" aria-hidden="true" onClick={onClose} />
-      <aside ref={dlg} tabIndex={-1} className="drawer" role="dialog" aria-modal="true" aria-label="New incident">
+      <aside ref={dlg} tabIndex={-1} className="drawer" role="dialog" aria-modal="true" aria-label={t('inc.new')}>
         <div className="drawer-h">
-          <div style={{ fontFamily: 'var(--disp)', fontSize: 18, fontWeight: 600 }}>New incident</div>
-          <button className="iconbtn" aria-label="Close" onClick={onClose}><Icon name="x" size={16} /></button>
+          <div style={{ fontFamily: 'var(--disp)', fontSize: 18, fontWeight: 600 }}>{t('inc.new')}</div>
+          <button className="iconbtn" aria-label={t('inc.close')} onClick={onClose}><Icon name="x" size={16} /></button>
         </div>
         <div className="drawer-b">
-          {field('Zone *', <select style={inp} value={f.zone} onChange={set('zone')}>
-  <option value="">Select a zone...</option>
+          {field(t('inc.fZone'), <select style={inp} value={f.zone} onChange={set('zone')}>
+  <option value="">{t('inc.fSelectZone')}</option>
   {['Mayapur', 'Bhoopatwala', 'Industrial Area', 'Jwalapur-I', 'Kankhal-2', 'Dehradun Central', 'Clement Town, Dehradun', 'Ballupur, Dehradun', 'Jwalapur, Haridwar'].map((z) => <option key={z} value={z}>{z}</option>)}
 </select>)}
-          {field('Severity', <select style={inp} value={f.severity} onChange={set('severity')}>{['critical', 'high', 'medium', 'low'].map((s) => <option key={s}>{s}</option>)}</select>)}
-          {field('Type', <select style={inp} value={f.type} onChange={set('type')}>{['Power Outage', 'Partial Power'].map((s) => <option key={s}>{s}</option>)}</select>)}
-          {field('Feeder', <input style={inp} value={f.feeder} onChange={set('feeder')} placeholder="FDR-SE01-F02" />)}
-          {field('Customers affected', <input style={inp} type="number" value={f.customers} onChange={set('customers')} />)}
-          {field('Cause', <input style={inp} value={f.cause} onChange={set('cause')} />)}
-          <button className="btn primary" style={{ width: '100%', justifyContent: 'center', marginTop: 6 }} disabled={busy} onClick={submit}>Create incident</button>
+          {field(t('inc.fSeverity'), <select style={inp} value={f.severity} onChange={set('severity')}>{['critical', 'high', 'medium', 'low'].map((s) => <option key={s} value={s}>{t(`sev.${s}`)}</option>)}</select>)}
+          {field(t('inc.fType'), <select style={inp} value={f.type} onChange={set('type')}>{['Power Outage', 'Partial Power'].map((s) => <option key={s} value={s}>{t(`type.${s}`)}</option>)}</select>)}
+          {field(t('inc.fFeeder'), <input style={inp} value={f.feeder} onChange={set('feeder')} placeholder="FDR-SE01-F02" />)}
+          {field(t('inc.fCustomers'), <input style={inp} type="number" value={f.customers} onChange={set('customers')} />)}
+          {field(t('inc.fCause'), <input style={inp} value={f.cause} onChange={set('cause')} />)}
+          <button className="btn primary" style={{ width: '100%', justifyContent: 'center', marginTop: 6 }} disabled={busy} onClick={submit}>{t('inc.create')}</button>
         </div>
       </aside>
     </>
   );
 }  
 function MessagePanel({ incidentId }) {
+  useT();
   const [msgs, setMsgs] = useState([]);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
@@ -512,19 +523,19 @@ function MessagePanel({ incidentId }) {
     if (!text.trim() || busy) return;
     setBusy(true);
     try { await api.postMessage(incidentId, text.trim()); setText(''); await load(); }
-    catch { toast('Could not send message'); }
+    catch { toast(tr('drw.sendFail')); }
     finally { setBusy(false); }
   };
 
   return (
     <div style={{ margin: '20px 0 10px' }}>
-      <div className="eyebrow">Crew and dispatcher messages</div>
+      <div className="eyebrow">{tr('drw.messages')}</div>
       <div style={{ maxHeight: 220, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8, margin: '10px 0' }}>
-        {msgs.length === 0 && <div style={{ fontSize: 13, opacity: 0.6 }}>No messages yet.</div>}
+        {msgs.length === 0 && <div style={{ fontSize: 13, opacity: 0.6 }}>{tr('drw.noMsgs')}</div>}
         {msgs.map((m) => (
           <div key={m.id} style={{ background: m.sender_role === 'field_crew' ? '#fff4e0' : '#f2f5f9', borderRadius: 8, padding: '8px 10px', borderLeft: m.sender_role === 'field_crew' ? '3px solid #e08a1e' : 'none' }}>
             <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 2 }}>
-              {m.sender_role === 'field_crew' ? `Crew (${m.sender})` : `${m.sender} - ${m.sender_role}`} - {hhmm(m.ts)}
+              {m.sender_role === 'field_crew' ? tr('drw.crewSender', { s: m.sender }) : `${m.sender} - ${m.sender_role}`} - {hhmm(m.ts)}
             </div>
             <div style={{ fontSize: 14 }}>{m.body}</div>
           </div>
@@ -535,12 +546,12 @@ function MessagePanel({ incidentId }) {
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && send()}
-          aria-label="Message the crew"
-          placeholder="Message the crew..."
+          aria-label={tr('drw.msgCrew')}
+          placeholder={tr('drw.msgCrewPh')}
           style={{ flex: 1, padding: '8px 10px', borderRadius: 8, border: '1px solid #ccc' }}
         />
         <button onClick={send} disabled={busy} style={{ padding: '8px 14px', borderRadius: 8, border: 0, background: '#12325a', color: '#fff', cursor: 'pointer' }}>
-          Send
+          {tr('drw.send')}
         </button>
       </div>
     </div>
@@ -550,25 +561,26 @@ function MessagePanel({ incidentId }) {
 // One SMS to the manager of this incident's feeder (Admin -> Feeder managers).
 // Blank message = the server's standard status update.
 function FeederManagerSms({ incident }) {
+  useT();
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const send = async () => {
     setBusy(true);
     try {
       const r = await api.smsFeederManager(incident.id, text.trim());
-      toast(`SMS ${r.status === 'failed' ? 'failed' : 'sent'} to feeder manager ${r.recipient}`, r.status === 'failed' ? 'err' : 'ok');
+      toast(tr(r.status === 'failed' ? 'drw.smsFailed' : 'drw.smsSent', { r: r.recipient }), r.status === 'failed' ? 'err' : 'ok');
       setText('');
     } catch (e) { toast(e.message, 'err'); } finally { setBusy(false); }
   };
   return (
     <div style={{ margin: '14px 0 0' }}>
-      <div className="eyebrow">Feeder manager ({incident.feeder})</div>
+      <div className="eyebrow">{tr('drw.fm', { f: incident.feeder })}</div>
       <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
         <input value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && !busy && send()} maxLength={500}
-          aria-label={`SMS to the manager of feeder ${incident.feeder}; leave empty for a status update`}
-          placeholder="SMS text (empty = status update)" style={{ flex: 1, padding: '8px 10px', borderRadius: 8, border: '1px solid #ccc' }} />
+          aria-label={tr('drw.fmAria', { f: incident.feeder })}
+          placeholder={tr('drw.fmPh')} style={{ flex: 1, padding: '8px 10px', borderRadius: 8, border: '1px solid #ccc' }} />
         <button onClick={send} disabled={busy} style={{ padding: '8px 14px', borderRadius: 8, border: 0, background: '#12325a', color: '#fff', cursor: 'pointer', whiteSpace: 'nowrap' }}>
-          {busy ? 'Sending…' : 'SMS manager'}
+          {busy ? tr('drw.sending') : tr('drw.smsMgr')}
         </button>
       </div>
     </div>
@@ -578,6 +590,7 @@ function FeederManagerSms({ incident }) {
 // Equipment the crew scanned on site (QR on poles, transformers, meters).
 // asset_details is whatever the QR code carried, if it was JSON.
 function AssetScanPanel({ incidentId, showOnMap }) {
+  useT();
   const [scans, setScans] = useState([]);
   const load = () => api.assetScans(incidentId).then(setScans).catch(() => setScans([]));
   useEffect(() => { load(); }, [incidentId]); // eslint-disable-line
@@ -585,8 +598,8 @@ function AssetScanPanel({ incidentId, showOnMap }) {
 
   return (
     <div style={{ margin: '20px 0 10px' }}>
-      <div className="eyebrow">Asset scans ({scans.length})</div>
-      {!scans.length && <div style={{ fontSize: 13, opacity: 0.6, margin: '10px 0' }}>No assets scanned yet.</div>}
+      <div className="eyebrow">{tr('drw.scans', { n: scans.length })}</div>
+      {!scans.length && <div style={{ fontSize: 13, opacity: 0.6, margin: '10px 0' }}>{tr('drw.noScans')}</div>}
       <div style={{ display: 'grid', gap: 8, margin: '10px 0' }}>
         {scans.map((s) => {
           const details = typeof s.asset_details === 'string' ? JSON.parse(s.asset_details) : (s.asset_details || {});
@@ -595,7 +608,7 @@ function AssetScanPanel({ incidentId, showOnMap }) {
             <div key={s.id} style={{ border: '1px solid var(--line-2)', borderRadius: 8, padding: '8px 10px', fontSize: 13 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                 <b className="mono">{s.asset_id || s.raw_value}{s.not_applied_reason && <NotAppliedChip reason={s.not_applied_reason} />}</b>
-                <span style={{ opacity: 0.7 }}>{s.crew_id || 'Unknown crew'} - {hhmm(s.scanned_at)}</span>
+                <span style={{ opacity: 0.7 }}>{s.crew_id || tr('drw.unknownCrew')} - {hhmm(s.scanned_at)}</span>
               </div>
               {entries.length > 0 && (
                 <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: '2px 12px', opacity: 0.85 }}>
@@ -604,8 +617,8 @@ function AssetScanPanel({ incidentId, showOnMap }) {
               )}
               {Number.isFinite(s.lat) && Number.isFinite(s.lon) && (
                 <div style={{ fontSize: 12, marginTop: 4, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <span className="mono">Lat {s.lat.toFixed(6)}, Long {s.lon.toFixed(6)}</span>
-                  {showOnMap && <button className="btn sm" onClick={() => showOnMap({ kind: 'scan', id: s.id, lat: s.lat, lon: s.lon })}>Show on network map</button>}
+                  <span className="mono">{tr('drw.latlon', { a: s.lat.toFixed(6), b: s.lon.toFixed(6) })}</span>
+                  {showOnMap && <button className="btn sm" onClick={() => showOnMap({ kind: 'scan', id: s.id, lat: s.lat, lon: s.lon })}>{tr('drw.showMap')}</button>}
                 </div>
               )}
             </div>
@@ -619,6 +632,8 @@ function AssetScanPanel({ incidentId, showOnMap }) {
 const STAGE_LABEL = { work_started: 'Work started', work_finished: 'Work finished' };
 
 function PhotoPanel({ incidentId }) {
+  useT();
+  const stage = (s) => (STAGE_LABEL[s] ? tr(`drw.stage.${s}`) : '');
   const [photos, setPhotos] = useState([]);
   const [openPhoto, setOpenPhoto] = useState(null);
   const [thumbs, setThumbs] = useState({});
@@ -638,19 +653,19 @@ function PhotoPanel({ incidentId }) {
 
   const openFull = (p) => {
     if (thumbs[p.id]) { setOpenPhoto({ ...p, data_url: thumbs[p.id] }); return; }
-    api.photoDetail(p.id).then((full) => setOpenPhoto(full)).catch(() => toast('Could not load photo'));
+    api.photoDetail(p.id).then((full) => setOpenPhoto(full)).catch(() => toast(tr('drw.photoFail')));
   };
   const viewer = useRef(null);
   useDialog(viewer, openPhoto ? () => setOpenPhoto(null) : null);
   const photoLabel = (p) => {
     const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : (p.metadata || {});
-    return `Taken by ${m.technicianName || p.technician_id || 'unknown crew'} at ${hhmm(p.ts)}`;
+    return tr('drw.takenBy', { w: m.technicianName || p.technician_id || tr('drw.unknownCrewLc'), t: hhmm(p.ts) });
   };
 
   return (
     <div style={{ margin: '20px 0 10px' }}>
-      <div className="eyebrow">Job photos ({photos.length})</div>
-      {!photos.length && <div style={{ fontSize: 13, opacity: 0.6, margin: '10px 0' }}>No photos yet.</div>}
+      <div className="eyebrow">{tr('drw.photos', { n: photos.length })}</div>
+      {!photos.length && <div style={{ fontSize: 13, opacity: 0.6, margin: '10px 0' }}>{tr('drw.noPhotos')}</div>}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '10px 0' }}>
         {photos.map((p) => {
           const meta = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : (p.metadata || {});
@@ -659,12 +674,12 @@ function PhotoPanel({ incidentId }) {
               type="button"
               key={p.id}
               onClick={() => openFull(p)}
-              aria-label={`Open photo: ${STAGE_LABEL[meta.stage] ? STAGE_LABEL[meta.stage] + ', ' : ''}${photoLabel(p)}${p.not_applied_reason ? ', late, not applied' : ''}`}
+              aria-label={`${tr('drw.openPhoto')} ${STAGE_LABEL[meta.stage] ? stage(meta.stage) + ', ' : ''}${photoLabel(p)}${p.not_applied_reason ? tr('drw.lateNa') : ''}`}
               style={{ padding: 0, width: 84, height: 84, borderRadius: 8, overflow: 'hidden', cursor: 'pointer', background: '#f2f5f9', position: 'relative', border: '1px solid var(--line-2)' }}
-              title={`${STAGE_LABEL[meta.stage] ? STAGE_LABEL[meta.stage] + ' - ' : ''}${meta.technicianName || p.technician_id || 'Unknown'} - ${hhmm(p.ts)}${Number.isFinite(p.lat) ? ` - ${p.lat.toFixed(6)}, ${p.lon.toFixed(6)}` : ''}${p.not_applied_reason ? ` - not applied (${p.not_applied_reason})` : ''}`}
+              title={`${STAGE_LABEL[meta.stage] ? stage(meta.stage) + ' - ' : ''}${meta.technicianName || p.technician_id || tr('drw.unknown')} - ${hhmm(p.ts)}${Number.isFinite(p.lat) ? ` - ${p.lat.toFixed(6)}, ${p.lon.toFixed(6)}` : ''}${p.not_applied_reason ? tr('drw.naParen', { r: p.not_applied_reason }) : ''}`}
             >
-              {STAGE_LABEL[meta.stage] && <span style={{ position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 1, background: 'rgba(15,27,45,.55)', color: '#fff', fontSize: 9, fontWeight: 700, textAlign: 'center', padding: '1px 0' }}>{STAGE_LABEL[meta.stage]}</span>}
-              {p.not_applied_reason && <span className="chip chip-major" title={`Not applied - ${p.not_applied_reason}; kept for the record`} style={{ position: 'absolute', left: 2, top: 2, zIndex: 1, padding: '0 5px', fontSize: 10 }}>Late</span>}
+              {STAGE_LABEL[meta.stage] && <span style={{ position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 1, background: 'rgba(15,27,45,.55)', color: '#fff', fontSize: 9, fontWeight: 700, textAlign: 'center', padding: '1px 0' }}>{stage(meta.stage)}</span>}
+              {p.not_applied_reason && <span className="chip chip-major" title={tr('drw.naKept', { r: p.not_applied_reason })} style={{ position: 'absolute', left: 2, top: 2, zIndex: 1, padding: '0 5px', fontSize: 10 }}>{tr('drw.late')}</span>}
               {thumbs[p.id] ? (
                 <img src={thumbs[p.id]} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
               ) : (
@@ -678,16 +693,16 @@ function PhotoPanel({ incidentId }) {
         // Backdrop click is mouse-only; keyboard users close via Escape or the Close button.
         // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 2300, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={(e) => { if (e.target === e.currentTarget) setOpenPhoto(null); }}>
-          <div ref={viewer} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Job photo" style={{ background: '#fff', borderRadius: 10, padding: 16, maxWidth: '90vw', maxHeight: '90vh', overflow: 'auto' }}>
+          <div ref={viewer} tabIndex={-1} role="dialog" aria-modal="true" aria-label={tr('drw.jobPhoto')} style={{ background: '#fff', borderRadius: 10, padding: 16, maxWidth: '90vw', maxHeight: '90vh', overflow: 'auto' }}>
             <img src={openPhoto.data_url} alt={photoLabel(openPhoto)} style={{ maxWidth: '100%', maxHeight: '70vh', display: 'block', borderRadius: 6, marginBottom: 10 }} />
             <div style={{ fontSize: 13, marginBottom: 8 }}>
-              <b>{(() => { const m = typeof openPhoto.metadata === 'string' ? JSON.parse(openPhoto.metadata) : (openPhoto.metadata || {}); return m.technicianName || openPhoto.technician_id || 'Unknown crew'; })()}</b>
+              <b>{(() => { const m = typeof openPhoto.metadata === 'string' ? JSON.parse(openPhoto.metadata) : (openPhoto.metadata || {}); return m.technicianName || openPhoto.technician_id || tr('drw.unknownCrew'); })()}</b>
               {' - '}{hhmm(openPhoto.ts)}
-              {(() => { const m = typeof openPhoto.metadata === 'string' ? JSON.parse(openPhoto.metadata) : (openPhoto.metadata || {}); return STAGE_LABEL[m.stage] ? <span className="chip chip-soft" style={{ marginLeft: 8 }}>{STAGE_LABEL[m.stage]}</span> : null; })()}
-              {Number.isFinite(openPhoto.lat) && Number.isFinite(openPhoto.lon) && <div className="mono" style={{ marginTop: 4 }}>Lat {openPhoto.lat.toFixed(6)}, Long {openPhoto.lon.toFixed(6)}</div>}
+              {(() => { const m = typeof openPhoto.metadata === 'string' ? JSON.parse(openPhoto.metadata) : (openPhoto.metadata || {}); return STAGE_LABEL[m.stage] ? <span className="chip chip-soft" style={{ marginLeft: 8 }}>{stage(m.stage)}</span> : null; })()}
+              {Number.isFinite(openPhoto.lat) && Number.isFinite(openPhoto.lon) && <div className="mono" style={{ marginTop: 4 }}>{tr('drw.latlon', { a: openPhoto.lat.toFixed(6), b: openPhoto.lon.toFixed(6) })}</div>}
               {openPhoto.note && <div style={{ marginTop: 4, opacity: 0.8 }}>{openPhoto.note}</div>}
             </div>
-            <button className="btn sm" onClick={() => setOpenPhoto(null)} autoFocus /* eslint-disable-line jsx-a11y/no-autofocus -- opened by the user's own click */>Close</button>
+            <button className="btn sm" onClick={() => setOpenPhoto(null)} autoFocus /* eslint-disable-line jsx-a11y/no-autofocus -- opened by the user's own click */>{tr('inc.close')}</button>
           </div>
         </div>
       )}

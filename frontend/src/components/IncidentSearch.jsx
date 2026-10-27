@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Search, X } from 'lucide-react';
 import { api } from '../lib/api.js';
+import { useT, t as tr, tOr } from '../lib/i18n.js';
 
 // Reuses the exact .ms-box / .ms-results / .ms-item CSS already proven by
 // NetworkMap's own place search (see index.css) — a plain, reliable
@@ -15,6 +16,7 @@ import { api } from '../lib/api.js';
 const SEV_COLOR = { critical: '#c73a3a', high: '#9a5f15', medium: '#2f6fd6', low: '#217b48' };
 
 export default function IncidentSearch({ onOpen }) {
+  useT();
   const [all, setAll] = useState([]);
   const [q, setQ] = useState('');
   const [open, setOpen] = useState(false);
@@ -68,27 +70,27 @@ export default function IncidentSearch({ onOpen }) {
         <Search size={15} />
         <input
           role="combobox"
-          aria-label="Search incidents"
+          aria-label={tr('srch.aria')}
           aria-expanded={open}
           aria-controls="incident-search-list"
           aria-autocomplete="list"
           aria-activedescendant={open && active >= 0 && results[active] ? `isr-${results[active].id}` : undefined}
-          placeholder="Search incidents…"
+          placeholder={tr('srch.ph')}
           value={q}
           onClick={() => setOpen(true)}
           onChange={(e) => { setQ(e.target.value); setOpen(true); setActive(0); }}
           onKeyDown={onKeyDown}
         />
         {q && (
-          <button className="ms-clear" tabIndex={-1} aria-label="Clear search" onMouseDown={(e) => e.preventDefault()} onClick={() => setQ('')}>
+          <button className="ms-clear" tabIndex={-1} aria-label={tr('srch.clear')} onMouseDown={(e) => e.preventDefault()} onClick={() => setQ('')}>
             <X size={14} />
           </button>
         )}
       </div>
 
       {open && (
-        <div className="ms-results" id="incident-search-list" role="listbox" aria-label="Matching incidents" style={{ position: 'absolute', top: 'calc(100% + 6px)', left: 0, right: 0, zIndex: 2100, marginTop: 0 }}>
-          {!results.length && <div className="ms-empty">{query ? `No incidents match "${q}".` : 'No incidents to show.'}</div>}
+        <div className="ms-results" id="incident-search-list" role="listbox" aria-label={tr('srch.matching')} style={{ position: 'absolute', top: 'calc(100% + 6px)', left: 0, right: 0, zIndex: 2100, marginTop: 0 }}>
+          {!results.length && <div className="ms-empty">{query ? tr('srch.noMatch', { q }) : tr('srch.none')}</div>}
           {results.map((i, idx) => (
             // eslint-disable-next-line jsx-a11y/click-events-have-key-events -- keyboard handled on the combobox input
             <div
@@ -101,9 +103,9 @@ export default function IncidentSearch({ onOpen }) {
               onMouseEnter={() => setActive(idx)}
               onClick={() => select(i)}
             >
-              <span className="ms-tag" style={{ background: SEV_COLOR[i.severity] || '#5e6d82' }}>{i.severity}</span>
+              <span className="ms-tag" style={{ background: SEV_COLOR[i.severity] || '#5e6d82' }}>{tOr(`sev.${i.severity}`, i.severity)}</span>
               <span className="ms-label">{i.zone} · {i.id}</span>
-              <span className="ms-sub">{i.status.replace('_', ' ')}</span>
+              <span className="ms-sub">{tOr(`crew.lcst.${i.status}`, i.status.replace('_', ' '))}</span>
             </div>
           ))}
         </div>

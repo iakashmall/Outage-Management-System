@@ -1088,3 +1088,8 @@ tr[data-tgate-row]:focus-visible{outline:2px solid var(--focus-ring);outline-off
 .rb-sort{all:unset;cursor:pointer}
 .rb-sort:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
 .rb-total td{border-top:2px solid var(--line);background:var(--paper-2,#f7f9fc)}
+/* P8.7c Hindi: Devanagari must not be letter-spaced (it breaks conjuncts) or upper-cased,
+   and needs a font that has the script. */
+html[lang="hi"] body{font-family:var(--ui),'Nirmala UI','Noto Sans Devanagari','Mangal',sans-serif}
+html[lang="hi"] *{letter-spacing:0!important;text-transform:none!important}
+.lang-select{font:inherit;font-size:12.5px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface,#fff);color:inherit}

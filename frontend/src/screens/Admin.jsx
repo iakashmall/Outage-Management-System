@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
 import { Icon, timeAgo, useConnection, useLiveRefresh } from '../lib/ui.jsx';
+import { useT, tOr } from '../lib/i18n.js';
 import FeederRatingsCard from '../components/FeederRatingsCard.jsx';
 import FeederManagersCard from '../components/FeederManagersCard.jsx';
 
@@ -32,6 +33,7 @@ const SERVICES = [
 ];
 
 export default function Admin() {
+  const { t } = useT();
   const [audit, setAudit] = useState([]);
   const online = useConnection();
 
@@ -43,28 +45,28 @@ export default function Admin() {
     <>
       <div className="page-head">
         <div>
-          <div className="eyebrow">Administration</div>
-          <h2>System &amp; access</h2>
-          <p>Role-based access control, service health and the immutable audit trail (FR-OMS-007).</p>
+          <div className="eyebrow">{t('adm.eyebrow')}</div>
+          <h2>{t('adm.title')}</h2>
+          <p>{t('adm.intro')}</p>
         </div>
       </div>
 
       <div className="grid" style={{ gridTemplateColumns: '1.3fr 1fr' }}>
         <div className="card">
-          <div className="card-h"><h3>Users &amp; roles</h3><span className="eyebrow">{USERS.filter((u) => u.active).length} active</span></div>
+          <div className="card-h"><h3>{t('adm.users')}</h3><span className="eyebrow">{t('adm.nActive', { n: USERS.filter((u) => u.active).length })}</span></div>
           <div className="card-b" style={{ padding: 0 }}>
             <table className="tbl">
-              <thead><tr><th>User</th><th>Role</th><th>Zone</th><th>Permissions</th><th></th></tr></thead>
+              <thead><tr><th>{t('adm.user')}</th><th>{t('adm.role')}</th><th>{t('col.zone')}</th><th>{t('adm.perms')}</th><th></th></tr></thead>
               <tbody>
                 {USERS.map((u) => (
                   <tr key={u.name}>
                     <td><span className="avatar">{u.name[0].toUpperCase()}</span> {u.name}</td>
-                    <td>{u.role}</td>
-                    <td className="muted">{u.zone}</td>
-                    <td>{(ROLE_PERMS[u.role] || []).map((p) => <span key={p} className="chip chip-soft">{p}</span>)}</td>
+                    <td>{tOr(`adm.role.${u.role}`, u.role)}</td>
+                    <td className="muted">{tOr(`adm.zone.${u.zone}`, u.zone)}</td>
+                    <td>{(ROLE_PERMS[u.role] || []).map((p) => <span key={p} className="chip chip-soft">{tOr(`adm.perm.${p}`, p)}</span>)}</td>
                     <td>{u.active
-                      ? <span className="chip chip-ok">active</span>
-                      : <span className="chip chip-muted">locked</span>}</td>
+                      ? <span className="chip chip-ok">{t('adm.active')}</span>
+                      : <span className="chip chip-muted">{t('adm.locked')}</span>}</td>
                   </tr>
                 ))}
               </tbody>
@@ -73,19 +75,19 @@ export default function Admin() {
         </div>
 
         <div className="card">
-          <div className="card-h"><h3>System health</h3><span className={`lamp ${online ? 'on' : 'off'}`} /></div>
+          <div className="card-h"><h3>{t('adm.health')}</h3><span className={`lamp ${online ? 'on' : 'off'}`} /></div>
           <div className="card-b" style={{ display: 'grid', gap: 10 }}>
             {SERVICES.map((s) => (
               <div key={s.key} className="svc-row">
                 <span className={`dot-prio ${online ? 'ok' : 'minor'}`} />
-                <span style={{ flex: 1 }}>{s.name}</span>
-                <span className="mono muted">{online ? 'healthy' : 'degraded'}</span>
+                <span style={{ flex: 1 }}>{tOr(`adm.svc.${s.key}`, s.name)}</span>
+                <span className="mono muted">{online ? t('adm.healthy') : t('adm.degraded')}</span>
               </div>
             ))}
             <div className="svc-row" style={{ borderTop: '1px solid var(--line)', paddingTop: 10 }}>
               <span className={`dot-prio ${online ? 'ok' : 'minor'}`} />
-              <span style={{ flex: 1 }}>Realtime socket</span>
-              <span className="mono muted">{online ? 'connected' : 'reconnecting'}</span>
+              <span style={{ flex: 1 }}>{t('adm.socket')}</span>
+              <span className="mono muted">{online ? t('adm.connected') : t('adm.reconnecting')}</span>
             </div>
           </div>
         </div>
@@ -95,10 +97,10 @@ export default function Admin() {
       <FeederRatingsCard />
 
       <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-h"><h3>Audit log</h3><span className="eyebrow">{audit.length} entries</span></div>
+        <div className="card-h"><h3>{t('adm.audit')}</h3><span className="eyebrow">{t('adm.nEntries', { n: audit.length })}</span></div>
         <div className="card-b" style={{ padding: 0 }}>
           <table className="tbl">
-            <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th></tr></thead>
+            <thead><tr><th>{t('adm.time')}</th><th>{t('adm.actor')}</th><th>{t('adm.action')}</th><th>{t('adm.target')}</th></tr></thead>
             <tbody>
               {audit.map((a) => (
                 <tr key={a.id}>
@@ -108,7 +110,7 @@ export default function Admin() {
                   <td className="mono">{a.target}</td>
                 </tr>
               ))}
-              {!audit.length && <tr><td colSpan={4} className="empty">No audit entries yet — take an action to populate the trail.</td></tr>}
+              {!audit.length && <tr><td colSpan={4} className="empty">{t('adm.noAudit')}</td></tr>}
             </tbody>
           </table>
         </div>

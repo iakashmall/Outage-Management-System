@@ -1,8 +1,10 @@
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from './ui/dropdown-menu.jsx';
 import { LogOut, User } from 'lucide-react';
 import { currentUser, logout } from '../lib/auth.js';
+import { useT, t as tr, tOr } from '../lib/i18n.js';
 
 export default function ProfileMenu() {
+  useT();
   const user = currentUser();
   const initials = (user.username || '?').slice(0, 2).toUpperCase();
 
@@ -30,7 +32,7 @@ export default function ProfileMenu() {
         <div style={{ padding: '8px 10px 10px' }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>{user.username}</div>
           <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 1 }}>
-            {(user.roles && user.roles[0]) || 'operator'}
+            {(user.roles && user.roles[0]) ? tOr(`prof.role.${user.roles[0]}`, user.roles[0]) : tr('prof.operator')}
           </div>
         </div>
         <DropdownMenuSeparator />
@@ -39,7 +41,7 @@ export default function ProfileMenu() {
           borderRadius: 10, fontSize: 13, color: 'var(--crit)', cursor: 'pointer',
         }}>
           <LogOut size={15} />
-          Log out
+          {tr('prof.logout')}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

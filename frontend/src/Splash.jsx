@@ -21,7 +21,10 @@ import { motion, useReducedMotion } from 'motion/react';
 // arbitrary path-following as directly, and the native version already
 // works well), and two small crew silhouettes are actually working the
 // tower rather than just standing there.
+import { useT, t as tr } from './lib/i18n.js';
+
 export default function Splash({ onDone, minDurationMs = 2600 }) {
+  useT();
   const [leaving, setLeaving] = useState(false);
   const reduceMotion = useReducedMotion();
 
@@ -42,7 +45,7 @@ export default function Splash({ onDone, minDurationMs = 2600 }) {
     <motion.div
       role="status"
       aria-live="polite"
-      aria-label="Loading OMS-UPCL"
+      aria-label={tr('splash.loading')}
       initial={{ opacity: 1 }}
       animate={{ opacity: leaving ? 0 : 1, scale: leaving ? 1.02 : 1 }}
       transition={t({ duration: 0.4, ease: 'easeInOut' })}
@@ -220,7 +223,7 @@ export default function Splash({ onDone, minDurationMs = 2600 }) {
         transition={t({ duration: 0.48, delay: 1.25, ease: 'easeOut' })}
         style={{ position: 'relative', zIndex: 1, fontFamily: "'Inter', system-ui, sans-serif", fontSize: 13, color: '#9fb0c4' }}
       >
-        Outage Management System · UPCL
+        {tr('splash.sub')}
       </motion.div>
 
       <motion.div
@@ -238,7 +241,7 @@ export default function Splash({ onDone, minDurationMs = 2600 }) {
           />
         ))}
         <span style={{ fontFamily: "'Inter', system-ui, sans-serif", fontSize: 12, color: '#8296ab', marginLeft: 4 }}>
-          Energizing the grid
+          {tr('splash.energizing')}
         </span>
       </motion.div>
     </motion.div>

@@ -2,8 +2,10 @@ import { useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
 import { CrewDot, Icon, SevBadge, StatusBadge, timeAgo, useLiveRefresh, RowButton } from '../lib/ui.jsx';
 import ReliabilityRings from '../components/ReliabilityRings.jsx';
+import { useT, tOr } from '../lib/i18n.js';
 
 export default function Dashboard({ go }) {
+  const { t } = useT();
   const [inc, setInc] = useState([]);
   const [crews, setCrews] = useState([]);
   const [ind, setInd] = useState(null);
@@ -37,33 +39,33 @@ export default function Dashboard({ go }) {
     <>
       <div className="page-head">
         <div>
-          <div className="eyebrow">Control Room</div>
-          <h2>Operations Overview</h2>
+          <div className="eyebrow">{t('dash.eyebrow')}</div>
+          <h2>{t('dash.title')}</h2>
         </div>
         <button className="btn primary" onClick={() => go('incidents')}>
-          <Icon name="bolt" size={16} /> View all incidents
+          <Icon name="bolt" size={16} /> {t('dash.viewAll')}
         </button>
       </div>
 
       <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(190px,1fr))', marginBottom: 16 }}>
-        {stat('Active incidents', active.length, '', `${inc.filter(i => i.severity === 'critical' && !['closed', 'resolved'].includes(i.status)).length} critical`, 'var(--crit)')}
-        {stat('Customers affected', affected.toLocaleString(), '', 'across live outages', 'var(--high)')}
-        {stat('Crews deployed', deployed, `/${crews.length}`, `${crews.filter(c => c.status === 'available').length} available`, 'var(--live)')}
-        {stat('SLA breach risk', slaRisk, '', 'within 30 min window', slaRisk ? 'var(--crit)' : 'var(--low)')}
+        {stat(t('dash.active'), active.length, '', t('dash.nCritical', { n: inc.filter(i => i.severity === 'critical' && !['closed', 'resolved'].includes(i.status)).length }), 'var(--crit)')}
+        {stat(t('dash.affected'), affected.toLocaleString(), '', t('dash.acrossLive'), 'var(--high)')}
+        {stat(t('dash.deployed'), deployed, `/${crews.length}`, t('dash.nAvailable', { n: crews.filter(c => c.status === 'available').length }), 'var(--live)')}
+        {stat(t('dash.slaRisk'), slaRisk, '', t('dash.within30'), slaRisk ? 'var(--crit)' : 'var(--low)')}
       </div>
 
       <div className="grid" style={{ gridTemplateColumns: '1.6fr 1fr' }}>
         <div className="card">
-          <div className="card-h"><h3>Active incidents</h3><span className="eyebrow">{active.length} open</span></div>
+          <div className="card-h"><h3>{t('dash.active')}</h3><span className="eyebrow">{t('dash.nOpen', { n: active.length })}</span></div>
           {/* Scrollable region must be focusable so keyboard users can scroll it (WCAG 2.1.1). */}
           {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
-          <div tabIndex={0} role="region" aria-label="Active incidents table" style={{ overflow: 'auto', maxHeight: 380 }}>
+          <div tabIndex={0} role="region" aria-label={t('dash.tableLabel')} style={{ overflow: 'auto', maxHeight: 380 }}>
             <table>
-              <thead><tr><th>ID</th><th>Severity</th><th>Zone</th><th>Feeder</th><th>Customers</th><th>Status</th></tr></thead>
+              <thead><tr>{['id', 'severity', 'zone', 'feeder', 'customers', 'status'].map((c) => <th key={c}>{t(`col.${c}`)}</th>)}</tr></thead>
               <tbody>
                 {active.map((i) => (
                   <tr key={i.id} className="click" onClick={() => go('incidents')}>
-                    <td className="id-cell"><RowButton label={`Go to incidents (${i.id})`} onActivate={() => go('incidents')}>{i.id.slice(-6)}</RowButton></td>
+                    <td className="id-cell"><RowButton label={t('dash.goTo', { id: i.id })} onActivate={() => go('incidents')}>{i.id.slice(-6)}</RowButton></td>
                     <td><SevBadge sev={i.severity} /></td>
                     <td>{i.zone}</td>
                     <td className="mono" style={{ fontSize: 12 }}>{i.feeder || '—'}</td>
@@ -71,7 +73,7 @@ export default function Dashboard({ go }) {
                     <td><StatusBadge status={i.status} /></td>
                   </tr>
                 ))}
-                {!active.length && <tr><td colSpan={6}><div className="empty"><span className="disp">All clear</span>No active incidents on the corridor.</div></td></tr>}
+                {!active.length && <tr><td colSpan={6}><div className="empty"><span className="disp">{t('dash.allClear')}</span>{t('dash.noActive')}</div></td></tr>}
               </tbody>
             </table>
           </div>
@@ -79,7 +81,7 @@ export default function Dashboard({ go }) {
 
         <div style={{ display: 'grid', gap: 16, alignContent: 'start' }}>
           <div className="card">
-            <div className="card-h"><h3>Reliability · IEEE 1366</h3></div>
+            <div className="card-h"><h3>{t('dash.reliability')}</h3></div>
             <div className="card-b" style={{ display: 'grid', gap: 14 }}>
               {ind && (
                 <ReliabilityRings
@@ -93,7 +95,7 @@ export default function Dashboard({ go }) {
           </div>
 
           <div className="card">
-            <div className="card-h"><h3>Crew status</h3></div>
+            <div className="card-h"><h3>{t('dash.crewStatus')}</h3></div>
             <div className="card-b" style={{ display: 'grid', gap: 9 }}>
               {crews.map((c) => (
                 <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -102,7 +104,7 @@ export default function Dashboard({ go }) {
                     <div style={{ fontWeight: 500, fontSize: 13 }}>{c.name}</div>
                     <div style={{ fontSize: 11.5, color: 'var(--muted)' }}>{c.lead} · {c.location}</div>
                   </div>
-                  <span style={{ fontSize: 11.5, color: 'var(--muted)' }} className="mono">{c.status.replace('_', ' ')}</span>
+                  <span style={{ fontSize: 11.5, color: 'var(--muted)' }} className="mono">{tOr(`crew.lc.${c.status}`, c.status.replace('_', ' '))}</span>
                 </div>
               ))}
             </div>
