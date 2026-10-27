@@ -14,7 +14,10 @@
 // How the graph is built (all decisions 2026-10-26):
 //   * Lines: every htLines and feederLines path is an ACLineSegment. Line
 //     ends within LINE_JOIN_M of another line join it (end-to-end, or a
-//     T onto the other line's interior, which splits it there).
+//     T onto the other line's interior, which splits it there) -- closest
+//     candidate first, and never so that a node spans more than
+//     NODE_MAX_SPAN_M. A bare join between different feeders (no device
+//     near it) is made only up to CROSS_FEEDER_BARE_JOIN_M (2026-10-27).
 //   * Devices connect by THEIR OWN position only: the nearest point on any
 //     line segment, <=SNAP_M snap, <=FLAG_M snap + flag, beyond that not
 //     snapped. A device id's prefix is never used to place it next to its
@@ -60,12 +63,20 @@
 // Writes: one transaction, every insert ON CONFLICT (cim_mrid) DO UPDATE --
 // all-or-nothing and safe to re-run. Rows this importer wrote on an earlier
 // run that the current build no longer produces (e.g. a line piece that a
-// rule change removed) are COUNTED and reported, never deleted silently.
+// rule change removed) are DELETED in the same transaction, before the
+// inserts -- left behind, a stale terminal would keep an old join alive.
+// Only rows this importer owns are touched (ownedStale below: its mRID
+// prefixes, and a node only when no other importer's terminal uses it);
+// never the Dehradun CIM rows, network.protection_assets, or anything else.
+// If any stale row is still referenced (an incident, a switching step, a
+// planned outage, the safety log, an asset scan or a protection asset),
+// the whole run is refused and rolled back, naming the rows.
 // The network.* schema must already exist (db/migrations/
 // network_topology_schema.sql is applied separately, as for importCimNetwork.js).
 //
 // Run: node src/infra/importHaridwarInferred.js            (in-memory build + summary, writes nothing)
 //      node src/infra/importHaridwarInferred.js --join=1   (same, with a different LINE_JOIN_M)
+//      node src/infra/importHaridwarInferred.js --dry-run  (build, then report what --write would write and delete; read-only)
 //      node src/infra/importHaridwarInferred.js --write    (build, summary, then write to DATABASE_URL)
 import 'dotenv/config';
 import { readFileSync } from 'node:fs';
@@ -160,6 +171,21 @@ export const SUB_NEAR_M = 300;
 // spread from 0.1 to 30 m with no clean break, so the device snap tolerance
 // is reused. The summary prints the component count at 1/10/30 m.
 export const LINE_JOIN_M = 10;
+// Diameter cap (decided 2026-10-27): a node may not span more than this.
+// Joins chain -- A joins B, B joins C -- so without a cap one node grew to
+// ~20 m and swallowed unrelated lines (135 nodes over 10 m). A join is made
+// only if the line end is within this of EVERY join point already in the
+// node. Candidate joins are applied closest first (ties by mRID), so the
+// result does not depend on the order of the file.
+export const NODE_MAX_SPAN_M = 10;
+// A join between lines of DIFFERENT feeders with no device within
+// BARE_JOIN_DEVICE_M of it is made only at this gap or less; beyond it, it
+// goes into raw_attrs.join_candidates. Two feeders meeting with nothing there
+// is most often two lines drawn close together, not a tie point; a real tie
+// has a switch or fuse at it. (Measured: halves the bare cross-feeder nodes,
+// 342 -> 141, with no component split and no switch changing behaviour.)
+export const CROSS_FEEDER_BARE_JOIN_M = 3;
+export const BARE_JOIN_DEVICE_M = 10;
 // A device whose nearest line point is within this of the line's end is ON
 // that end (a node), not inside the line.
 const AT_END_M = 1;
@@ -284,37 +310,95 @@ export function buildGraph(net, { lineJoinM = LINE_JOIN_M } = {}) {
   // and each cut gets a key; a cut that hosts in-line devices has a left and
   // a right key (the device bridges them).
   const uf = new UnionFind();
-  lines.forEach((l, i) => { l.idx = i; uf.add(`L${i}@0`); uf.add(`L${i}@${endS(l)}`); });
+  // Where each key sits, for the diameter cap: a line end's point, a cut's point.
+  const keyPoint = new Map();
+  lines.forEach((l, i) => {
+    l.idx = i;
+    uf.add(`L${i}@0`); uf.add(`L${i}@${endS(l)}`);
+    keyPoint.set(`L${i}@0`, l.path[0]); keyPoint.set(`L${i}@${endS(l)}`, l.path.at(-1));
+  });
+  // The join points of each node (by union-find root), and the cap check:
+  // two nodes merge only if every pair of their join points is within NODE_MAX_SPAN_M.
+  const setPts = new Map();
+  const ptsOf = (k) => setPts.get(uf.find(k)) || [keyPoint.get(k)];
+  const fits = (P1, P2) => P1.every((x) => P2.every((y) => pm(x, y) <= NODE_MAX_SPAN_M));
+  const capUnion = (k1, k2) => {
+    if (uf.find(k1) === uf.find(k2)) return true;
+    const P1 = ptsOf(k1), P2 = ptsOf(k2);
+    if (!fits(P1, P2)) return false;
+    uf.union(k1, k2); setPts.set(uf.find(k1), [...P1, ...P2]);
+    return true;
+  };
+
+  // Devices near a point (any class, by raw position) -- the cross-feeder rule.
+  const devicePoints = ['switches', 'fuses', 'rmus', 'distTx', 'powerTx'].flatMap((c) => (net[c] || []).filter(hasPos).map((r) => [r.lat, r.lon]));
+  const GRID = 0.0002; // degrees, ~20 m: a device within BARE_JOIN_DEVICE_M is in this cell or a neighbour
+  const cellOf = (q) => `${Math.floor(q[0] / GRID)},${Math.floor(q[1] / GRID)}`;
+  const deviceGrid = new Map();
+  for (const d of devicePoints) (deviceGrid.get(cellOf(d)) || deviceGrid.set(cellOf(d), []).get(cellOf(d))).push(d);
+  const deviceNear = (q) => {
+    const [i, j] = cellOf(q).split(',').map(Number);
+    for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) {
+      for (const d of deviceGrid.get(`${i + di},${j + dj}`) || []) if (pm(q, d) <= BARE_JOIN_DEVICE_M) return true;
+    }
+    return false;
+  };
 
   // -- Line ends -> other lines --
+  // Every candidate (a line end within lineJoinM of another line) is
+  // collected first, then applied closest first, ties by mRID: the outcome
+  // of the diameter cap then does not depend on the order of the file.
   let endToEnd = 0;
   let endToInterior = 0;
-  const joinCandidates = []; // a line end with no join <=lineJoinM, but another line <=FLAG_M
+  let capRefused = 0;
+  let crossFeederRefused = 0;
+  const joinCandidates = []; // not joined: 10-30 m away, or a bare cross-feeder join over CROSS_FEEDER_BARE_JOIN_M
+  const recordCandidate = (a, end, line, m, reason) => {
+    const c = { end: end === 0 ? 'start' : 'end', nearestLine: line.mrid, nearestLineFeeder: line.feeder, distanceM: +m.toFixed(1), ...(reason ? { reason } : {}) };
+    (a.raw_attrs.join_candidates ??= []).push(c);
+    joinCandidates.push({ line: a.mrid, feeder: a.feeder, ...c, sameFeeder: a.feeder === line.feeder });
+  };
+  const joins = [];
   for (const a of lines) {
     for (const end of [0, endS(a)]) {
       const p = a.path[end];
-      let joined = false;
+      let any = false;
       let candidate = null;
       for (const b of lines) {
         if (b === a) continue;
         const near = nearestOn(b, p);
         if (near.m > lineJoinM) {
-          if (near.m <= FLAG_M && (!candidate || near.m < candidate.m)) candidate = { m: near.m, line: b };
+          if (near.m <= FLAG_M && (!candidate || near.m < candidate.m || (near.m === candidate.m && b.mrid < candidate.line.mrid))) candidate = { m: near.m, line: b };
           continue;
         }
-        joined = true;
-        const s = settle(b, near.s);
-        if (s === 0 || s === endS(b)) { uf.union(`L${a.idx}@${end}`, `L${b.idx}@${s}`); endToEnd++; }
-        else { const key = addCut(b, s, null); uf.union(`L${a.idx}@${end}`, key); endToInterior++; }
+        any = true;
+        joins.push({ a, end, b, s: settle(b, near.s), gap: near.m, p });
       }
-      if (!joined && candidate) {
-        const c = { end: end === 0 ? 'start' : 'end', nearestLine: candidate.line.mrid, nearestLineFeeder: candidate.line.feeder, distanceM: +candidate.m.toFixed(1) };
-        (a.raw_attrs.join_candidates ??= []).push(c);
-        joinCandidates.push({ line: a.mrid, feeder: a.feeder, ...c, sameFeeder: a.feeder === candidate.line.feeder });
-      }
+      if (!any && candidate) recordCandidate(a, end, candidate.line, candidate.m);
     }
   }
-  report.lineJoins = { lineJoinM, endToEnd, endToInteriorT: endToInterior };
+  const cmp = (x, y) => (x < y ? -1 : x > y ? 1 : 0);
+  joins.sort((x, y) => (x.gap - y.gap) || cmp(x.a.mrid, y.a.mrid) || (x.end - y.end) || cmp(x.b.mrid, y.b.mrid) || (x.s - y.s));
+  for (const { a, end, b, s, gap, p } of joins) {
+    if (a.feeder !== b.feeder && gap > CROSS_FEEDER_BARE_JOIN_M && !deviceNear(p)) {
+      crossFeederRefused++;
+      recordCandidate(a, end, b, gap, `different feeders, no device within ${BARE_JOIN_DEVICE_M} m, over ${CROSS_FEEDER_BARE_JOIN_M} m: not joined`);
+      continue;
+    }
+    const aKey = `L${a.idx}@${end}`;
+    if (s === 0 || s === endS(b)) {
+      if (capUnion(aKey, `L${b.idx}@${s}`)) endToEnd++; else capRefused++;
+      continue;
+    }
+    // A T onto b's interior: checked before the cut is made, so a refused
+    // join leaves no empty cut (and no extra line piece) behind.
+    const at = pointAt(b.path, s);
+    const existing = b.cuts.find((x) => pm(pointAt(b.path, x.s), at) <= SAME_CUT_M);
+    if (uf.find(aKey) !== (existing && uf.find(existing.left)) && !fits(ptsOf(aKey), existing ? ptsOf(existing.left) : [at])) { capRefused++; continue; }
+    capUnion(aKey, addCut(b, s, null));
+    endToInterior++;
+  }
+  report.lineJoins = { lineJoinM, endToEnd, endToInteriorT: endToInterior, refusedByNodeSpanCap: capRefused, refusedCrossFeederBare: crossFeederRefused };
   report.joinCandidates = joinCandidates;
 
   // -- feederLines: the end nearest their own substation joins its bus --
@@ -524,6 +608,7 @@ export function buildGraph(net, { lineJoinM = LINE_JOIN_M } = {}) {
       const id = `L${line.idx}@${s.toFixed(6)}`;
       c = { s, left: `${id}<`, right: `${id}>`, devices: [] };
       uf.add(c.left); uf.add(c.right);
+      keyPoint.set(c.left, at); keyPoint.set(c.right, at);
       // A cut with no in-line device is just a node: both sides are one key.
       uf.union(c.left, c.right);
       line.cuts.push(c);
@@ -575,7 +660,11 @@ const feederMridOf = (g) => {
 };
 const wkt = (path) => `SRID=4326;LINESTRING(${path.map(([la, lo]) => `${lo} ${la}`).join(',')})`;
 
-// Rows this importer owns, by mRID prefix -- used only to count stale rows.
+// Rows this importer owns, by mRID prefix. A 'CN:' node is owned only when
+// no terminal of another source uses it (a selftest or another import may
+// also name nodes 'CN:...'). The Dehradun CIM rows use none of these
+// prefixes; network.protection_assets ('RMU:', the RMU backfill) is never
+// written or deleted here.
 const OWNED = {
   substations: ['SS:%'],
   feeders: ['FEEDER:%', 'FDR:%'],
@@ -583,16 +672,132 @@ const OWNED = {
   connectivity_nodes: ['CN:%'],
   terminals: ['LINE:%', 'SW:%', 'FUSE:%', 'DT:%', 'PT:%'],
 };
+const TABLES = ['terminals', 'conducting_equipment', 'connectivity_nodes', 'feeders', 'substations']; // delete order
 
-export async function writeGraph(g) {
+// The run refused: stale rows that something still references. Nothing was written.
+export class ImportRefused extends Error {
+  constructor(references) {
+    super(`refused: ${references.length} reference(s) to rows this run would delete -- nothing written, rolled back`);
+    this.references = references;
+  }
+}
+
+const builtMrids = (g) => ({
+  substations: g.substations.map((s) => s.mrid), feeders: g.feeders.map((f) => f.mrid),
+  conducting_equipment: g.equipment.map((e) => e.mrid), connectivity_nodes: g.nodes.map((n) => n.mrid), terminals: g.terminals.map((x) => x.mrid),
+});
+
+// This importer's rows that the build no longer produces: { table: [{ id, cim_mrid }] },
+// plus how many 'CN:' nodes were left alone because another source's terminal uses them.
+async function ownedStale(t, built) {
+  const stale = {};
+  for (const table of ['terminals', 'conducting_equipment', 'feeders', 'substations']) {
+    stale[table] = await t.any(`SELECT id, cim_mrid FROM network.${table} WHERE cim_mrid LIKE ANY($1) AND NOT (cim_mrid = ANY($2)) ORDER BY cim_mrid`, [OWNED[table], built[table]]);
+  }
+  const nodes = await t.any(
+    `SELECT n.id, n.cim_mrid, EXISTS (SELECT 1 FROM network.terminals x WHERE x.connectivity_node_id = n.id AND NOT (x.cim_mrid LIKE ANY($3))) AS foreign_use
+     FROM network.connectivity_nodes n WHERE n.cim_mrid LIKE ANY($1) AND NOT (n.cim_mrid = ANY($2)) ORDER BY n.cim_mrid`,
+    [OWNED.connectivity_nodes, built.connectivity_nodes, OWNED.terminals]);
+  stale.connectivity_nodes = nodes.filter((n) => !n.foreign_use).map(({ id, cim_mrid }) => ({ id, cim_mrid }));
+  return { stale, nodesLeftAlone: nodes.filter((n) => n.foreign_use).length };
+}
+
+// Everything that still points at a stale row. A check whose column (or
+// table) does not exist in this database is skipped and listed as such.
+async function staleReferences(t, stale) {
+  const has = async (schema, table, column) => !!(await t.oneOrNone(
+    'SELECT 1 FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 AND column_name = $3', [schema, table, column]));
+  const ids = (table) => stale[table].map((r) => r.id);
+  const eqMrids = stale.conducting_equipment.map((r) => r.cim_mrid);
+  const allMrids = TABLES.flatMap((table) => stale[table].map((r) => r.cim_mrid));
+  const rawIds = eqMrids.filter((m) => !m.startsWith('LINE:')).map((m) => m.slice(m.indexOf(':') + 1).split('#')[0]);
+  const refs = [];
+  const skipped = [];
+  const checked = [];
+  const check = async (label, [schema, table, column], sql, params) => {
+    if (!(await has(schema, table, column))) { skipped.push(`${label}: ${schema}.${table}.${column} does not exist in this database`); return; }
+    checked.push(label);
+    for (const r of await t.any(sql, params)) refs.push({ check: label, row: r.row, references: r.ref });
+  };
+  await check('incident tripped equipment', ['public', 'incidents', 'tripped_equipment_id'],
+    `SELECT 'incidents ' || i.id AS row, ce.cim_mrid AS ref FROM incidents i JOIN network.conducting_equipment ce ON ce.id = i.tripped_equipment_id WHERE i.tripped_equipment_id = ANY($1::bigint[])`, [ids('conducting_equipment')]);
+  // switching_plans hold no device mRID themselves; a plan refers to devices through its steps
+  await check('switching plan step device', ['public', 'switching_steps', 'device_mrid'],
+    `SELECT 'switching_steps ' || s.id || ' (plan ' || s.plan_id || ')' AS row, s.device_mrid AS ref FROM switching_steps s WHERE s.device_mrid = ANY($1)`, [eqMrids]);
+  await check('planned outage work device', ['public', 'planned_outages', 'work_mrid'],
+    `SELECT 'planned_outages ' || id AS row, work_mrid AS ref FROM planned_outages WHERE work_mrid = ANY($1)`, [eqMrids]);
+  await check('safety log details', ['public', 'safety_log', 'details'],
+    `SELECT 'safety_log ' || l.id AS row, m AS ref FROM safety_log l, unnest($1::text[]) m WHERE strpos(l.details::text, '"' || m || '"') > 0`, [allMrids]);
+  await check('asset scan', ['public', 'asset_scans', 'asset_id'],
+    `SELECT 'asset_scans ' || id AS row, coalesce(asset_id, raw_value) AS ref FROM asset_scans WHERE asset_id = ANY($1) OR raw_value = ANY($1) OR asset_id = ANY($2) OR raw_value = ANY($2)`, [eqMrids, rawIds]);
+  await check('protection asset equipment', ['network', 'protection_assets', 'equipment_id'],
+    `SELECT 'protection_assets ' || pa.cim_mrid AS row, ce.cim_mrid AS ref FROM network.protection_assets pa JOIN network.conducting_equipment ce ON ce.id = pa.equipment_id WHERE pa.equipment_id = ANY($1::bigint[])`, [ids('conducting_equipment')]);
+  await check('protection asset terminal', ['network', 'protection_assets', 'terminal_id'],
+    `SELECT 'protection_assets ' || pa.cim_mrid AS row, x.cim_mrid AS ref FROM network.protection_assets pa JOIN network.terminals x ON x.id = pa.terminal_id WHERE pa.terminal_id = ANY($1::bigint[])`, [ids('terminals')]);
+  // network.* rows of another source pointing at one of ours
+  await check('another source\'s network row', ['network', 'terminals', 'equipment_id'],
+    `SELECT 'network.terminals ' || x.cim_mrid AS row, ce.cim_mrid AS ref FROM network.terminals x JOIN network.conducting_equipment ce ON ce.id = x.equipment_id
+       WHERE x.equipment_id = ANY($1::bigint[]) AND NOT (x.cim_mrid LIKE ANY($4))
+     UNION ALL SELECT 'network.conducting_equipment ' || ce.cim_mrid, f.cim_mrid FROM network.conducting_equipment ce JOIN network.feeders f ON f.id = ce.feeder_id
+       WHERE ce.feeder_id = ANY($2::bigint[]) AND NOT (ce.cim_mrid LIKE ANY($5))
+     UNION ALL SELECT 'network.connectivity_nodes ' || n.cim_mrid, f.cim_mrid FROM network.connectivity_nodes n JOIN network.feeders f ON f.id = n.feeder_id
+       WHERE n.feeder_id = ANY($2::bigint[]) AND NOT (n.cim_mrid LIKE ANY($6))
+     UNION ALL SELECT 'network.feeders ' || f.cim_mrid, s.cim_mrid FROM network.feeders f JOIN network.substations s ON s.id = f.substation_id
+       WHERE f.substation_id = ANY($3::bigint[]) AND NOT (f.cim_mrid LIKE ANY($7))`,
+    [ids('conducting_equipment'), ids('feeders'), ids('substations'), OWNED.terminals, OWNED.conducting_equipment, OWNED.connectivity_nodes, OWNED.feeders]);
+  return { refs, checked, skipped };
+}
+
+// Writes the build in one transaction: stale rows of this importer are
+// deleted first (refused, with the references, if anything still uses
+// them), then everything is upserted and read back. { dryRun: true } runs
+// the same planning in a READ ONLY transaction and writes nothing.
+export async function writeGraph(g, { dryRun = false, endPool = true } = {}) {
   const { db } = await import('./db.js'); // only the write path needs a database
   const ready = await db.one(`SELECT to_regclass('network.conducting_equipment') IS NOT NULL AS ok`);
   if (!ready.ok) throw new Error('network.* schema not found -- apply db/migrations/network_topology_schema.sql first');
   const feederMrid = feederMridOf(g);
   const CHUNK = 2000;
   const chunks = (rows) => Array.from({ length: Math.ceil(rows.length / CHUNK) }, (_v, i) => rows.slice(i * CHUNK, (i + 1) * CHUNK));
+  const built = builtMrids(g);
 
-  const stats = await db.tx('import-haridwar-inferred', async (t) => {
+  try {
+  return await db.tx('import-haridwar-inferred', async (t) => {
+    if (dryRun) await t.none('SET TRANSACTION READ ONLY');
+    const { stale, nodesLeftAlone } = await ownedStale(t, built);
+    const { refs, checked, skipped } = await staleReferences(t, stale);
+    const toDelete = Object.fromEntries(TABLES.map((table) => [table, stale[table].length]));
+
+    if (dryRun) {
+      const existing = {};
+      for (const table of TABLES) {
+        existing[table] = (await t.one(`SELECT count(*)::int n FROM network.${table} WHERE cim_mrid = ANY($1)`, [built[table]])).n;
+      }
+      return {
+        dryRun: true,
+        wouldWrite: Object.fromEntries(TABLES.map((table) => [table, { total: built[table].length, update: existing[table], insert: built[table].length - existing[table] }])),
+        wouldDelete: toDelete,
+        wouldDeleteExamples: Object.fromEntries(TABLES.map((table) => [table, stale[table].slice(0, 5).map((r) => r.cim_mrid)])),
+        nodesLeftAlone, referencesChecked: checked, referenceChecksSkipped: skipped,
+        wouldRefuse: refs.length > 0, references: refs,
+      };
+    }
+    if (refs.length) throw new ImportRefused(refs);
+
+    // Our own rows that are rewritten below but still point at a stale row
+    // are unhooked first; the upserts re-point them. (Another source's rows
+    // pointing at ours were refused above.)
+    const staleIds = (table) => stale[table].map((r) => r.id);
+    await t.none(`UPDATE network.terminals SET connectivity_node_id = NULL WHERE connectivity_node_id = ANY($1::bigint[])`, [staleIds('connectivity_nodes')]);
+    await t.none(`UPDATE network.conducting_equipment SET feeder_id = NULL WHERE feeder_id = ANY($1::bigint[]) AND cim_mrid LIKE ANY($2)`, [staleIds('feeders'), OWNED.conducting_equipment]);
+    await t.none(`UPDATE network.connectivity_nodes SET feeder_id = NULL WHERE feeder_id = ANY($1::bigint[]) AND cim_mrid LIKE ANY($2)`, [staleIds('feeders'), OWNED.connectivity_nodes]);
+    await t.none(`UPDATE network.feeders SET substation_id = NULL WHERE substation_id = ANY($1::bigint[]) AND cim_mrid LIKE ANY($2)`, [staleIds('substations'), OWNED.feeders]);
+    const deleted = {};
+    for (const table of TABLES) {
+      deleted[table] = (await t.result(`DELETE FROM network.${table} WHERE id = ANY($1::bigint[])`, [staleIds(table)])).rowCount;
+      if (deleted[table] !== stale[table].length) throw new Error(`${table}: meant to delete ${stale[table].length}, deleted ${deleted[table]} -- rolled back`);
+    }
+
     await t.none(
       `INSERT INTO network.substations (cim_mrid, name, code, geog, raw_attrs)
        SELECT r.mrid, r.name, r.code, ST_SetSRID(ST_MakePoint(r.lon, r.lat), 4326)::geography, r.attrs
@@ -647,30 +852,28 @@ export async function writeGraph(g) {
       );
     }
 
-    // Read back what this run owns; any mismatch with the build aborts the
-    // whole transaction rather than leaving a half-written graph.
-    const current = {
-      substations: g.substations.map((s) => s.mrid), feeders: g.feeders.map((f) => f.mrid),
-      conducting_equipment: g.equipment.map((e) => e.mrid), connectivity_nodes: g.nodes.map((n) => n.mrid), terminals: g.terminals.map((x) => x.mrid),
-    };
+    // Read back what this run owns; any mismatch with the build -- a row
+    // missing, or one of ours left over -- aborts the whole transaction
+    // rather than leaving a half-written graph.
     const out = {};
-    const stale = {};
-    for (const [table, mrids] of Object.entries(current)) {
+    for (const [table, mrids] of Object.entries(built)) {
       const r = await t.one(
         `SELECT count(*) FILTER (WHERE cim_mrid = ANY($2))::int AS written,
-                count(*) FILTER (WHERE NOT (cim_mrid = ANY($2)))::int AS stale
+                count(*) FILTER (WHERE NOT (cim_mrid = ANY($2)))::int AS leftover
          FROM network.${table} WHERE cim_mrid LIKE ANY($1)`,
         [OWNED[table], mrids]
       );
       if (r.written !== mrids.length) throw new Error(`${table}: built ${mrids.length}, found ${r.written} after write -- rolled back`);
+      const allowed = table === 'connectivity_nodes' ? nodesLeftAlone : 0;
+      if (r.leftover !== allowed) throw new Error(`${table}: ${r.leftover} row(s) of this importer left over after the stale delete (expected ${allowed}) -- rolled back`);
       out[table] = r.written;
-      stale[table] = r.stale;
     }
     const noGeog = await t.one(`SELECT count(*)::int n FROM network.conducting_equipment WHERE cim_mrid LIKE ANY($1) AND geog IS NULL`, [OWNED.conducting_equipment]);
-    return { written: out, staleFromEarlierRuns: stale, equipmentWithNoGeog: noGeog.n };
+    return { written: out, deleted, nodesLeftAlone, referencesChecked: checked, referenceChecksSkipped: skipped, equipmentWithNoGeog: noGeog.n };
   });
-  await db.$pool.end();
-  return stats;
+  } finally {
+    if (endPool) await db.$pool.end();
+  }
 }
 
 // ---- Summary ----
@@ -703,6 +906,8 @@ function summarize(g) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const write = process.argv.includes('--write');
+  const dryRun = process.argv.includes('--dry-run');
+  if (write && dryRun) { console.error('--write and --dry-run together: pick one'); process.exit(2); }
   const joinArg = process.argv.find((a) => a.startsWith('--join='));
   const lineJoinM = joinArg ? Number(joinArg.slice(7)) : LINE_JOIN_M;
   const net = JSON.parse(readFileSync(NET_PATH, 'utf8'));
@@ -711,7 +916,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const s = summarize(g);
   const r = g.report;
 
-  console.log(write ? '[importHaridwarInferred] build, then WRITE to DATABASE_URL' : '[importHaridwarInferred] IN-MEMORY BUILD ONLY -- nothing written to any database');
+  console.log(write ? '[importHaridwarInferred] build, then WRITE to DATABASE_URL' : dryRun ? '[importHaridwarInferred] build, then DRY RUN against DATABASE_URL (read-only)' : '[importHaridwarInferred] IN-MEMORY BUILD ONLY -- nothing written to any database');
   console.log('source:', NET_PATH, `(${((Date.now() - t0) / 1000).toFixed(1)} s)`);
   console.log('counts in:', Object.fromEntries(['substations', 'htLines', 'feederLines', 'switches', 'fuses', 'distTx', 'rmus', 'powerTx'].map((k) => [k, (net[k] || []).length])));
   console.log('not imported here: rmus (backfillRmusToProtectionAssets.js), top-level feeders list (feeders come from the lines)');
@@ -724,7 +929,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   console.log('feederLines -> own substation bus:', { attached: r.feederLineToBus.attached, unresolved: r.feederLineToBus.unresolved, tooFar: r.feederLineToBus.tooFar.length });
   if (r.feederLineToBus.tooFar.length) console.table(r.feederLineToBus.tooFar);
   const jc = r.joinCandidates;
-  console.log(`line-join candidates for human review (line end with no join <=${lineJoinM} m, another line ${lineJoinM}-${FLAG_M} m away; NOT joined): ${jc.length} (same feeder: ${jc.filter((x) => x.sameFeeder).length}, different feeder: ${jc.filter((x) => !x.sameFeeder).length}) -- stored in raw_attrs.join_candidates`);
+  const bare = jc.filter((x) => x.reason).length;
+  console.log(`line-join candidates for human review (NOT joined), stored in raw_attrs.join_candidates: ${jc.length}`
+    + ` -- ${jc.length - bare} line ends with no join <=${lineJoinM} m but another line ${lineJoinM}-${FLAG_M} m away (same feeder: ${jc.filter((x) => !x.reason && x.sameFeeder).length}, different: ${jc.filter((x) => !x.reason && !x.sameFeeder).length});`
+    + ` ${bare} bare joins between different feeders over ${CROSS_FEEDER_BARE_JOIN_M} m (no device within ${BARE_JOIN_DEVICE_M} m)`);
   if (jc.length) console.table(jc.slice(0, 10));
   console.log(`powerTx -> own substation bus (id prefix and name code agree, <=${SUB_NEAR_M} m): attached ${r.powerTx.attached}, rejected ${r.powerTx.rejected.length}`);
   if (r.powerTx.rejected.length) console.table(r.powerTx.rejected);
@@ -753,11 +961,27 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     console.log(`  LINE_JOIN_M=${m}${m === lineJoinM ? ' (used)' : ''}: ${gg.components.length} / ${a} / ${gg.components.length - a}; largest ${gg.components[0]?.equipment}`);
   }
 
+  if (dryRun) {
+    const plan = await writeGraph(g, { dryRun: true });
+    console.log('\n[importHaridwarInferred] DRY RUN against DATABASE_URL (read-only transaction, nothing written):');
+    console.log('would write (upsert):'); console.table(plan.wouldWrite);
+    console.log('would delete (this importer\'s stale rows only):', plan.wouldDelete);
+    console.log('examples:', plan.wouldDeleteExamples);
+    console.log(`'CN:' nodes not produced by this build but used by another source's terminals (left alone): ${plan.nodesLeftAlone}`);
+    console.log('reference checks run:', plan.referencesChecked);
+    if (plan.referenceChecksSkipped.length) console.log('reference checks SKIPPED:', plan.referenceChecksSkipped);
+    if (plan.wouldRefuse) { console.log(`--write WOULD BE REFUSED: ${plan.references.length} reference(s) to rows it would delete:`); console.table(plan.references); }
+    else console.log('--write would proceed: no row it would delete is referenced.');
+  }
   if (write) {
-    const stats = await writeGraph(g);
-    console.log('\n[importHaridwarInferred] written (one transaction):', stats);
-    if (Object.values(stats.staleFromEarlierRuns).some(Boolean)) {
-      console.warn('WARNING: rows from an earlier run that this build no longer produces are still in the database (counted above, not deleted).');
+    try {
+      const stats = await writeGraph(g);
+      console.log('\n[importHaridwarInferred] written (one transaction):', stats);
+    } catch (e) {
+      if (!(e instanceof ImportRefused)) throw e;
+      console.error(`\n[importHaridwarInferred] ${e.message}`);
+      console.table(e.references);
+      process.exit(1);
     }
   }
   process.exit(0);
