@@ -37,3 +37,14 @@ export const plannedApi = {
   refusePermit: (permitId, reason) => call('POST', `/permits/${permitId}/refuse`, { reason }),
   returnOnBehalf: (permitId, body) => call('POST', `/permits/${permitId}/return-on-behalf`, { clientRequestId: newClientId(), ...body }),
 };
+
+// OMS-05: a fault incident's own switching plan. Same rules and safety log;
+// steps are confirmed with plannedApi.confirmStep (one route for every owner).
+export const incidentPlanApi = {
+  get: (incidentId) => call('GET', `/incidents/${incidentId}/switching-plan`), // { incident, plan (null until drafted), steps }
+  safetyLog: (incidentId) => call('GET', `/incidents/${incidentId}/safety-log`),
+  draftFromTrace: (incidentId, body) => call('POST', `/incidents/${incidentId}/switching-plan/draft`, body),
+  saveSteps: (incidentId, steps) => call('PUT', `/incidents/${incidentId}/switching-plan/steps`, { steps }),
+  approve: (incidentId) => call('POST', `/incidents/${incidentId}/switching-plan/approve`),
+  unapprove: (incidentId) => call('POST', `/incidents/${incidentId}/switching-plan/unapprove`),
+};

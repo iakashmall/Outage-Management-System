@@ -96,9 +96,17 @@ export function checkUnapprovePlan({ plan, steps, actor }) {
   return null;
 }
 
+// A fault incident's plan (OMS-05) runs while the incident is live. Restore
+// steps are also allowed at Pending Verification: the crew may finish the
+// repair before the control room switches supply back.
+const INCIDENT_PLAN_ACTIVE = { isolate: ['open', 'dispatched', 'in_progress'], restore: ['open', 'dispatched', 'in_progress', 'pending'] };
+
 // Confirming one switching step (§3.2). Order of checks matters: an
 // idempotent replay must succeed even after later steps were confirmed.
-export function checkConfirmStep({ incident, plan, steps, permits, step, actor, clientConfirmationId, onBehalfNote }) {
+// owner 'incident' (OMS-05, decided 2026-10-26): no permit gate -- permits
+// are for planned work; a fault is emergency switching -- and the incident's
+// fault-lifecycle statuses instead of the planned ones.
+export function checkConfirmStep({ incident, plan, steps, permits, step, actor, clientConfirmationId, onBehalfNote, owner = 'planned' }) {
   if (blank(clientConfirmationId)) return reject('CLIENT_ID_REQUIRED', 'clientConfirmationId is required', 400);
   if (tooLong(clientConfirmationId, LIMITS.maxLabel) || tooLong(onBehalfNote)) return badInput(`clientConfirmationId or note too long (note max ${LIMITS.maxText} characters)`);
   if (step.state === 'confirmed') {
@@ -108,9 +116,10 @@ export function checkConfirmStep({ incident, plan, steps, permits, step, actor, 
   }
   if (plan.state !== 'approved') return reject('PLAN_NOT_APPROVED', 'switching plan is not approved');
 
-  const activeFor = step.phase === 'isolate' ? ['notified', 'isolating'] : ['isolating', 'in_progress', 'restoring'];
+  const activeFor = owner === 'incident' ? INCIDENT_PLAN_ACTIVE[step.phase]
+    : step.phase === 'isolate' ? ['notified', 'isolating'] : ['isolating', 'in_progress', 'restoring'];
   if (!activeFor.includes(incident.status)) {
-    return reject('OUTAGE_NOT_ACTIVE', `a ${step.phase} step cannot be confirmed while the outage is ${incident.status}`);
+    return reject('OUTAGE_NOT_ACTIVE', `a ${step.phase} step cannot be confirmed while the ${owner === 'incident' ? 'incident' : 'outage'} is ${incident.status}`);
   }
 
   // A crew acting on a step that isn't theirs is refused as forbidden (403);
@@ -134,6 +143,7 @@ export function checkConfirmStep({ incident, plan, steps, permits, step, actor, 
 
   if (step.phase === 'restore') {
     if (!allConfirmed(byPhase(steps, 'isolate'))) return reject('ISOLATION_INCOMPLETE', 'isolation is not complete');
+    if (owner === 'incident') return null;
     const open = openPermits(permits);
     if (open.length) return reject('PERMIT_OUTSTANDING', `permit ${open[0].permit_no} is ${open[0].state}; it must be returned before restoring`);
   }
@@ -396,4 +406,21 @@ export function nextAutomaticStatus({ incident, steps, permits }) {
       break;
   }
   return to && canTransition(incident.status, to, true) ? to : null;
+}
+
+// ---- fault incident's own switching plan (OMS-05) -------------------------
+
+// Decided 2026-10-26: a fault incident's plan is a tool used during the
+// incident, not a way to close it. Steps in between only go on the timeline
+// and safety log. Confirming `step` as the plan's LAST restore step moves the
+// incident toward Pending Verification -- what a crew's Work Complete does --
+// and never to resolved: supply rerouted is not the fault repaired, and
+// resolution stays with the crew's completion flow. Only the legal fault-
+// lifecycle move is made (in_progress -> pending); from open/dispatched no
+// crew has been on site, so the status is left alone and the caller notes it.
+export const isLastRestoreStep = ({ steps, step }) =>
+  step.phase === 'restore' && byPhase(steps, 'restore').every((s) => s.id === step.id || s.state === 'confirmed');
+export function incidentStatusAfterStep({ incident, steps, step }) {
+  if (!isLastRestoreStep({ steps, step })) return null;
+  return canTransition(incident.status, 'pending') ? 'pending' : null;
 }

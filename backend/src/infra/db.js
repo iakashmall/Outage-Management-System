@@ -433,6 +433,28 @@ export async function migrate() {
     DROP TRIGGER IF EXISTS trg_safety_log_no_truncate ON safety_log;
     CREATE TRIGGER trg_safety_log_no_truncate BEFORE TRUNCATE ON safety_log
       FOR EACH STATEMENT EXECUTE FUNCTION prevent_safety_log_change();
+
+    -- OMS-05: a switching plan is owned by a planned outage OR a fault
+    -- incident (FLISR builds on the same model) -- exactly one, enforced here.
+    -- The safety log records the same owner, so an incident plan's history
+    -- is the same append-only document as a planned outage's. Existing rows
+    -- all have planned_outage_id, so both checks hold on upgrade.
+    ALTER TABLE switching_plans ADD COLUMN IF NOT EXISTS incident_id TEXT UNIQUE REFERENCES incidents(id);
+    ALTER TABLE switching_plans ALTER COLUMN planned_outage_id DROP NOT NULL;
+    ALTER TABLE safety_log ADD COLUMN IF NOT EXISTS incident_id TEXT; -- no FK, like planned_outage_id: it outlives what it refers to
+    ALTER TABLE safety_log ALTER COLUMN planned_outage_id DROP NOT NULL;
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'switching_plans_one_owner_check') THEN
+        ALTER TABLE switching_plans ADD CONSTRAINT switching_plans_one_owner_check
+          CHECK (num_nonnulls(planned_outage_id, incident_id) = 1);
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'safety_log_one_owner_check') THEN
+        ALTER TABLE safety_log ADD CONSTRAINT safety_log_one_owner_check
+          CHECK (num_nonnulls(planned_outage_id, incident_id) = 1);
+      END IF;
+    END $$;
+    CREATE INDEX IF NOT EXISTS safety_log_incident_idx ON safety_log(incident_id, ts);
   `);
 
   // OMS-03 crew workload balancing (docs/OMS03_WORKLOAD_BALANCING.md).
@@ -696,6 +718,27 @@ export async function migrate() {
     CREATE INDEX IF NOT EXISTS idx_incidents_geog ON incidents USING GIST (geog);
     CREATE INDEX IF NOT EXISTS idx_crews_geog ON crews USING GIST (geog);
     CREATE INDEX IF NOT EXISTS idx_complaints_geog ON complaints USING GIST (geog);
+
+    -- A job's own location (OMS-05 equipment link): copied from its
+    -- incident's geog when the job is created; NULL when that is unknown.
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS geog public.geography(Point, 4326);
+    CREATE INDEX IF NOT EXISTS idx_jobs_geog ON jobs USING GIST (geog);
+
+    -- The network equipment that tripped, when the SCADA event named it by
+    -- mRID (OMS-05). The column always exists; its foreign key is added as
+    -- soon as network.* exists -- network_topology_schema.sql is a separate,
+    -- manual migration, so a database without it (CI, a fresh install)
+    -- still migrates, and gets the FK on the first boot after it is applied.
+    ALTER TABLE incidents ADD COLUMN IF NOT EXISTS tripped_equipment_id BIGINT;
+    DO $$
+    BEGIN
+      IF to_regclass('network.conducting_equipment') IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'incidents_tripped_equipment_id_fkey') THEN
+        ALTER TABLE incidents ADD CONSTRAINT incidents_tripped_equipment_id_fkey
+          FOREIGN KEY (tripped_equipment_id) REFERENCES network.conducting_equipment(id);
+      END IF;
+    END $$;
+    CREATE INDEX IF NOT EXISTS idx_incidents_tripped_equipment ON incidents (tripped_equipment_id);
   `);
   const { migrateFeederKpi } = await import('./feederKpiSchema.js');
   await migrateFeederKpi();

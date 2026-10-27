@@ -21,6 +21,7 @@ import { sendReportNow } from '../realtime/scheduledReports.js';
 import { resolve as resolveAsset, substations as netSubstations } from '../infra/geo.js';
 import { cacheGet, cacheSet, cacheDel } from '../infra/redis.js';
 import { traceSection } from '../domain/sectionalize.js';
+import { traceUpstream, simulateOpen } from '../domain/supplyTrace.js';
 import { topologyGeoJSON } from '../domain/topology.js';
 import { decodePhotoDataUrl, compressPhoto, PHOTO_STAGES } from '../domain/photos.js';
 import { siteCheck } from '../domain/geofence.js';
@@ -146,6 +147,20 @@ api.get('/network/section/:cimMrid', async (req, res) => {
   if (!result.found) return res.status(404).json(result);
   res.json(result);
 });
+// OMS-05: path from a device to the nearest substation bus node. A device
+// with no such path gets 200 with pathFound: false -- a finding, not an error.
+api.get('/network/upstream/:cimMrid', async (req, res) => {
+  const result = await traceUpstream(req.params.cimMrid);
+  if (!result.found) return res.status(404).json(result);
+  res.json(result);
+});
+// OMS-05: what-if -- { assumedOpen: [mRID...], sourceMrid? }. A simulation
+// on the network model, never live state; changes nothing.
+api.post('/network/whatif', async (req, res) => {
+  const out = await simulateOpen(req.body || {});
+  if (out.error) return res.status(out.error.status).json(out.error);
+  res.json(out);
+});
 
 // ---------- incidents ----------
 api.get('/incidents', async (req, res) => res.json(await repo.incidents()));
@@ -153,12 +168,10 @@ api.get('/incidents', async (req, res) => res.json(await repo.incidents()));
 api.get('/incidents/:id', async (req, res) => {
   const inc = await repo.incident(req.params.id);
   if (!inc) return res.status(404).json({ error: 'not found' });
-  res.json({ ...inc, events: await repo.incidentEvents(inc.id), nextStates: nextStates(inc.status), stateLabels: LABELS });
-});
-api.get('/incidents/:id', async (req, res) => {
-  const inc = await repo.incident(req.params.id);
-  if (!inc) return res.status(404).json({ error: 'not found' });
-  res.json({ ...inc, events: await repo.incidentEvents(inc.id), nextStates: nextStates(inc.status), stateLabels: LABELS });
+  // OMS-05: name the tripped equipment when the incident is linked to one;
+  // the field is absent when there is no link.
+  const tripped = inc.tripped_equipment_id != null ? await repo.trippedEquipment(inc.tripped_equipment_id) : null;
+  res.json({ ...inc, ...(tripped ? { tripped_equipment: tripped } : {}), events: await repo.incidentEvents(inc.id), nextStates: nextStates(inc.status), stateLabels: LABELS });
 });
 
 // List messages for an incident
