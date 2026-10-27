@@ -35,6 +35,8 @@ import { ensureRatings, startFeederKpiJobs } from './realtime/feederKpi.js';
 import { startFeederTelemetrySim } from './realtime/feederTelemetrySim.js';
 import { startStaleLocationMonitor } from './realtime/staleLocation.js';
 import { startEscalations } from './realtime/escalation.js';
+import { startFeederManagerAlerts } from './realtime/feederManagers.js';
+import { deepHealth, startUptimeMonitor } from './realtime/uptime.js';
 // ...alongside your other startX() calls at boot:
 startScheduledReports();
 const PORT = process.env.PORT || 4000;
@@ -71,6 +73,11 @@ app.use(express.json({ limit: '12mb' }));
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 app.use('/portal', express.static(path.join(__dirname, '..', 'public')));
 app.get('/api/health', (req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
+// P8.6g: every dependency, for monitors (no login, no secrets). 503 when a critical one is down.
+app.get('/api/health/deep', async (req, res) => {
+  const h = await deepHealth();
+  res.status(h.status === 'down' ? 503 : 200).json(h);
+});
 app.get('/api/health/ready', async (req, res) => {
   try { await repo.incidents(); res.json({ status: 'ready' }); }
   catch (e) { res.status(503).json({ status: 'not ready', error: e.message }); }
@@ -129,5 +136,7 @@ http.listen(PORT, () => {
   }
   startNotifier();
   startPlannedNotices(); // OMS-01 advance notices, after the notifier is listening
+  startUptimeMonitor();       // P8.6g availability samples + alerts
+  startFeederManagerAlerts(); // outage / restoration SMS to the feeder's manager
   startEscalations();    // FR-OMS-008 SLA escalation SMS to officers
 });

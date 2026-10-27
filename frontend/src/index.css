@@ -992,6 +992,108 @@ button.kh-more:hover{text-decoration:underline}
 
 /* Visually hidden, still read by screen readers (chart data tables). */
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+
+/* Skip link: first Tab stop on the page, visible only while focused (WCAG 2.4.1). */
+.skip-link{position:absolute;left:12px;top:-60px;z-index:3000;background:var(--navy,#0f2847);color:#fff;padding:10px 14px;border-radius:8px;font-weight:600;text-decoration:none}
+.skip-link:focus{top:12px}
+.content:focus{outline:none}
+.content:focus-visible{outline:none}
+
+/* Incident ID as a button: looks like the plain ID text, focusable for keyboard users. */
+.row-open{all:unset;cursor:pointer;font:inherit;color:inherit;border-radius:4px}
+.row-open:hover{text-decoration:underline}
+.row-open:focus-visible{outline:2px solid var(--med);outline-offset:2px}
+
+/* Focus indicator: a shadowed box instead of an outline line (WCAG 2.4.7, 1.4.11).
+   White inner edge (shows on the dark rail) + solid blue band (5.3:1 on white, the part
+   that carries the contrast) + soft glow. Last in the file so it wins over earlier rules. */
+:root{--focus-ring:#2868cd;--focus-glow:rgba(40,104,205,.45)}
+:focus-visible,
+.rail .brand-btn:focus-visible,
+.row-open:focus-visible{
+  outline:none;
+  box-shadow:0 0 0 2px #fff,0 0 0 5px var(--focus-ring),0 4px 16px 4px var(--focus-glow);
+}
+/* The screen container takes focus only as a starting point for Tab; no box on it. */
+.content:focus,.content:focus-visible{box-shadow:none}
+
+/* Header may sit after <main> in the DOM (tab order); keep it visually on top. */
+.main>.cmd{order:1}.main>.tape{order:2}.main>.content{order:3}.main>.powered-by{order:4}
+/* Active option in the header incident search (arrow keys). */
+.ms-item.active{background:var(--surface-2,#eef2f8);box-shadow:inset 3px 0 0 var(--focus-ring)}
+/* Tables are one Tab stop (lib/tableGate.js); box-shadow does not always paint on <table>. */
+[data-tgate]:focus-visible{outline:3px solid var(--focus-ring);outline-offset:2px}
+/* Map markers carry a non-colour cue too (WCAG 1.4.1): severity letter, crew-status mark. */
+.mk-inc{width:18px;height:18px;display:flex;align-items:center;justify-content:center;color:#fff;font:800 9.5px/1 var(--sans,system-ui);text-shadow:0 0 2px rgba(0,0,0,.45)}
+.mk-crew{position:relative}
+.mk-crew::after{content:"";position:absolute}
+.mk-crew.s-in_service::after{left:-2.5px;top:7px;width:5px;height:5px;border-radius:50%;background:#fff}
+.mk-crew.s-in_transit::after{left:-4px;top:8.5px;width:8px;height:2.5px;background:#fff}
+.mk-crew.s-on_break::after,.mk-crew.s-off_shift::after{left:-4.5px;top:4.5px;width:0;height:0;border-left:4.5px solid transparent;border-right:4.5px solid transparent;border-bottom:8px solid #fff}
+.lg-inc{flex:none;border-width:1.5px;box-shadow:none}
+.lg-crew{flex:none;display:inline-flex;width:16px;height:14px;justify-content:center}
+/* The scrolling track is transformed, so it painted over the LIVE badge; keep the badge on top. */
+.tape .badge{position:relative;z-index:1;flex:none}
+/* Analytics -> Standard reports */
+.sr-kinds{margin-bottom:6px}
+.sr-about{margin:4px 0 12px;color:var(--muted);font-size:12.5px}
+.sr-filters{display:flex;flex-wrap:wrap;align-items:flex-end;gap:14px 20px;padding:12px 14px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--paper-2,#f7f9fc)}
+.sr-field{display:flex;flex-direction:column;gap:5px;min-width:0}
+.sr-label{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.sr-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.sr-filters input[type=date],.sr-filters input[type=number],.sr-filters select{font:inherit;font-size:12.5px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--surface,#fff);color:inherit}
+.sr-filters select{min-width:220px;max-width:320px}
+.sr-num{width:60px}
+.sr-filters .grow{flex:1}
+.sr-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:0 0 12px}
+.sr-stat{border:1px solid var(--line);border-radius:var(--r-sm);padding:10px 12px;background:var(--surface,#fff);display:flex;flex-direction:column;gap:4px;min-width:0}
+.sr-stat span{font-size:11px;color:var(--muted)}
+.sr-stat b{font-size:16px;overflow-wrap:anywhere}
+/* Rows of a read-only table are the Tab stops once inside it (lib/tableGate.js). */
+tr[data-tgate-row]:focus-visible{outline:2px solid var(--focus-ring);outline-offset:-2px;background:rgba(40,104,205,.08);box-shadow:none}
+/* Admin -> Feeder managers */
+.fm-form{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 14px}
+.fm-field{display:flex;flex-direction:column;gap:5px}
+.fm-field input,.fm-field select{font:inherit;font-size:12.5px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--surface,#fff);color:inherit;min-width:180px}
+.fm-check{display:inline-flex;gap:6px;align-items:center;font-size:12.5px;padding-bottom:6px}
+/* Analytics -> Report builder */
+.rb-grid{display:grid;grid-template-columns:230px 1fr;gap:14px;margin:14px 0 4px;align-items:start}
+@media (max-width:900px){.rb-grid{grid-template-columns:1fr}}
+.rb-main{display:flex;flex-direction:column;gap:14px;min-width:0}
+.rb-row2{display:grid;grid-template-columns:1fr 1.4fr;gap:14px}
+@media (max-width:1100px){.rb-row2{grid-template-columns:1fr}}
+.rb-panel{border:1px solid var(--line);border-radius:var(--r-sm);padding:10px 12px;background:var(--surface,#fff);min-width:0}
+.rb-panel h4{margin:0 0 8px;font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+.rb-panel select,.rb-panel input,.rb-name{font:inherit;font-size:12.5px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--surface,#fff);color:inherit}
+.rb-name{min-width:240px}
+.rb-chips{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:6px}
+.rb-source{flex-direction:column;flex-wrap:nowrap;max-height:430px;overflow:auto}
+.rb-drop{min-height:46px;padding:8px;border:2px dashed var(--line);border-radius:8px;transition:border-color .15s,background .15s}
+.rb-drop.armed,.rb-group.armed{border-color:var(--focus-ring);background:rgba(40,104,205,.04)}
+.rb-chip{display:inline-flex;align-items:center;gap:4px;padding:4px 4px 4px 9px;border:1px solid var(--line);border-left:3px solid var(--muted);border-radius:6px;background:var(--paper-2,#f7f9fc);font-size:12.5px;cursor:grab;user-select:none}
+.rb-source .rb-chip{justify-content:space-between}
+.rb-chip.on{background:#fff}
+.rb-chip.before{box-shadow:-3px 0 0 var(--focus-ring)}
+.rb-chip.after{box-shadow:3px 0 0 var(--focus-ring)}
+.rb-chip.t-number,.rb-dot.t-number{border-left-color:#2563eb}
+.rb-chip.t-date,.rb-dot.t-date{border-left-color:#9a5f15}
+.rb-chip.t-text,.rb-dot.t-text{border-left-color:#217b48}
+.rb-x{border:0;background:transparent;cursor:pointer;padding:2px 6px;border-radius:4px;font-size:12px;color:var(--muted);line-height:1}
+.rb-x:hover:not(:disabled){background:var(--paper,#eef2f8);color:inherit}
+.rb-x:disabled{opacity:.3;cursor:default}
+.rb-key{margin:8px 0 0;font-size:11px;color:var(--muted);display:flex;gap:6px;align-items:center}
+.rb-dot{display:inline-block;width:10px;height:10px;border-left:4px solid;margin-left:4px}
+.rb-hint{padding:6px}
+.rb-note{margin:8px 0 0;font-size:12px}
+.rb-filter{margin-bottom:8px}
+.rb-sort{all:unset;cursor:pointer}
+.rb-sort:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+.rb-total td{border-top:2px solid var(--line);background:var(--paper-2,#f7f9fc)}
+/* P8.7c Hindi: Devanagari must not be letter-spaced (it breaks conjuncts) or upper-cased,
+   and needs a font that has the script. */
+html[lang="hi"] body{font-family:var(--ui),'Nirmala UI','Noto Sans Devanagari','Mangal',sans-serif}
+html[lang="hi"] *{letter-spacing:0!important;text-transform:none!important}
+.lang-select{font:inherit;font-size:12.5px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface,#fff);color:inherit}
 /* OMS-05 what-if: a simulation, never live state */
 .trace-box.sim{background:#f5f3ff;border-color:#c4b5fd}.trace-box.sim h4{color:#5b21b6}
 .sim-banner{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:1000;background:#5b21b6;color:#fff;font-weight:700;font-size:13px;padding:7px 14px;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.25);pointer-events:none}

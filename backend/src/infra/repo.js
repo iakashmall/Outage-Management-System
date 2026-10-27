@@ -559,10 +559,13 @@ export const repo = {
   job: (id) => db.oneOrNone('SELECT * FROM jobs WHERE id=$1', [id]),
   // The job takes its incident's geog (OMS-05) -- the tripped equipment's own
   // point, or the position actually reported -- and none when that is unknown.
+  // geog exists only with PostGIS (migrate() adds it then); CI has none.
   createJob: async (j) => {
-    await db.none(`INSERT INTO jobs (id,incident_id,crew_id,priority,status,address,updated_at,estimated_duration_min,required_skill,geog)
-      VALUES ($/id/,$/incident_id/,$/crew_id/,$/priority/,$/status/,$/address/,$/updated_at/,$/estimated_duration_min/,$/required_skill/,
-        (SELECT geog FROM incidents WHERE id = $/incident_id/))`,
+    const { geog } = await db.one(`SELECT EXISTS (SELECT 1 FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'jobs' AND column_name = 'geog') AS geog`);
+    await db.none(`INSERT INTO jobs (id,incident_id,crew_id,priority,status,address,updated_at,estimated_duration_min,required_skill${geog ? ',geog' : ''})
+      VALUES ($/id/,$/incident_id/,$/crew_id/,$/priority/,$/status/,$/address/,$/updated_at/,$/estimated_duration_min/,$/required_skill/${geog ? `,
+        (SELECT geog FROM incidents WHERE id = $/incident_id/)` : ''})`,
       { estimated_duration_min: null, required_skill: null, ...j });
     return repo.job(j.id);
   },

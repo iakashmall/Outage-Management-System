@@ -10,10 +10,13 @@
 //   • Role-based view: Management / CE / Functional
 //   • Map indication placeholder (WFM integration hook)
 
-import { useEffect, useMemo, useState, useCallback } from 'react';
+import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { api } from '../lib/api.js';
-import { useLiveRefresh, toast, SrTable } from '../lib/ui.jsx';
+import { useLiveRefresh, toast, SrTable, RowButton, focusAfter } from '../lib/ui.jsx';
 import FeederKpiPanel from '../components/FeederKpiPanel.jsx';
+import StandardReports from '../components/StandardReports.jsx';
+import ReportBuilder from '../components/ReportBuilder.jsx';
+import { useT, tOr, locale, t as tr } from '../lib/i18n.js';
 // ─────────────────────────────────────────────────────────────
 // Constants
 // ─────────────────────────────────────────────────────────────
@@ -103,9 +106,9 @@ const SMS_STATUS = {
   sending: { label: '→ Sending', color: '#0a5de4' },
   failed: { label: '✕ Failed', color: '#c4271b' },
 };
-const SMS_KIND = { escalation: ['ESCALATION', '#9a580b'], officer: ['OFFICER', '#6366f1'], callback: ['CALLBACK', '#0d9488'], customer: ['CUSTOMER', '#5e6d82'] };
-const fmtMinutes = (m) => (m < 60 ? `${m} min` : m < 1440 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${Math.floor(m / 1440)} d ${Math.floor((m % 1440) / 60)} h`);
-const fmtTs = (ts) => new Date(ts).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
+const SMS_KIND = { feeder_manager: ['FEEDER MGR', '#b4235a'], escalation: ['ESCALATION', '#9a580b'], officer: ['OFFICER', '#6366f1'], callback: ['CALLBACK', '#0d9488'], customer: ['CUSTOMER', '#5e6d82'] };
+const fmtMinutes = (m) => (m < 60 ? tr('an.fmtM', { m }) : m < 1440 ? tr('an.fmtHM', { h: Math.floor(m / 60), m: m % 60 }) : tr('an.fmtDH', { d: Math.floor(m / 1440), h: Math.floor((m % 1440) / 60) }));
+const fmtTs = (ts) => new Date(ts).toLocaleString(locale(), { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
 const EMPTY_SMS = { recipient: '', phone: '', message: '', feeder: '', incidentId: '' };
 
 // ─────────────────────────────────────────────────────────────
@@ -155,11 +158,13 @@ function kpiStatus(key, val) {
 // Small chart: Sparkbars
 // ─────────────────────────────────────────────────────────────
 function Sparkbars({ data }) {
+  const { t } = useT();
+  const mon = (i) => t(`an.mon.${MONTHS[i]}`);
   const max = Math.max(...data, 1);
   const W = 640, H = 180, pad = 28, bw = (W - pad * 2) / data.length;
   return (
     <>
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto' }} role="img" aria-label="Monthly SAIDI trend">
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto' }} role="img" aria-label={t('an.saidiTrendAria')}>
       {[0.25, 0.5, 0.75, 1].map((g) => (
         <line key={g} x1={pad} x2={W - pad} y1={H - pad - (H - pad * 2) * g} y2={H - pad - (H - pad * 2) * g} stroke="var(--line-2)" strokeWidth={0.5} />
       ))}
@@ -173,13 +178,13 @@ function Sparkbars({ data }) {
               fill={last ? '#0a5de4' : 'var(--faint)'}
               opacity={last ? 1 : 0.7}
             />
-            <text x={x + w / 2} y={H - pad + 14} fontSize={9} textAnchor="middle" fill="var(--muted)">{MONTHS[i]}</text>
+            <text x={x + w / 2} y={H - pad + 14} fontSize={9} textAnchor="middle" fill="var(--muted)">{mon(i)}</text>
             {last && <text x={x + w / 2} y={y - 6} fontSize={10} textAnchor="middle" fill="#0a5de4" fontWeight="600">{v}</text>}
           </g>
         );
       })}
     </svg>
-    <SrTable caption="Monthly SAIDI" head={['Month', 'SAIDI']} rows={data.map((v, i) => [MONTHS[i], v])} />
+    <SrTable caption={t('an.monthlySaidi')} head={[t('an.month'), 'SAIDI']} rows={data.map((v, i) => [mon(i), v])} />
     </>
   );
 }
@@ -223,6 +228,10 @@ function KPICell({ kpiKey, value, unit }) {
 // Main component
 // ─────────────────────────────────────────────────────────────
 export default function Analytics() {
+  const { t } = useT();
+  const kpiLabel = (k) => t(`an.kpi.${k}`);
+  const unitLabel = (u) => tOr(`an.unit.${u}`, u);
+  const feederLabel = (f) => (f === 'All feeders' ? t('an.allFeeders') : f);
   const [ind, setInd] = useState(null);
   const [monthly, setMonthly] = useState([]);
   const [inc, setInc] = useState([]);
@@ -234,6 +243,8 @@ export default function Analytics() {
 
   // New state
   const [activeTab, setActiveTab] = useState('kpi');
+  const viewStripRef = useRef(null);
+  const openView = (k) => { setActiveTab(k); focusAfter(viewStripRef.current); };
   const [role, setRole] = useState('management');
   const [period, setPeriod] = useState('monthly');
   const [customFrom, setCustomFrom] = useState('');
@@ -313,16 +324,16 @@ export default function Analytics() {
     try {
       const feeder = smsDraft.feeder === 'All feeders' ? '' : smsDraft.feeder;
       const r = await api.sendSms({ ...smsDraft, feeder });
-      toast(r.status === 'failed' ? `SMS to ${r.recipient} failed` : `SMS to ${r.recipient} ${r.status === 'sent' ? 'sent' : 'logged (no SMS gateway configured)'}`);
+      toast(t(r.status === 'failed' ? 'an.toastFailed' : r.status === 'sent' ? 'an.toastSent' : 'an.toastLogged', { who: r.recipient }));
       setSmsComposeOpen(false);
       setSmsDraft(EMPTY_SMS);
       loadSms();
     } catch (err) {
-      toast(err.message || 'Could not send SMS');
+      toast(err.message || t('an.toastErr'));
     } finally {
       setSmsSending(false);
     }
-  }, [smsDraft, loadSms]);
+  }, [smsDraft, loadSms, t]);
 
   // Role-based visibility
   const showManagement = ['management', 'ce', 'functional'].includes(role);
@@ -330,16 +341,18 @@ export default function Analytics() {
   const showFunctional = role === 'functional';
 
   const TABS = [
-    { key: 'kpi',        label: 'Feeder KPIs (PFC)', show: true },
-    { key: 'saidi',      label: 'SAIDI/SAIFI', show: true },
-    { key: 'sms',        label: 'SMS & Escalation', show: true },
-    { key: 'operators',  label: 'Operator Availability', show: true },
-    { key: 'feeders',    label: 'Feeder breakdown', show: showCE || showFunctional },
-    { key: 'mttr',       label: 'MTTR by zone', show: showManagement },
-    { key: 'sla',        label: 'SLA compliance', show: showManagement },
-    { key: 'crew',       label: 'Crew productivity', show: showCE || showFunctional },
-    { key: 'freq',       label: 'Outage frequency', show: showManagement },
-    { key: 'pfc',        label: 'Feeder PQ KPIs (PFC)', show: true },
+    { key: 'reports',    label: t('an.tab.reports'), show: true },
+    { key: 'builder',    label: t('an.tab.builder'), show: true },
+    { key: 'kpi',        label: t('an.tab.kpi'), show: true },
+    { key: 'saidi',      label: t('an.tab.saidi'), show: true },
+    { key: 'sms',        label: t('an.tab.sms'), show: true },
+    { key: 'operators',  label: t('an.tab.operators'), show: true },
+    { key: 'feeders',    label: t('an.tab.feeders'), show: showCE || showFunctional },
+    { key: 'mttr',       label: t('an.tab.mttr'), show: showManagement },
+    { key: 'sla',        label: t('an.tab.sla'), show: showManagement },
+    { key: 'crew',       label: t('an.tab.crew'), show: showCE || showFunctional },
+    { key: 'freq',       label: t('an.tab.freq'), show: showManagement },
+    { key: 'pfc',        label: t('an.tab.pfc'), show: true },
   ].filter(t => t.show);
 
   // Make sure active tab is valid for current role
@@ -353,43 +366,43 @@ export default function Analytics() {
       <div style={{ marginBottom: 20 }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
           <div>
-            <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', color: 'var(--muted)', textTransform: 'uppercase', marginBottom: 4 }}>Reporting</div>
-            <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700 }}>Reliability &amp; Feeder Analytics</h2>
+            <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', color: 'var(--muted)', textTransform: 'uppercase', marginBottom: 4 }}>{t('an.eyebrow')}</div>
+            <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700 }}>{t('an.title')}</h2>
             <p style={{ margin: '4px 0 0', color: 'var(--muted)', fontSize: 13 }}>
-              IEEE 1366 · PFC feeder KPIs · RDSS — {ind?.customersServed?.toLocaleString() || '-'} customers served
+              {t('an.subtitle', { n: ind?.customersServed?.toLocaleString(locale()) || '-' })}
             </p>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             {/* Role selector */}
-            <div style={{ display: 'flex', gap: 2, background: 'var(--surface-2,#f0f2f6)', borderRadius: 8, padding: 2 }}>
+            <div role="group" aria-label={t('an.roleAria')} style={{ display: 'flex', gap: 2, background: 'var(--surface-2,#f0f2f6)', borderRadius: 8, padding: 2 }}>
               {ROLES.map(r => (
-                <button key={r.key} onClick={() => setRole(r.key)} style={{
+                <button key={r.key} aria-pressed={role === r.key} onClick={() => setRole(r.key)} style={{
                   padding: '5px 12px', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
                   background: role === r.key ? '#0f2847' : 'transparent',
                   color: role === r.key ? '#fff' : 'var(--muted)',
-                }}>{r.label}</button>
+                }}>{t(`an.role.${r.key}`)}</button>
               ))}
             </div>
-            <button className="btn" onClick={() => api.exportReliabilityReport('csv').catch(e => alert('Export failed: ' + e.message))}>Export CSV</button>
-            <button className="btn" onClick={() => api.exportReliabilityReport('pdf').catch(e => alert('Export failed: ' + e.message))}>Export PDF</button>
+            <button className="btn" onClick={() => api.exportReliabilityReport('csv').catch(e => alert(t('an.exportFailed') + e.message))}>{t('an.exportCsv')}</button>
+            <button className="btn" onClick={() => api.exportReliabilityReport('pdf').catch(e => alert(t('an.exportFailed') + e.message))}>{t('an.exportPdf')}</button>
           </div>
         </div>
 
         {/* Period selector */}
-        <div style={{ display: 'flex', gap: 6, marginTop: 14, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div role="group" aria-label={t('an.periodAria')} style={{ display: 'flex', gap: 6, marginTop: 14, flexWrap: 'wrap', alignItems: 'center' }}>
           {PERIODS.map(p => (
-            <button key={p.key} onClick={() => setPeriod(p.key)} style={{
+            <button key={p.key} aria-pressed={period === p.key} onClick={() => setPeriod(p.key)} style={{
               padding: '4px 12px', border: `1.5px solid ${period === p.key ? '#0a5de4' : 'var(--line-2)'}`,
               borderRadius: 20, fontSize: 12, fontWeight: period === p.key ? 600 : 400,
               background: period === p.key ? '#0a5de420' : 'transparent',
               color: period === p.key ? '#0a5de4' : 'var(--fg)', cursor: 'pointer',
-            }}>{p.label}</button>
+            }}>{t(`an.period.${p.key}`)}</button>
           ))}
           {period === 'custom' && (
             <>
               <input type="date" value={customFrom} onChange={e => setCustomFrom(e.target.value)}
                 style={{ padding: '3px 8px', border: '1px solid var(--line-2)', borderRadius: 6, fontSize: 12 }} />
-              <span style={{ fontSize: 12, color: 'var(--muted)' }}>to</span>
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>{t('an.to')}</span>
               <input type="date" value={customTo} onChange={e => setCustomTo(e.target.value)}
                 style={{ padding: '3px 8px', border: '1px solid var(--line-2)', borderRadius: 6, fontSize: 12 }} />
             </>
@@ -400,10 +413,10 @@ export default function Analytics() {
       {/* ── Summary KPI strip ── */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 20 }}>
         {[
-          { k: 'SAIDI', v: ind?.saidi, u: 'min/cust', tgt: ind?.saidiTarget, hint: 'Unplanned only' },
-          { k: 'SAIFI', v: ind?.saifi, u: 'int/cust', tgt: ind?.saifiTarget, hint: 'Unplanned only' },
-          { k: 'CAIDI', v: ind?.caidi, u: 'min', tgt: null, hint: 'Avg restoration time' },
-          { k: 'MAIFI', v: ind?.maifi, u: 'events', tgt: null, hint: 'Momentary (< 5 min)' },
+          { k: 'SAIDI', v: ind?.saidi, u: t('an.minCust'), tgt: ind?.saidiTarget, hint: t('an.unplannedOnly') },
+          { k: 'SAIFI', v: ind?.saifi, u: t('an.intCust'), tgt: ind?.saifiTarget, hint: t('an.unplannedOnly') },
+          { k: 'CAIDI', v: ind?.caidi, u: t('an.min'), tgt: null, hint: t('an.avgRestore') },
+          { k: 'MAIFI', v: ind?.maifi, u: t('an.events'), tgt: null, hint: t('an.momentary') },
         ].map(c => {
           const over = c.tgt != null && c.v > c.tgt;
           return (
@@ -417,22 +430,24 @@ export default function Analytics() {
                   <span style={{
                     fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 10,
                     background: over ? '#c4271b22' : '#17764822', color: over ? '#c4271b' : '#177648',
-                  }}>{over ? 'OVER' : 'OK'}</span>
+                  }}>{over ? t('an.over') : t('an.ok')}</span>
                 )}
               </div>
               <div style={{ fontSize: 24, fontWeight: 800, fontVariantNumeric: 'tabular-nums', lineHeight: 1 }}>
                 {c.v ?? '—'}<span style={{ fontSize: 12, fontWeight: 400, color: 'var(--muted)', marginLeft: 3 }}>{c.u}</span>
               </div>
-              <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>{c.hint}{c.tgt ? ` · target ${c.tgt}` : ''}</div>
+              <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>{c.hint}{c.tgt ? ` · ${t('an.target')} ${c.tgt}` : ''}</div>
             </div>
           );
         })}
       </div>
 
       {/* ── Tab strip ── */}
-      <div style={{ display: 'flex', gap: 2, flexWrap: 'wrap', borderBottom: '2px solid var(--line-2)', marginBottom: 16 }}>
+      {/* Selection was shown by colour only; aria-pressed lets NVDA say which view is on (WCAG 1.3.1, 4.1.2). */}
+      {/* Choosing a view moves focus into it (focusAfter), so Tab continues in the view, not along the strip. */}
+      <div role="group" aria-label={t('an.viewAria')} ref={viewStripRef} style={{ display: 'flex', gap: 2, flexWrap: 'wrap', borderBottom: '2px solid var(--line-2)', marginBottom: 16 }}>
         {TABS.map(t => (
-          <button key={t.key} onClick={() => setActiveTab(t.key)} style={{
+          <button key={t.key} aria-pressed={activeTab === t.key} onClick={() => openView(t.key)} style={{
             padding: '8px 14px', border: 'none', borderBottom: `2px solid ${activeTab === t.key ? '#0a5de4' : 'transparent'}`,
             marginBottom: -2, background: 'transparent', fontWeight: activeTab === t.key ? 700 : 400,
             fontSize: 13, cursor: 'pointer', color: activeTab === t.key ? '#0a5de4' : 'var(--fg)',
@@ -448,15 +463,15 @@ export default function Analytics() {
         <div>
           <div style={{ display: 'flex', gap: 10, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
             {/* Feeder selector */}
-            <select aria-label="Feeder" value={selectedFeeder} onChange={e => setSelectedFeeder(e.target.value)}
+            <select aria-label={t('col.feeder')} value={selectedFeeder} onChange={e => setSelectedFeeder(e.target.value)}
               style={{ padding: '6px 12px', border: '1px solid var(--line-2)', borderRadius: 6, fontSize: 13, background: 'var(--surface)' }}>
-              {feederList.map(f => <option key={f}>{f}</option>)}
+              {feederList.map(f => <option key={f} value={f}>{feederLabel(f)}</option>)}
             </select>
 
             {/* Phase selector */}
-            <div style={{ display: 'flex', gap: 4 }}>
+            <div role="group" aria-label={t('an.phaseAria')} style={{ display: 'flex', gap: 4 }}>
               {PHASES.map(ph => (
-                <button key={ph} onClick={() => setActivePhase(ph)} style={{
+                <button key={ph} aria-pressed={activePhase === ph} onClick={() => setActivePhase(ph)} style={{
                   width: 32, height: 32, borderRadius: 6, border: `2px solid ${activePhase === ph ? PHASE_COLORS[ph] : 'var(--line-2)'}`,
                   background: activePhase === ph ? PHASE_COLORS[ph] + '22' : 'var(--surface)',
                   fontWeight: 700, fontSize: 12, cursor: 'pointer', color: activePhase === ph ? PHASE_COLORS[ph] : 'var(--muted)',
@@ -465,14 +480,14 @@ export default function Analytics() {
             </div>
 
             {/* Group filter */}
-            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            <div role="group" aria-label={t('an.kpiGroupAria')} style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
               {Object.entries(KPI_GROUPS).map(([gk, gv]) => (
-                <button key={gk} onClick={() => setActiveKpiGroup(gk)} style={{
+                <button key={gk} aria-pressed={activeKpiGroup === gk} onClick={() => setActiveKpiGroup(gk)} style={{
                   padding: '4px 10px', borderRadius: 16, fontSize: 11, fontWeight: 600, cursor: 'pointer',
                   border: `1.5px solid ${activeKpiGroup === gk ? gv.color : 'var(--line-2)'}`,
                   background: activeKpiGroup === gk ? gv.color + '18' : 'transparent',
                   color: activeKpiGroup === gk ? gv.color : 'var(--muted)',
-                }}>{gv.label}</button>
+                }}>{t(`an.grp.${gk}`)}</button>
               ))}
             </div>
           </div>
@@ -488,11 +503,11 @@ export default function Analytics() {
                     background: 'var(--surface)', border: `1px solid ${c}44`, borderRadius: 10, padding: '14px 16px',
                     borderLeft: `3px solid ${c}`,
                   }}>
-                    <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', marginBottom: 6 }}>FLIF · {meta.label}</div>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', marginBottom: 6 }}>FLIF · {kpiLabel(meta.key)}</div>
                     <div style={{ fontSize: 26, fontWeight: 800, color: c }}>
-                      {feederKPIs.FLIF}<span style={{ fontSize: 12, color: 'var(--muted)', marginLeft: 3 }}>{meta.unit}</span>
+                      {feederKPIs.FLIF}<span style={{ fontSize: 12, color: 'var(--muted)', marginLeft: 3 }}>{unitLabel(meta.unit)}</span>
                     </div>
-                    <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 4 }}>Phase RYB at given time</div>
+                    <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 4 }}>{t('an.flifHint')}</div>
                   </div>
                 );
               }
@@ -510,9 +525,9 @@ export default function Analytics() {
                     <PhasePill ph={activePhase} />
                   </div>
                   <div style={{ fontSize: 24, fontWeight: 800, color: c, fontVariantNumeric: 'tabular-nums', lineHeight: 1.1 }}>
-                    {val ?? '—'}<span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 3 }}>{meta.unit}</span>
+                    {val ?? '—'}<span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 3 }}>{unitLabel(meta.unit)}</span>
                   </div>
-                  <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>{meta.label}</div>
+                  <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>{kpiLabel(meta.key)}</div>
                 </div>
               );
             })}
@@ -521,17 +536,17 @@ export default function Analytics() {
           {/* Full phase × KPI table */}
           <div className="card">
             <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--line-2)', fontWeight: 700, fontSize: 14 }}>
-              All phases — {KPI_GROUPS[activeKpiGroup]?.label} · {selectedFeeder}
+              {t('an.allPhases')} — {t(`an.grp.${activeKpiGroup}`)} · {feederLabel(selectedFeeder)}
             </div>
             <div style={{ overflowX: 'auto' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                 <thead>
                   <tr style={{ background: 'var(--surface-2, #f5f7fb)' }}>
-                    <th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: 600, fontSize: 12, borderBottom: '1px solid var(--line-2)' }}>KPI</th>
-                    <th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: 600, fontSize: 12, borderBottom: '1px solid var(--line-2)', color: 'var(--muted)' }}>Unit</th>
+                    <th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: 600, fontSize: 12, borderBottom: '1px solid var(--line-2)' }}>{t('an.kpiCol')}</th>
+                    <th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: 600, fontSize: 12, borderBottom: '1px solid var(--line-2)', color: 'var(--muted)' }}>{t('an.unitCol')}</th>
                     {PHASES.map(ph => (
                       <th key={ph} style={{ padding: '10px 14px', textAlign: 'right', fontWeight: 700, fontSize: 12, borderBottom: '1px solid var(--line-2)', color: PHASE_COLORS[ph] }}>
-                        {ph === 'T' ? '∑ Total' : `Phase ${ph}`}
+                        {ph === 'T' ? `∑ ${t('an.total')}` : t('an.phaseN', { ph })}
                       </th>
                     ))}
                   </tr>
@@ -541,9 +556,9 @@ export default function Analytics() {
                     <tr key={meta.key} style={{ background: ri % 2 === 0 ? 'transparent' : 'var(--surface-2, #f8fafc)' }}>
                       <td style={{ padding: '9px 14px', fontWeight: 600, fontSize: 12 }}>
                         <span style={{ color: KPI_GROUPS[meta.group]?.color }}>{meta.key}</span>
-                        <span style={{ color: 'var(--muted)', fontWeight: 400, marginLeft: 6 }}>{meta.label}</span>
+                        <span style={{ color: 'var(--muted)', fontWeight: 400, marginLeft: 6 }}>{kpiLabel(meta.key)}</span>
                       </td>
-                      <td style={{ padding: '9px 14px', color: 'var(--muted)', fontSize: 11 }}>{meta.unit}</td>
+                      <td style={{ padding: '9px 14px', color: 'var(--muted)', fontSize: 11 }}>{unitLabel(meta.unit)}</td>
                       {PHASES.map(ph => (
                         <td key={ph} style={{ padding: '9px 14px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
                           {(() => {
@@ -560,9 +575,9 @@ export default function Analytics() {
                     <tr>
                       <td style={{ padding: '9px 14px', fontWeight: 600, fontSize: 12 }}>
                         <span style={{ color: '#c4271b' }}>FLIF</span>
-                        <span style={{ color: 'var(--muted)', fontWeight: 400, marginLeft: 6 }}>Load Imbalance Factor</span>
+                        <span style={{ color: 'var(--muted)', fontWeight: 400, marginLeft: 6 }}>{kpiLabel('FLIF')}</span>
                       </td>
-                      <td style={{ padding: '9px 14px', color: 'var(--muted)', fontSize: 11 }}>% (RYB)</td>
+                      <td style={{ padding: '9px 14px', color: 'var(--muted)', fontSize: 11 }}>{unitLabel('% (RYB)')}</td>
                       <td colSpan={4} style={{ padding: '9px 14px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 700, color: kpiStatus('FLIF', feederKPIs.FLIF) === 'warn' ? '#c4271b' : 'var(--fg)' }}>
                         {feederKPIs.FLIF}
                       </td>
@@ -583,9 +598,9 @@ export default function Analytics() {
           {/* Three-column: Planned / Unplanned / Total */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 14, marginBottom: 20 }}>
             {[
-              { label: 'Planned',   saidi: saidiPlanned,   saifi: saifiPlanned,   color: '#0fb39d', badge: 'PLANNED' },
-              { label: 'Unplanned', saidi: saidiUnplanned, saifi: saifiUnplanned, color: '#9a580b', badge: 'UNPLANNED' },
-              { label: 'Total',     saidi: saidiTotal,     saifi: saifiTotal,     color: '#0a5de4', badge: 'TOTAL' },
+              { label: 'Planned',   saidi: saidiPlanned,   saifi: saifiPlanned,   color: '#0fb39d', badge: t('an.planned') },
+              { label: 'Unplanned', saidi: saidiUnplanned, saifi: saifiUnplanned, color: '#9a580b', badge: t('an.unplanned') },
+              { label: 'Total',     saidi: saidiTotal,     saifi: saifiTotal,     color: '#0a5de4', badge: t('an.totalBadge') },
             ].map(col => (
               <div key={col.label} style={{
                 background: 'var(--surface)', border: `1px solid ${col.color}44`,
@@ -593,7 +608,7 @@ export default function Analytics() {
               }}>
                 <div style={{ fontSize: 11, fontWeight: 700, color: col.color, letterSpacing: '0.06em', marginBottom: 12 }}>{col.badge}</div>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                  {[['SAIDI', col.saidi, 'min/cust'], ['SAIFI', col.saifi, 'int/cust']].map(([k, v, u]) => (
+                  {[['SAIDI', col.saidi, t('an.minCust')], ['SAIFI', col.saifi, t('an.intCust')]].map(([k, v, u]) => (
                     <div key={k}>
                       <div style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600 }}>{k}</div>
                       <div style={{ fontSize: 22, fontWeight: 800, color: col.color, fontVariantNumeric: 'tabular-nums' }}>{v ?? '—'}</div>
@@ -608,23 +623,23 @@ export default function Analytics() {
           <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 16 }}>
             <div className="card">
               <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--line-2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <h3 style={{ margin: 0, fontSize: 14 }}>SAIDI trend — trailing 12 months</h3>
-                <span style={{ fontSize: 11, color: 'var(--muted)' }}>min/customer</span>
+                <h3 style={{ margin: 0, fontSize: 14 }}>{t('an.saidiTrend')}</h3>
+                <span style={{ fontSize: 11, color: 'var(--muted)' }}>{t('an.minCustomer')}</span>
               </div>
               <div style={{ padding: '12px 16px' }}>
-                {monthly.length ? <Sparkbars data={monthly} /> : <div style={{ color: 'var(--muted)', fontSize: 13, padding: 20, textAlign: 'center' }}>Loading…</div>}
+                {monthly.length ? <Sparkbars data={monthly} /> : <div style={{ color: 'var(--muted)', fontSize: 13, padding: 20, textAlign: 'center' }}>{t('an.loading')}</div>}
               </div>
             </div>
 
             <div className="card">
               <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--line-2)' }}>
-                <h3 style={{ margin: 0, fontSize: 14 }}>Network impact</h3>
+                <h3 style={{ margin: 0, fontSize: 14 }}>{t('an.networkImpact')}</h3>
               </div>
               <div style={{ padding: '16px' }}>
                 <div style={{ textAlign: 'center', padding: '8px 0 16px' }}>
-                  <div style={{ fontSize: 36, fontWeight: 800 }}>{(ind?.customersAffected || 0).toLocaleString()}</div>
-                  <div style={{ color: 'var(--muted)', fontSize: 13 }}>customers currently interrupted</div>
-                  <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>of {ind?.customersServed?.toLocaleString() || '-'} served</div>
+                  <div style={{ fontSize: 36, fontWeight: 800 }}>{(ind?.customersAffected || 0).toLocaleString(locale())}</div>
+                  <div style={{ color: 'var(--muted)', fontSize: 13 }}>{t('an.custInterrupted')}</div>
+                  <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>{t('an.ofServed', { n: ind?.customersServed?.toLocaleString(locale()) || '-' })}</div>
                 </div>
                 <div style={{ height: 8, background: 'var(--faint)', borderRadius: 4, overflow: 'hidden', marginBottom: 10 }}>
                   <div style={{
@@ -634,18 +649,18 @@ export default function Analytics() {
                   }} />
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--muted)', textAlign: 'center' }}>
-                  {(((ind?.customersAffected || 0) / (ind?.customersServed || 1)) * 100).toFixed(2)}% of network currently interrupted
+                  {t('an.pctInterrupted', { p: (((ind?.customersAffected || 0) / (ind?.customersServed || 1)) * 100).toFixed(2) })}
                 </div>
                 <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                   <div style={{ background: 'var(--surface-2, #f5f7fb)', borderRadius: 8, padding: '10px 12px', textAlign: 'center' }}>
                     <div style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600 }}>CAIDI</div>
                     <div style={{ fontSize: 20, fontWeight: 700 }}>{ind?.caidi ?? '—'}</div>
-                    <div style={{ fontSize: 10, color: 'var(--muted)' }}>min avg duration</div>
+                    <div style={{ fontSize: 10, color: 'var(--muted)' }}>{t('an.minAvgDur')}</div>
                   </div>
                   <div style={{ background: 'var(--surface-2, #f5f7fb)', borderRadius: 8, padding: '10px 12px', textAlign: 'center' }}>
                     <div style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600 }}>MAIFI</div>
                     <div style={{ fontSize: 20, fontWeight: 700 }}>{ind?.maifi ?? '—'}</div>
-                    <div style={{ fontSize: 10, color: 'var(--muted)' }}>momentary events</div>
+                    <div style={{ fontSize: 10, color: 'var(--muted)' }}>{t('an.momentaryEvents')}</div>
                   </div>
                 </div>
               </div>
@@ -662,25 +677,25 @@ export default function Analytics() {
           {/* Escalation tracker (live: active incidents with an SLA clock) */}
           <div className="card">
             <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--line-2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <h3 style={{ margin: 0, fontSize: 14 }}>Escalation tracker</h3>
-              <span style={{ fontSize: 11, color: 'var(--muted)' }}>Breach → AE · +60 min → SE · +120 min → CE (one SMS per level)</span>
+              <h3 style={{ margin: 0, fontSize: 14 }}>{t('an.escTracker')}</h3>
+              <span style={{ fontSize: 11, color: 'var(--muted)' }}>{t('an.escLadder')}</span>
             </div>
             {/* Scrollable region must be focusable so keyboard users can scroll it (WCAG 2.1.1). */}
             {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
-            <div tabIndex={0} role="region" aria-label="Escalation tracker" style={{ overflowX: 'auto', maxHeight: 360 }}>
+            <div tabIndex={0} role="region" aria-label={t('an.escTracker')} style={{ overflowX: 'auto', maxHeight: 360 }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                 <thead>
                   <tr style={{ background: 'var(--surface-2, #f5f7fb)' }}>
-                    {['Incident', 'Feeder', 'Open', 'SLA', 'Breach', 'Customers', 'Escalation level', 'Status'].map(h => (
+                    {[t('an.h.incident'), t('col.feeder'), t('an.h.open'), 'SLA', t('an.h.breach'), t('col.customers'), t('an.h.escLevel'), t('col.status')].map(h => (
                       <th key={h} style={{ padding: '9px 14px', textAlign: 'left', fontWeight: 600, fontSize: 12, borderBottom: '1px solid var(--line-2)', whiteSpace: 'nowrap' }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {escalations.length === 0 && <tr><td colSpan={8} style={{ padding: '16px 14px', color: 'var(--muted)', fontSize: 13 }}>No active incidents with an SLA clock.</td></tr>}
+                  {escalations.length === 0 && <tr><td colSpan={8} style={{ padding: '16px 14px', color: 'var(--muted)', fontSize: 13 }}>{t('an.noEsc')}</td></tr>}
                   {escalations.map((e, i) => {
                     const breached = e.overMin > 0;
-                    const st = { escalated: ['⬆ Escalated', '#9a580b'], due: ['⚠ Due', '#c4271b'], pending: ['⏳ Within SLA', '#0a5de4'] }[e.status];
+                    const st = { escalated: [`⬆ ${t('an.esc.escalated')}`, '#9a580b'], due: [`⚠ ${t('an.esc.due')}`, '#c4271b'], pending: [`⏳ ${t('an.withinSla')}`, '#0a5de4'] }[e.status];
                     return (
                       <tr key={e.incidentId} style={{ background: i % 2 ? 'var(--surface-2, #f8fafc)' : 'transparent', borderBottom: '1px solid var(--line-2)' }}>
                         <td style={{ padding: '9px 14px', fontFamily: 'monospace', fontSize: 12 }}>{e.incidentId}</td>
@@ -688,9 +703,9 @@ export default function Analytics() {
                         <td style={{ padding: '9px 14px', fontVariantNumeric: 'tabular-nums', color: breached ? '#c4271b' : 'var(--fg)', fontWeight: breached ? 700 : 400, whiteSpace: 'nowrap' }}>{fmtMinutes(e.openedMin)}</td>
                         <td style={{ padding: '9px 14px', fontVariantNumeric: 'tabular-nums', color: 'var(--muted)', whiteSpace: 'nowrap' }}>{fmtMinutes(e.slaMin)}</td>
                         <td style={{ padding: '9px 14px' }}>
-                          <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 7px', borderRadius: 10, background: breached ? '#c4271b22' : '#17764822', color: breached ? '#c4271b' : '#177648', whiteSpace: 'nowrap' }}>{breached ? `+${fmtMinutes(e.overMin)}` : 'Within SLA'}</span>
+                          <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 7px', borderRadius: 10, background: breached ? '#c4271b22' : '#17764822', color: breached ? '#c4271b' : '#177648', whiteSpace: 'nowrap' }}>{breached ? `+${fmtMinutes(e.overMin)}` : t('an.withinSla')}</span>
                         </td>
-                        <td style={{ padding: '9px 14px', fontVariantNumeric: 'tabular-nums' }}>{e.customers.toLocaleString()}</td>
+                        <td style={{ padding: '9px 14px', fontVariantNumeric: 'tabular-nums' }}>{e.customers.toLocaleString(locale())}</td>
                         <td style={{ padding: '9px 14px', fontSize: 12 }}>{e.level}</td>
                         <td style={{ padding: '9px 14px' }}><span style={{ fontSize: 11, fontWeight: 700, padding: '2px 7px', borderRadius: 10, background: `${st[1]}22`, color: st[1], whiteSpace: 'nowrap' }}>{st[0]}</span></td>
                       </tr>
@@ -705,14 +720,14 @@ export default function Analytics() {
           <div className="card">
             <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--line-2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
-                <h3 style={{ margin: 0, fontSize: 14 }}>SMS gateway — linemen &amp; officers</h3>
+                <h3 style={{ margin: 0, fontSize: 14 }}>{t('an.smsTitle')}</h3>
                 <p style={{ margin: '2px 0 0', fontSize: 12, color: 'var(--muted)' }}>
-                  FR-OMS-021 · gateway: {smsDriver === 'console' ? 'none configured (messages are logged, not delivered)' : smsDriver || '…'}
+                  FR-OMS-021 · {t('an.gateway')}: {smsDriver === 'console' ? t('an.noGateway') : smsDriver || '…'}
                 </p>
               </div>
               <button onClick={() => setSmsComposeOpen(!smsComposeOpen)}
                 style={{ padding: '6px 14px', background: '#0f2847', color: '#fff', border: 'none', borderRadius: 7, fontWeight: 600, fontSize: 13, cursor: 'pointer' }}>
-                + Compose SMS
+                + {t('an.compose')}
               </button>
             </div>
 
@@ -720,58 +735,60 @@ export default function Analytics() {
               <div style={{ padding: '16px', borderBottom: '1px solid var(--line-2)', background: '#0a5de408' }}>
                 <form onSubmit={sendSMS} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10, alignItems: 'flex-end' }}>
                   <div>
-                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }} htmlFor="sms-recipient">Recipient / Role *</label>
-                    <input id="sms-recipient" required maxLength={80} value={smsDraft.recipient} onChange={e => setSmsDraft(d => ({ ...d, recipient: e.target.value }))} placeholder="Lineman / AE / SE …"
+                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }} htmlFor="sms-recipient">{t('an.f.recipient')} *</label>
+                    <input id="sms-recipient" required maxLength={80} value={smsDraft.recipient} onChange={e => setSmsDraft(d => ({ ...d, recipient: e.target.value }))} placeholder={t('an.ph.recipient')}
                       style={{ width: '100%', padding: '7px 10px', border: '1px solid var(--line-2)', borderRadius: 6, fontSize: 13, boxSizing: 'border-box' }} />
                   </div>
                   <div>
-                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }} htmlFor="sms-phone">Phone *</label>
+                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }} htmlFor="sms-phone">{t('an.f.phone')} *</label>
                     <input id="sms-phone" required type="tel" inputMode="tel" autoComplete="off" value={smsDraft.phone} onChange={e => setSmsDraft(d => ({ ...d, phone: e.target.value }))} placeholder="+91 98xxxxxxxx"
                       style={{ width: '100%', padding: '7px 10px', border: '1px solid var(--line-2)', borderRadius: 6, fontSize: 13, boxSizing: 'border-box' }} />
                   </div>
                   <div>
-                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }} htmlFor="sms-feeder">Feeder</label>
+                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }} htmlFor="sms-feeder">{t('col.feeder')}</label>
                     <select id="sms-feeder" value={smsDraft.feeder} onChange={e => setSmsDraft(d => ({ ...d, feeder: e.target.value }))}
                       style={{ width: '100%', padding: '7px 10px', border: '1px solid var(--line-2)', borderRadius: 6, fontSize: 13, boxSizing: 'border-box', background: 'var(--surface)' }}>
-                      {feederList.map(f => <option key={f}>{f}</option>)}
+                      {feederList.map(f => <option key={f} value={f}>{feederLabel(f)}</option>)}
                     </select>
                   </div>
                   <div>
-                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }} htmlFor="sms-incident">Incident (optional)</label>
+                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }} htmlFor="sms-incident">{t('an.f.incident')}</label>
                     <input id="sms-incident" value={smsDraft.incidentId} onChange={e => setSmsDraft(d => ({ ...d, incidentId: e.target.value }))} placeholder="INC-2026-…"
                       style={{ width: '100%', padding: '7px 10px', border: '1px solid var(--line-2)', borderRadius: 6, fontSize: 13, boxSizing: 'border-box' }} />
                   </div>
                   <div style={{ gridColumn: '1 / -1' }}>
-                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }} htmlFor="sms-message">Message * (3–500 characters)</label>
-                    <input id="sms-message" required minLength={3} maxLength={500} value={smsDraft.message} onChange={e => setSmsDraft(d => ({ ...d, message: e.target.value }))} placeholder="Alert text …"
+                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', display: 'block', marginBottom: 4 }} htmlFor="sms-message">{t('an.f.message')}</label>
+                    <input id="sms-message" required minLength={3} maxLength={500} value={smsDraft.message} onChange={e => setSmsDraft(d => ({ ...d, message: e.target.value }))} placeholder={t('an.ph.message')}
                       style={{ width: '100%', padding: '7px 10px', border: '1px solid var(--line-2)', borderRadius: 6, fontSize: 13, boxSizing: 'border-box' }} />
                   </div>
                   <button type="submit" disabled={smsSending} style={{ padding: '8px 16px', background: '#177648', color: '#fff', border: 'none', borderRadius: 6, fontWeight: 700, fontSize: 13, cursor: smsSending ? 'wait' : 'pointer', whiteSpace: 'nowrap', justifySelf: 'start' }}>
-                    {smsSending ? 'Sending…' : 'Send'}
+                    {smsSending ? t('an.sending') : t('an.send')}
                   </button>
                 </form>
                 <p style={{ margin: '8px 0 0', fontSize: 11, color: 'var(--muted)' }}>
-                  ↳ Linked to an incident, the SMS also appears on that incident's timeline.
+                  ↳ {t('an.linkedNote')}
                 </p>
               </div>
             )}
 
             {/* Scrollable region must be focusable so keyboard users can scroll it (WCAG 2.1.1). */}
             {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
-            <div tabIndex={0} role="region" aria-label="SMS log" style={{ overflowX: 'auto', maxHeight: 420 }}>
+            <div tabIndex={0} role="region" aria-label={t('an.smsLog')} style={{ overflowX: 'auto', maxHeight: 420 }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                 <thead>
                   <tr style={{ background: 'var(--surface-2, #f5f7fb)' }}>
-                    {['Time', 'Incident', 'Feeder', 'Recipient', 'Message', 'Status'].map(h => (
+                    {[t('an.h.time'), t('an.h.incident'), t('col.feeder'), t('an.h.recipient'), t('an.h.message'), t('col.status')].map(h => (
                       <th key={h} style={{ padding: '9px 14px', textAlign: 'left', fontWeight: 600, fontSize: 12, borderBottom: '1px solid var(--line-2)', whiteSpace: 'nowrap' }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {smsLog.length === 0 && <tr><td colSpan={6} style={{ padding: '16px 14px', color: 'var(--muted)', fontSize: 13 }}>No SMS recorded yet.</td></tr>}
+                  {smsLog.length === 0 && <tr><td colSpan={6} style={{ padding: '16px 14px', color: 'var(--muted)', fontSize: 13 }}>{t('an.noSms')}</td></tr>}
                   {smsLog.map((s, i) => {
-                    const st = SMS_STATUS[s.status] || { label: `– ${s.status.replace(/^skipped-/, 'Skipped: ').replace(/-/g, ' ')}`, color: '#5e6d82' };
-                    const [kind, kindColor] = SMS_KIND[s.kind] || SMS_KIND.customer;
+                    const st = SMS_STATUS[s.status] ? { ...SMS_STATUS[s.status], label: t(`an.sms.${s.status}`) } : { label: `– ${s.status.replace(/^skipped-/, `${t('an.skipped')}: `).replace(/-/g, ' ')}`, color: '#5e6d82' };
+                    const kindKey = SMS_KIND[s.kind] ? s.kind : 'customer';
+                    const [, kindColor] = SMS_KIND[kindKey];
+                    const kind = t(`an.kind.${kindKey}`);
                     return (
                       <tr key={s.id} style={{ background: i % 2 ? 'var(--surface-2, #f8fafc)' : 'transparent', borderBottom: '1px solid var(--line-2)' }}>
                         <td style={{ padding: '9px 14px', fontFamily: 'monospace', fontSize: 12, color: 'var(--muted)', whiteSpace: 'nowrap' }}>{fmtTs(s.ts)}</td>
@@ -806,23 +823,23 @@ export default function Analytics() {
               <div key={sh.key} style={{ background: 'var(--surface)', border: '1px solid var(--line-2)', borderRadius: 12, padding: '16px 18px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
                   <div>
-                    <div style={{ fontWeight: 700, fontSize: 14 }}>{sh.label} shift</div>
+                    <div style={{ fontWeight: 700, fontSize: 14 }}>{t('an.shiftN', { s: t(`an.shift.${sh.key}`) })}</div>
                     <div style={{ fontSize: 11, color: 'var(--muted)' }}>{sh.time}</div>
                   </div>
                   <div style={{ fontSize: 24, fontWeight: 800 }}>{sh.operators.length}</div>
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
                   <span style={{ fontSize: 11, padding: '3px 8px', borderRadius: 10, background: '#17764822', color: '#177648', fontWeight: 600 }}>
-                    {sh.onDuty} on duty
+                    {t('an.nOnDuty', { n: sh.onDuty })}
                   </span>
                   {sh.standby > 0 && (
                     <span style={{ fontSize: 11, padding: '3px 8px', borderRadius: 10, background: '#83640e22', color: '#83640e', fontWeight: 600 }}>
-                      {sh.standby} standby
+                      {t('an.nStandby', { n: sh.standby })}
                     </span>
                   )}
                   {sh.onLeave > 0 && (
                     <span style={{ fontSize: 11, padding: '3px 8px', borderRadius: 10, background: 'var(--faint)', color: 'var(--muted)', fontWeight: 600 }}>
-                      {sh.onLeave} leave
+                      {t('an.nLeave', { n: sh.onLeave })}
                     </span>
                   )}
                 </div>
@@ -833,13 +850,13 @@ export default function Analytics() {
           {/* Operator roster */}
           <div className="card">
             <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--line-2)' }}>
-              <h3 style={{ margin: 0, fontSize: 14 }}>Operator roster</h3>
+              <h3 style={{ margin: 0, fontSize: 14 }}>{t('an.roster')}</h3>
             </div>
             <div style={{ overflowX: 'auto' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                 <thead>
                   <tr style={{ background: 'var(--surface-2, #f5f7fb)' }}>
-                    {['', 'Name', 'Role', 'Shift', 'Shift time', 'Zone', 'Status'].map(h => (
+                    {['', t('an.h.name'), t('an.h.role'), t('an.h.shift'), t('an.h.shiftTime'), t('col.zone'), t('col.status')].map(h => (
                       <th key={h} style={{ padding: '9px 14px', textAlign: 'left', fontWeight: 600, fontSize: 12, borderBottom: '1px solid var(--line-2)' }}>{h}</th>
                     ))}
                   </tr>
@@ -847,15 +864,15 @@ export default function Analytics() {
                 <tbody>
                   {operators.map((op, i) => {
                     const sh = SHIFTS.find(s => s.key === op.shift);
-                    const statusLabel = { on_duty: 'On duty', standby: 'Standby', on_leave: 'On leave', off: 'Off' }[op.status] || op.status;
+                    const statusLabel = tOr(`an.op.${op.status}`, op.status);
                     const statusColor = { on_duty: '#177648', standby: '#83640e', on_leave: 'var(--muted)', off: 'var(--muted)' }[op.status] || 'var(--muted)';
                     return (
                       <tr key={op.id} style={{ background: i % 2 ? 'var(--surface-2, #f8fafc)' : 'transparent', borderBottom: '1px solid var(--line-2)' }}>
                         <td style={{ padding: '9px 14px' }}><StatusDot s={op.status} /></td>
                         <td style={{ padding: '9px 14px', fontWeight: 600 }}>{op.name}</td>
-                        <td style={{ padding: '9px 14px', color: 'var(--muted)', fontSize: 12 }}>{op.role}</td>
+                        <td style={{ padding: '9px 14px', color: 'var(--muted)', fontSize: 12 }}>{tOr(`an.oprole.${op.role}`, op.role)}</td>
                         <td style={{ padding: '9px 14px' }}>
-                          <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 7px', borderRadius: 10, background: 'var(--faint)' }}>{sh?.label}</span>
+                          <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 7px', borderRadius: 10, background: 'var(--faint)' }}>{sh && t(`an.shift.${sh.key}`)}</span>
                         </td>
                         <td style={{ padding: '9px 14px', fontSize: 12, color: 'var(--muted)', fontFamily: 'monospace' }}>{sh?.time}</td>
                         <td style={{ padding: '9px 14px', fontSize: 12 }}>{op.zone}</td>
@@ -879,7 +896,7 @@ export default function Analytics() {
         <div className="card">
           <div style={{ padding: '0 0 0 0', overflow: 'auto' }}>
             <table className="tbl">
-              <thead><tr><th>Feeder</th><th>Zone</th><th>Incidents</th><th>Open</th><th>Customers affected</th></tr></thead>
+              <thead><tr><th>{t('col.feeder')}</th><th>{t('col.zone')}</th><th>{t('an.h.incidents')}</th><th>{t('an.h.open')}</th><th>{t('an.h.custAffected')}</th></tr></thead>
               <tbody>
                 {feeders.map((f) => (
                   <tr key={f.feeder}>
@@ -887,10 +904,10 @@ export default function Analytics() {
                     <td>{f.zone}</td>
                     <td>{f.count}</td>
                     <td>{f.open ? <span className="chip chip-crit">{f.open}</span> : <span className="muted">0</span>}</td>
-                    <td>{f.customers.toLocaleString()}</td>
+                    <td>{f.customers.toLocaleString(locale())}</td>
                   </tr>
                 ))}
-                {!feeders.length && <tr><td colSpan={5} className="empty">No incident data.</td></tr>}
+                {!feeders.length && <tr><td colSpan={5} className="empty">{t('an.noIncData')}</td></tr>}
               </tbody>
             </table>
           </div>
@@ -904,14 +921,14 @@ export default function Analytics() {
         <div className="card">
           <div style={{ overflow: 'auto' }}>
             <table className="tbl">
-              <thead><tr><th>Zone</th><th>MTTR (min)</th><th>Incidents resolved</th></tr></thead>
+              <thead><tr><th>{t('col.zone')}</th><th>{t('an.h.mttrMin')}</th><th>{t('an.h.resolved')}</th></tr></thead>
               <tbody>
                 {mttr.map((z) => (
                   <tr key={z.zone} onClick={() => setDrillZone(drillZone === z.zone ? null : z.zone)} style={{ cursor: 'pointer' }}>
-                    <td>{z.zone}</td><td className="mono">{z.mttrMinutes}</td><td>{z.incidentCount}</td>
+                    <td><RowButton label={t('an.drill', { z: z.zone })} aria-expanded={drillZone === z.zone} onActivate={() => setDrillZone(drillZone === z.zone ? null : z.zone)}>{z.zone}</RowButton></td><td className="mono">{z.mttrMinutes}</td><td>{z.incidentCount}</td>
                   </tr>
                 ))}
-                {!mttr.length && <tr><td colSpan={3} className="empty">No resolved incidents yet.</td></tr>}
+                {!mttr.length && <tr><td colSpan={3} className="empty">{t('an.noResolved')}</td></tr>}
               </tbody>
             </table>
           </div>
@@ -925,17 +942,17 @@ export default function Analytics() {
         <div className="card">
           <div style={{ overflow: 'auto' }}>
             <table className="tbl">
-              <thead><tr><th>Zone</th><th>Compliant</th><th>Breached</th><th>At risk</th></tr></thead>
+              <thead><tr><th>{t('col.zone')}</th><th>{t('an.h.compliant')}</th><th>{t('an.h.breached')}</th><th>{t('an.h.atRisk')}</th></tr></thead>
               <tbody>
                 {(sla?.byZone || []).map((z) => (
                   <tr key={z.zone} onClick={() => setDrillZone(drillZone === z.zone ? null : z.zone)} style={{ cursor: 'pointer' }}>
-                    <td>{z.zone}</td>
+                    <td><RowButton label={t('an.drill', { z: z.zone })} aria-expanded={drillZone === z.zone} onActivate={() => setDrillZone(drillZone === z.zone ? null : z.zone)}>{z.zone}</RowButton></td>
                     <td>{z.compliant}</td>
                     <td>{z.breached ? <span className="chip chip-crit">{z.breached}</span> : <span className="muted">0</span>}</td>
                     <td>{z.atRisk ? <span className="chip chip-crit">{z.atRisk}</span> : <span className="muted">0</span>}</td>
                   </tr>
                 ))}
-                {!sla?.byZone?.length && <tr><td colSpan={4} className="empty">No SLA data yet.</td></tr>}
+                {!sla?.byZone?.length && <tr><td colSpan={4} className="empty">{t('an.noSla')}</td></tr>}
               </tbody>
             </table>
           </div>
@@ -949,7 +966,7 @@ export default function Analytics() {
         <div className="card">
           <div style={{ overflow: 'auto' }}>
             <table className="tbl">
-              <thead><tr><th>Crew</th><th>Jobs total</th><th>Jobs completed</th><th>Avg min/job</th></tr></thead>
+              <thead><tr><th>{t('an.h.crew')}</th><th>{t('an.h.jobsTotal')}</th><th>{t('an.h.jobsDone')}</th><th>{t('an.h.avgMinJob')}</th></tr></thead>
               <tbody>
                 {crewProd.map((c) => (
                   <tr key={c.crewId}>
@@ -957,7 +974,7 @@ export default function Analytics() {
                     <td className="mono">{c.avgMinutesPerJob ?? '—'}</td>
                   </tr>
                 ))}
-                {!crewProd.length && <tr><td colSpan={4} className="empty">No job data yet.</td></tr>}
+                {!crewProd.length && <tr><td colSpan={4} className="empty">{t('an.noJobs')}</td></tr>}
               </tbody>
             </table>
           </div>
@@ -971,40 +988,42 @@ export default function Analytics() {
         <div className="card">
           <div style={{ overflow: 'auto' }}>
             <table className="tbl">
-              <thead><tr><th>Zone</th><th>Total</th><th>Critical</th><th>High</th><th>Medium</th><th>Low</th></tr></thead>
+              <thead><tr><th>{t('col.zone')}</th><th>{t('an.total')}</th><th>{t('sev.critical')}</th><th>{t('sev.high')}</th><th>{t('sev.medium')}</th><th>{t('sev.low')}</th></tr></thead>
               <tbody>
                 {outageFreq.map((z) => (
                   <tr key={z.zone} onClick={() => setDrillZone(drillZone === z.zone ? null : z.zone)} style={{ cursor: 'pointer' }}>
-                    <td>{z.zone}</td><td>{z.total}</td>
+                    <td><RowButton label={t('an.drill', { z: z.zone })} aria-expanded={drillZone === z.zone} onActivate={() => setDrillZone(drillZone === z.zone ? null : z.zone)}>{z.zone}</RowButton></td><td>{z.total}</td>
                     <td>{z.critical || 0}</td><td>{z.high || 0}</td><td>{z.medium || 0}</td><td>{z.low || 0}</td>
                   </tr>
                 ))}
-                {!outageFreq.length && <tr><td colSpan={6} className="empty">No outage data yet.</td></tr>}
+                {!outageFreq.length && <tr><td colSpan={6} className="empty">{t('an.noOutage')}</td></tr>}
               </tbody>
             </table>
           </div>
         </div>
       )}
+      {activeTab === 'reports' && <StandardReports />}
+      {activeTab === 'builder' && <ReportBuilder />}
       {activeTab === 'pfc' && <FeederKpiPanel />} 
 
       {/* Drill-down panel (shared) */}
       {drillZone && (
         <div className="card" style={{ marginTop: 16 }}>
           <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--line-2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <h3 style={{ margin: 0, fontSize: 14 }}>Incidents in {drillZone}</h3>
-            <button className="btn sm" onClick={() => setDrillZone(null)}>Close</button>
+            <h3 style={{ margin: 0, fontSize: 14 }}>{t('an.incidentsIn', { z: drillZone })}</h3>
+            <button className="btn sm" onClick={() => setDrillZone(null)}>{t('an.close')}</button>
           </div>
           <div style={{ overflow: 'auto' }}>
             <table className="tbl">
-              <thead><tr><th>ID</th><th>Severity</th><th>Status</th><th>Cause</th><th>Customers</th></tr></thead>
+              <thead><tr><th>{t('col.id')}</th><th>{t('col.severity')}</th><th>{t('col.status')}</th><th>{t('an.h.cause')}</th><th>{t('col.customers')}</th></tr></thead>
               <tbody>
                 {inc.filter((i) => i.zone === drillZone).map((i) => (
                   <tr key={i.id}>
-                    <td className="mono">{i.id}</td><td>{i.severity}</td>
-                    <td>{i.status}</td><td>{i.cause}</td><td>{i.customers}</td>
+                    <td className="mono">{i.id}</td><td>{tOr(`sev.${i.severity}`, i.severity)}</td>
+                    <td>{tOr(`st.${i.status}`, i.status)}</td><td>{i.cause}</td><td>{i.customers}</td>
                   </tr>
                 ))}
-                {!inc.filter((i) => i.zone === drillZone).length && <tr><td colSpan={5} className="empty">No incidents found.</td></tr>}
+                {!inc.filter((i) => i.zone === drillZone).length && <tr><td colSpan={5} className="empty">{t('an.noIncidents')}</td></tr>}
               </tbody>
             </table>
           </div>

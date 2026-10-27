@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { SrTable } from '../lib/ui.jsx';
+import { SrTable, RowButton } from '../lib/ui.jsx';
 import { api } from '../lib/api.js';
+import { useT, t as tt, tOr, locale } from '../lib/i18n.js';
 import { TrendChart, WorstBars, allZeroMessage } from './KpiCharts.jsx';
 import FeederPdfPicker from './FeederPdfPicker.jsx';
 
@@ -37,7 +38,7 @@ function tone(code, v) {
 const fmt = (v, unit) => {
   if (v == null) return '—';
   if (unit === 'Nos') return Number.isInteger(Number(v)) ? String(v) : Number(v).toFixed(1); // axis ticks are fractional
-  if (Math.abs(v) >= 10000) return Math.round(v).toLocaleString('en-IN');
+  if (Math.abs(v) >= 10000) return Math.round(v).toLocaleString(locale());
   return Number(v).toFixed(unit === 'min' ? 0 : 1);
 };
 
@@ -54,6 +55,9 @@ const LEAGUE = [
 const WORST_LOW = new Set(['FMNV', 'FMNC', 'FVSM', 'FCSM']);
 
 export default function FeederKpiPanel() {
+  const { t } = useT();
+  const kn = (d) => (d ? tOr(`fk.kpi.${d.code}`, d.name) : d);
+  const lg = { 'V high': 'fk.vHigh', 'V low': 'fk.vLow', 'I high': 'fk.iHigh', 'Max V': 'fk.maxV', 'Min V': 'fk.minV', 'Max I': 'fk.maxI', 'V sag': 'fk.vSag', Imbalance: 'fk.imbalance' };
   const [defs, setDefs] = useState(null);
   const [mode, setMode] = useState('tree');
   const [period, setPeriod] = useState('daily');
@@ -95,8 +99,8 @@ export default function FeederKpiPanel() {
     };
     load();
     // Only a period that is still running (includes today) changes minute to minute.
-    const t = setInterval(() => { const r = dataRef.current?.range; if (r && new Date(r.to) > new Date()) load(); }, 60_000);
-    return () => { live = false; clearInterval(t); };
+    const tm = setInterval(() => { const r = dataRef.current?.range; if (r && new Date(r.to) > new Date()) load(); }, 60_000);
+    return () => { live = false; clearInterval(tm); };
   }, [params]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Time series for the trend chart (One feeder view only).
@@ -106,8 +110,8 @@ export default function FeederKpiPanel() {
     const load = () => api.feederKpiSeries(params).then((d) => { if (live) setSeries(d); }).catch(() => {});
     setSeries(null);
     load();
-    const t = setInterval(() => { const r = dataRef.current?.range; if (r && new Date(r.to) > new Date()) load(); }, 60_000);
-    return () => { live = false; clearInterval(t); };
+    const tm = setInterval(() => { const r = dataRef.current?.range; if (r && new Date(r.to) > new Date()) load(); }, 60_000);
+    return () => { live = false; clearInterval(tm); };
   }, [params, mode, feeder]);
 
   const key = (code, ph = phase) => (code === 'FLIF' ? 'FLIF' : `${code}_${ph}`);
@@ -126,7 +130,7 @@ export default function FeederKpiPanel() {
   }, [data, sort, phase]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const one = mode === 'one' ? data?.feeders?.[0] : null;
-  const exportCsv = () => api.exportFeederKpi(params).catch((e) => alert('Export failed: ' + e.message));
+  const exportCsv = () => api.exportFeederKpi(params).catch((e) => alert(t('fk.exportFailed') + e.message));
   // The PDF picker opens with the feeder(s) in view ticked.
   const pdfInitial = mode === 'one' ? (feeder ? [feeder] : []) : mode === 'tree' ? treeScope : [];
   const openFeeder = (f) => { setFeeder(f); setMode('one'); };
@@ -140,8 +144,8 @@ export default function FeederKpiPanel() {
     return list.slice(0, 10);
   }, [data, chartDef, code, phase]);
   const indexSelect = (
-    <select value={code} onChange={(e) => setCode(e.target.value)} aria-label="Index to chart">
-      {(defs?.defs || []).map((d) => <option key={d.code} value={d.code}>{d.code} · {d.name}</option>)}
+    <select value={code} onChange={(e) => setCode(e.target.value)} aria-label={t('fk.indexToChart')}>
+      {(defs?.defs || []).map((d) => <option key={d.code} value={d.code}>{d.code} · {kn(d)}</option>)}
     </select>
   );
 
@@ -149,35 +153,35 @@ export default function FeederKpiPanel() {
     <div className="fk">
       <div className="fk-bar">
         {/* Toggle groups (role=group + aria-pressed), not tablists: these buttons switch a filter, they do not own tab panels. */}
-        <div className="seg" role="group" aria-label="View">
-          <button aria-pressed={mode === 'tree'} className={mode === 'tree' ? 'on' : ''} onClick={() => setMode('tree')}>Hierarchy</button>
-          <button aria-pressed={mode === 'all'} className={mode === 'all' ? 'on' : ''} onClick={() => setMode('all')}>All feeders</button>
-          <button aria-pressed={mode === 'one'} className={mode === 'one' ? 'on' : ''} onClick={() => setMode('one')}>One feeder</button>
+        <div className="seg" role="group" aria-label={t('fk.view')}>
+          <button aria-pressed={mode === 'tree'} className={mode === 'tree' ? 'on' : ''} onClick={() => setMode('tree')}>{t('fk.hierarchy')}</button>
+          <button aria-pressed={mode === 'all'} className={mode === 'all' ? 'on' : ''} onClick={() => setMode('all')}>{t('fk.allFeeders')}</button>
+          <button aria-pressed={mode === 'one'} className={mode === 'one' ? 'on' : ''} onClick={() => setMode('one')}>{t('fk.oneFeeder')}</button>
         </div>
-        <div className="seg" role="group" aria-label="Period">
-          {PERIODS.map(([k, l]) => <button key={k} aria-pressed={period === k} className={period === k ? 'on' : ''} onClick={() => setPeriod(k)}>{l}</button>)}
+        <div className="seg" role="group" aria-label={t('fk.period')}>
+          {PERIODS.map(([k, l]) => <button key={k} aria-pressed={period === k} className={period === k ? 'on' : ''} onClick={() => setPeriod(k)}>{tOr(`fk.${k}`, l)}</button>)}
         </div>
         {period === 'custom' ? (
           <span className="fk-dates">
-            <input type="date" value={from} max={to} onChange={(e) => setFrom(e.target.value)} aria-label="From" />
-            <span className="muted">to</span>
-            <input type="date" value={to} min={from} onChange={(e) => setTo(e.target.value)} aria-label="To" />
+            <input type="date" value={from} max={to} onChange={(e) => setFrom(e.target.value)} aria-label={t('fk.from')} />
+            <span className="muted">{t('fk.toWord')}</span>
+            <input type="date" value={to} min={from} onChange={(e) => setTo(e.target.value)} aria-label={t('fk.to')} />
           </span>
         ) : (
-          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} aria-label="Any day in the period" title="Any day inside the period" />
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} aria-label={t('fk.anyDay')} title={t('fk.anyDayT')} />
         )}
         {mode === 'one' && (
-          <select value={feeder} onChange={(e) => setFeeder(e.target.value)} aria-label="Feeder">
+          <select value={feeder} onChange={(e) => setFeeder(e.target.value)} aria-label={t('fk.feeder')}>
             {(defs?.feeders || []).map((f) => <option key={f.feeder} value={f.feeder}>{f.feeder}{f.substation ? ` · ${f.substation}` : ''}</option>)}
           </select>
         )}
         {mode !== 'one' && (
-          <div className="seg" role="group" aria-label="Phase">
-            {PHASES.map((p) => <button key={p} aria-pressed={phase === p} className={phase === p ? 'on' : ''} onClick={() => setPhase(p)}>{p === 'T' ? 'Total' : p}</button>)}
+          <div className="seg" role="group" aria-label={t('fk.phase')}>
+            {PHASES.map((p) => <button key={p} aria-pressed={phase === p} className={phase === p ? 'on' : ''} onClick={() => setPhase(p)}>{p === 'T' ? t('fk.total') : p}</button>)}
           </div>
         )}
         <div className="grow" />
-        <button className="btn sm" onClick={exportCsv} disabled={!data}>Export CSV</button>
+        <button className="btn sm" onClick={exportCsv} disabled={!data}>{t('sr.exportCsv')}</button>
         <FeederPdfPicker feeders={defs?.feeders || []} initial={pdfInitial} disabled={!defs}
           onExport={(list) => api.exportFeederKpiPdf(params, list)} />
       </div>
@@ -186,11 +190,11 @@ export default function FeederKpiPanel() {
         {data ? (
           <>
             <b>{data.range.label}</b>
-            <span className="muted"> · {data.range.daysElapsed} of {data.range.days} day{data.range.days === 1 ? '' : 's'} elapsed</span>
-            {one && <span className="muted"> · data completeness <b className={one.coverage.completenessPct < 90 ? 'fk-warn-t' : ''}>{one.coverage.completenessPct ?? 0}%</b></span>}
-            {busy && <span className="muted"> · updating…</span>}
+            <span className="muted">{t(data.range.days === 1 ? 'fk.elapsed1' : 'fk.elapsedN', { a: data.range.daysElapsed, n: data.range.days })}</span>
+            {one && <span className="muted">{t('fk.completeness')}<b className={one.coverage.completenessPct < 90 ? 'fk-warn-t' : ''}>{one.coverage.completenessPct ?? 0}%</b></span>}
+            {busy && <span className="muted">{t('sr.updating')}</span>}
           </>
-        ) : <span className="muted">{err ? '' : 'Loading…'}</span>}
+        ) : <span className="muted">{err ? '' : t('fk.loading')}</span>}
         {err && <span className="fk-err"> {err}</span>}
       </div>
 
@@ -201,7 +205,7 @@ export default function FeederKpiPanel() {
       {mode === 'all' && data && chartDef && (
         <div className="fk-chartcard">
           <div className="fk-charthead">
-            <div><b>Worst 10 feeders</b><span className="muted"> · {chartDef.name} ({chartDef.phased === false ? code : `${code}_${phase}`}, {chartDef.unit})</span></div>
+            <div><b>{t('fk.worst10')}</b><span className="muted"> · {kn(chartDef)} ({chartDef.phased === false ? code : `${code}_${phase}`}, {chartDef.unit})</span></div>
             {indexSelect}
           </div>
           <WorstBars rows={worst} unit={chartDef.unit === '% of nominal' ? '%' : chartDef.unit} toneOf={(v) => tone(code, v)} onPick={openFeeder} />
@@ -213,10 +217,10 @@ export default function FeederKpiPanel() {
           <table className="tbl fk-tbl">
             <thead>
               <tr>
-                <th>Feeder</th><th>Substation</th><th title="Share of the period covered by telemetry">Data</th>
+                <th>{t('fk.feeder')}</th><th>{t('fk.substation')}</th><th title={t('fk.dataT')}>{t('fk.data')}</th>
                 {LEAGUE.map((c) => (
                   <th key={c.code + c.sub} className="fk-num fk-sort" onClick={() => clickSort(c.code)} aria-sort={sort.code === c.code ? (sort.dir === 'worst' ? 'descending' : 'ascending') : 'none'}>
-                    {c.label}<br /><span className="fk-sub">{c.code}{c.phased === false ? '' : `_${phase}`} · {c.sub}</span>
+                    {t(lg[c.label])}<br /><span className="fk-sub">{c.code}{c.phased === false ? '' : `_${phase}`} · {c.sub}</span>
                     {sort.code === c.code && <span className="fk-arrow">{sort.dir === 'worst' ? '▼' : '▲'}</span>}
                   </th>
                 ))}
@@ -227,9 +231,9 @@ export default function FeederKpiPanel() {
                 const none = !f.coverage.coveredMinutes;
                 return (
                   <tr key={f.feeder} onClick={() => openFeeder(f.feeder)} className={none ? 'fk-nodata' : ''} style={{ cursor: 'pointer' }}>
-                    <td className="mono">{f.feeder}</td>
+                    <td className="mono"><RowButton label={t('fk.openFeeder', { f: f.feeder })} onActivate={() => openFeeder(f.feeder)}>{f.feeder}</RowButton></td>
                     <td className="fk-subst">{f.substation || '—'}</td>
-                    <td className="mono">{none ? 'no data' : `${Math.round(f.coverage.completenessPct)}%`}</td>
+                    <td className="mono">{none ? t('fk.noData') : `${Math.round(f.coverage.completenessPct)}%`}</td>
                     {LEAGUE.map((c) => {
                       const v = f.kpis[key(c.code)];
                       return <td key={c.code + c.sub} className={`mono fk-num fk-${tone(c.code, v)}`}>{fmt(v, c.sub === '%' ? '%' : c.sub)}</td>;
@@ -246,12 +250,12 @@ export default function FeederKpiPanel() {
         <>
           <div className="fk-chartcard">
             <div className="fk-charthead">
-              <div><b>{chartDef?.name}</b><span className="muted"> · {one.feeder} · {data.range.label}</span></div>
+              <div><b>{kn(chartDef)}</b><span className="muted"> · {one.feeder} · {data.range.label}</span></div>
               {indexSelect}
             </div>
             {series && chartDef
               ? <TrendChart points={series.points} def={chartDef} granularity={series.granularity} rating={series.rating} />
-              : <div className="empty">Loading chart…</div>}
+              : <div className="empty">{t('fk.loadingChart')}</div>}
           </div>
           <div className="fk-cards">
             {['FMXV', 'FMNV', 'FMXC', 'FMNC', 'FLIF'].map((code) => {
@@ -261,7 +265,7 @@ export default function FeederKpiPanel() {
                 <div key={code} className={`stat fk-card fk-edge-${tone(code, v)}`}>
                   <div className="stat-l">{code}</div>
                   <div className="stat-n">{fmt(v, '%')}<span className="kpi-u"> %</span></div>
-                  <div className="kpi-hint">{d.name}</div>
+                  <div className="kpi-hint">{kn(d)}</div>
                 </div>
               );
             })}
@@ -269,8 +273,8 @@ export default function FeederKpiPanel() {
           <div className="fk-scroll">
             <table className="tbl fk-tbl">
               <thead>
-                <tr><th>#</th><th>Code</th><th>Index</th><th>Unit</th>
-                  {PHASES.map((p) => <th key={p} className="fk-num">{p === 'T' ? 'Total' : p}</th>)}</tr>
+                <tr><th>#</th><th>{t('fk.code')}</th><th>{t('fk.index')}</th><th>{t('fk.unit')}</th>
+                  {PHASES.map((p) => <th key={p} className="fk-num">{p === 'T' ? t('fk.total') : p}</th>)}</tr>
               </thead>
               <tbody>
                 {defs.defs.map((d) => {
@@ -278,15 +282,15 @@ export default function FeederKpiPanel() {
                     const v = one.kpis[d.code];
                     return (
                       <tr key={d.code} onClick={() => setCode(d.code)} className={code === d.code ? 'fk-rowsel' : ''} style={{ cursor: 'pointer' }}>
-                        <td className="muted">{d.item}</td><td className="mono"><b>{d.code}</b></td><td>{d.name}</td><td className="muted">{d.unit}</td>
-                        <td colSpan={3} className="muted fk-note">R/Y/B combined{one.extras?.FLIF_AVG != null ? ` · average ${one.extras.FLIF_AVG}%` : ''}</td>
+                        <td className="muted">{d.item}</td><td className="mono"><RowButton label={t('fk.chart', { c: d.code })} aria-pressed={code === d.code} onActivate={() => setCode(d.code)}><b>{d.code}</b></RowButton></td><td>{kn(d)}</td><td className="muted">{d.unit}</td>
+                        <td colSpan={3} className="muted fk-note">{t('fk.rybCombined')}{one.extras?.FLIF_AVG != null ? t('fk.average', { v: one.extras.FLIF_AVG }) : ''}</td>
                         <td className={`mono fk-num fk-${tone(d.code, v)}`}>{fmt(v, d.unit)}</td>
                       </tr>
                     );
                   }
                   return (
                     <tr key={d.code} onClick={() => setCode(d.code)} className={code === d.code ? 'fk-rowsel' : ''} style={{ cursor: 'pointer' }}>
-                      <td className="muted">{d.item}</td><td className="mono"><b>{d.code}</b></td><td>{d.name}</td><td className="muted">{d.unit}</td>
+                      <td className="muted">{d.item}</td><td className="mono"><RowButton label={t('fk.chart', { c: d.code })} aria-pressed={code === d.code} onActivate={() => setCode(d.code)}><b>{d.code}</b></RowButton></td><td>{kn(d)}</td><td className="muted">{d.unit}</td>
                       {PHASES.map((p) => {
                         const v = one.kpis[`${d.code}_${p}`];
                         return <td key={p} className={`mono fk-num fk-${tone(d.code, v)} ${p === 'T' ? 'fk-total' : ''}`}>{fmt(v, d.unit)}</td>;
@@ -298,9 +302,7 @@ export default function FeederKpiPanel() {
             </table>
           </div>
           <p className="fk-foot muted">
-            Total (T): incidents and durations count the feeder as in breach when any phase is; stress values add the three phases;
-            max takes the highest phase and min / sag the lowest. Minutes while the whole feeder is de-energised are left out (they are
-            interruptions, counted in SAIDI/SAIFI). — = no sag, or no data. Gaps over {defs.maxGapMinutes} min in the telemetry are not counted.
+            {t('fk.foot', { g: defs.maxGapMinutes })}
           </p>
         </>
       )}
@@ -333,9 +335,10 @@ function aggOf(def, xs) {
 }
 const shortSub = (s) => s.replace(/^33\/11 kV\s*/i, '').replace(/\s*S\/s$/i, '');
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const xLabel = (l, g) => (g === 'hour' ? l : `${+l.slice(8, 10)} ${MON[+l.slice(5, 7) - 1]}`);
+const xLabel = (l, g) => (g === 'hour' ? l : `${+l.slice(8, 10)} ${(tt('fk.mon').split(',')[+l.slice(5, 7) - 1]) || MON[+l.slice(5, 7) - 1]}`);
 
 function MiniLines({ labels: allLabels, granularity, lines: allLines, def, unit }) {
+  const { t } = useT();
   const [hover, setHover] = useState(null);
   const W = 560, H = 230, ML = 46, MR = 14, MT = 10, MB = 26;
   // Drop leading/trailing time steps with no data, so the lines use the full width.
@@ -346,7 +349,7 @@ function MiniLines({ labels: allLabels, granularity, lines: allLines, def, unit 
   const labels = allLabels.slice(a, z + 1);
   const lines = allLines.map((l) => ({ ...l, values: l.values.slice(a, z + 1) }));
   const vals = lines.flatMap((l) => l.values).filter((v) => v != null);
-  if (!labels.length || !vals.length) return <div className="muted kh-empty">No data in this period</div>;
+  if (!labels.length || !vals.length) return <div className="muted kh-empty">{t('fk.noDataPeriod')}</div>;
   const zero = allZeroMessage(def, vals, granularity);
   if (zero) return <div className="kh-zero">{zero}</div>;
   let lo = Math.min(...vals), hi = Math.max(...vals);
@@ -368,11 +371,11 @@ function MiniLines({ labels: allLabels, granularity, lines: allLines, def, unit 
   };
   return (
     <div className="kh-chart">
-      <svg viewBox={`0 0 ${W} ${H}`} onMouseMove={onMove} onMouseLeave={() => setHover(null)} role="img" aria-label={`${def.code} trend`}>
-        {ticks.map((t, i) => (
+      <svg viewBox={`0 0 ${W} ${H}`} onMouseMove={onMove} onMouseLeave={() => setHover(null)} role="img" aria-label={t('fk.trend', { c: def.code })}>
+        {ticks.map((tk, i) => (
           <g key={i}>
-            <line x1={ML} x2={W - MR} y1={y(t)} y2={y(t)} stroke="var(--line-2)" strokeWidth={0.6} />
-            <text x={ML - 6} y={y(t) + 3.5} fontSize={10.5} textAnchor="end" fill="var(--muted)">{fmt(t, unit)}</text>
+            <line x1={ML} x2={W - MR} y1={y(tk)} y2={y(tk)} stroke="var(--line-2)" strokeWidth={0.6} />
+            <text x={ML - 6} y={y(tk) + 3.5} fontSize={10.5} textAnchor="end" fill="var(--muted)">{fmt(tk, unit)}</text>
           </g>
         ))}
         {labels.map((l, i) => showX(i) && (
@@ -390,7 +393,7 @@ function MiniLines({ labels: allLabels, granularity, lines: allLines, def, unit 
         })}
         {hover != null && <line x1={x(hover)} x2={x(hover)} y1={MT} y2={H - MB} stroke="var(--muted)" strokeDasharray="3 3" strokeWidth={0.8} />}
       </svg>
-      <SrTable caption={`${def.code} values`} head={['Time', ...lines.map((ln) => ln.label)]}
+      <SrTable caption={t('fk.values', { c: def.code })} head={[t('fk.time'), ...lines.map((ln) => ln.label)]}
         rows={labels.map((l, i) => [xLabel(l.label, granularity), ...lines.map((ln) => (ln.values[i] == null ? '–' : fmt(ln.values[i], unit)))])} />
       {hover != null && (
         <div className="kh-tip">
@@ -403,6 +406,7 @@ function MiniLines({ labels: allLabels, granularity, lines: allLines, def, unit 
 }
 
 function KpiHierarchy({ feeders, defs, phase, params, onOpenFeeder, onScope }) {
+  const { t } = useT();
   const [sub, setSub] = useState(null);
   const [fdr, setFdr] = useState(null);
   const [loaded, setLoaded] = useState(null); // { scope, data }
@@ -445,7 +449,7 @@ function KpiHierarchy({ feeders, defs, phase, params, onOpenFeeder, onScope }) {
     return () => { live = false; };
   }, [params, sub, fdr]);
 
-  const childName = { substation: 'substations', feeder: 'feeders', phase: 'phases' }[level];
+  const childName = t(`fk.ch.${level}`);
   const scopeValue = (d) => (level === 'phase'
     ? scopeFeeders[0]?.kpis[keyOf(d, 'T')]
     : aggOf(d, scopeFeeders.map((f) => f.kpis[keyOf(d)])));
@@ -478,7 +482,7 @@ function KpiHierarchy({ feeders, defs, phase, params, onOpenFeeder, onScope }) {
     if (level === 'phase') {
       const phs = d.phased === false ? ['T'] : ['R', 'Y', 'B', 'T'];
       return phs.map((p) => ({
-        id: p, label: p === 'T' ? (d.phased === false ? 'RYB' : 'Total') : p, color: PHASE_LINE[p], bold: p === 'T',
+        id: p, label: p === 'T' ? (d.phased === false ? 'RYB' : t('fk.total')) : p, color: PHASE_LINE[p], bold: p === 'T',
         value: scopeFeeders[0]?.kpis[d.phased === false ? d.code : `${d.code}_${p}`],
         values: series.phasePoints.map((k) => k[d.phased === false ? d.code : `${d.code}_${p}`]),
       }));
@@ -488,23 +492,23 @@ function KpiHierarchy({ feeders, defs, phase, params, onOpenFeeder, onScope }) {
 
   return (
     <div className="kh">
-      <nav className="kh-crumbs" aria-label="Scope">
-        <button className={!sub ? 'on' : ''} onClick={() => { setSub(null); setFdr(null); }}>Entire region</button>
-        {sub && <><span>›</span><button className={!fdr ? 'on' : ''} onClick={() => setFdr(null)}>{sub}</button></>}
+      <nav className="kh-crumbs" aria-label={t('fk.scope')}>
+        <button className={!sub ? 'on' : ''} onClick={() => { setSub(null); setFdr(null); }}>{t('fk.region')}</button>
+        {sub && <><span>›</span><button className={!fdr ? 'on' : ''} onClick={() => setFdr(null)}>{sub === 'Unassigned' ? t('fk.unassigned') : sub}</button></>}
         {fdr && <><span>›</span><button className="on">{fdr}</button>
-          <button className="btn sm" onClick={() => onOpenFeeder(fdr)}>Open feeder detail</button></>}
+          <button className="btn sm" onClick={() => onOpenFeeder(fdr)}>{t('fk.openDetail')}</button></>}
         <span className="kh-jump">
-          <select value={sub || ''} aria-label="Go to substation"
+          <select value={sub || ''} aria-label={t('fk.goSub')}
             onChange={(e) => { setSub(e.target.value || null); setFdr(null); }}>
-            <option value="">Go to substation…</option>
+            <option value="">{t('fk.goSubO')}</option>
             {[...bySub.keys()].sort().map((s) => <option key={s} value={s}>{shortSub(s)}</option>)}
           </select>
-          <select value={fdr || ''} aria-label="Go to feeder"
+          <select value={fdr || ''} aria-label={t('fk.goFdr')}
             onChange={(e) => {
               const f = feeders.find((x) => x.feeder === e.target.value);
               if (f) { setSub(f.substation || 'Unassigned'); setFdr(f.feeder); } else setFdr(null);
             }}>
-            <option value="">Go to feeder…</option>
+            <option value="">{t('fk.goFdrO')}</option>
             {[...bySub.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([s, fs]) => (
               <optgroup key={s} label={shortSub(s)}>
                 {[...fs].sort((a, b) => a.feeder.localeCompare(b.feeder)).map((f) => <option key={f.feeder} value={f.feeder}>{f.feeder}</option>)}
@@ -514,25 +518,25 @@ function KpiHierarchy({ feeders, defs, phase, params, onOpenFeeder, onScope }) {
         </span>
         <span className="muted kh-hint">
           {level === 'phase'
-            ? 'Lines = R / Y / B / Total for this feeder'
-            : `Lines = worst ${topN} ${childName}${phase !== 'T' ? ` · phase ${phase}` : ''} · click a name to drill down`}
+            ? t('fk.linesPhase')
+            : `${t('fk.linesWorst', { n: topN, c: childName })}${phase !== 'T' ? t('fk.phaseX', { p: phase }) : ''}${t('fk.drillHint')}`}
         </span>
         {level !== 'phase' && (
-          <span className="seg kh-topn" role="group" aria-label="Lines per chart">
+          <span className="seg kh-topn" role="group" aria-label={t('fk.linesPer')}>
             {LINE_COUNTS.map((n) => (
-              <button key={n} className={topN === n ? 'on' : ''} aria-pressed={topN === n} onClick={() => setTopN(n)}>Worst {n}</button>
+              <button key={n} className={topN === n ? 'on' : ''} aria-pressed={topN === n} onClick={() => setTopN(n)}>{t('fk.worstN', { n })}</button>
             ))}
           </span>
         )}
       </nav>
-      <div className="seg kh-tabs" role="tablist" aria-label="Index group">
+      <div className="seg kh-tabs" role="tablist" aria-label={t('fk.indexGroup')}>
         {KH_GROUPS.map((g) => (
           <button key={g.key} role="tab" aria-selected={group === g.key} className={group === g.key ? 'on' : ''} onClick={() => setGroup(g.key)}>
-            {g.label}
+            {tOr(`fk.g.${g.key}`, g.label)}
           </button>
         ))}
       </div>
-      {!series && <div className="muted kh-loading">Loading trends…</div>}
+      {!series && <div className="muted kh-loading">{t('fk.loadingTrends')}</div>}
       <div className={`kh-grid${groupCodes.length === 1 ? ' kh-single' : ''}`}>
         {defs.filter((d) => groupCodes.includes(d.code)).map((d) => {
           const total = scopeValue(d);
@@ -543,14 +547,14 @@ function KpiHierarchy({ feeders, defs, phase, params, onOpenFeeder, onScope }) {
           return (
             <div key={d.code} className={`kh-card fk-edge-${tone(d.code, total)}`}>
               <div className="kh-head">
-                <div><b className="mono">{d.code}</b><div className="kh-name">{d.name}</div></div>
+                <div><b className="mono">{d.code}</b><div className="kh-name">{tOr(`fk.kpi.${d.code}`, d.name)}</div></div>
                 <div className={`kh-total mono fk-${tone(d.code, total)}`}>{fmt(total, unit)}<span className="kpi-u"> {unit}</span></div>
               </div>
               <div className="kh-body">
               {series && <MiniLines labels={series.labels} granularity={series.granularity} lines={lines} def={d} unit={unit} />}
               <div className="kh-legend">
                 {lines.map((ln) => (
-                  <button key={ln.id} onClick={ln.drill} disabled={!ln.drill} title={ln.drill ? `Drill into ${ln.id}` : ''}>
+                  <button key={ln.id} onClick={ln.drill} disabled={!ln.drill} title={ln.drill ? t('fk.drill', { x: ln.id }) : ''}>
                     <i style={{ background: ln.color }} /><span className="kh-lbl">{ln.label}</span>
                     <b className={`mono fk-${tone(d.code, ln.value)}`}>{fmt(ln.value, unit)}</b>
                   </button>
@@ -558,14 +562,14 @@ function KpiHierarchy({ feeders, defs, phase, params, onOpenFeeder, onScope }) {
               </div>
               {ranked.length > lines.length && (
                 <button className="kh-more" onClick={() => toggleRanking(d.code)} aria-expanded={open}>
-                  {open ? 'Hide full ranking' : `Show all ${ranked.length} ${childName}`}
+                  {open ? t('fk.hideRank') : t('fk.showAll', { n: ranked.length, c: childName })}
                 </button>
               )}
               {open && ranked.length > lines.length && (
                 <ol className="kh-rank">
                   {ranked.map((c) => (
                     <li key={c.id}>
-                      <button onClick={c.drill} title={`Drill into ${c.id}`}>
+                      <button onClick={c.drill} title={t('fk.drill', { x: c.id })}>
                         <span className="kh-lbl">{c.label}</span>
                         <b className={`mono fk-${tone(d.code, c.value)}`}>{fmt(c.value, unit)}</b>
                       </button>

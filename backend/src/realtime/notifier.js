@@ -6,6 +6,14 @@ import { repo } from '../infra/repo.js';
 import { deriveCallState, cleanSubstation } from '../domain/callState.js';
 import { sendSmsVia, maskPhone } from './sms.js';
 
+// P8.7c: customer messages go out in Hindi and English together (Hindi first),
+// so no per-customer language setting is needed. Subjects stay English (mail
+// clients and the OMS-01 self-test match on them). Hindi SMS are Unicode, so
+// they use more SMS segments than English-only ones.
+const bi = (hi, en) => `${hi}\n\n${en}`;
+const fmtHi = (iso) => new Date(iso).toLocaleString('hi-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' });
+const custHi = (n) => (n ? ` (लगभग ${n} उपभोक्ता)` : '');
+
 export const transport = nodemailer.createTransport({
   host: process.env.BREVO_SMTP_HOST,
   port: Number(process.env.BREVO_SMTP_PORT || 587),
@@ -91,7 +99,9 @@ async function claimCallback(incidentId, contactRef, recipient, body, status) {
 
 export async function sendRestorationCallbacks(inc) {
   const where = cleanSubstation(inc.substation) || inc.zone || inc.feeder || 'your area';
-  const body = `Supply has been restored to your area (${where}). Thank you for your patience. Ref: ${inc.id}.`;
+  const body = bi(
+    `आपके क्षेत्र (${where}) में बिजली बहाल कर दी गई है। आपके धैर्य के लिए धन्यवाद। संदर्भ: ${inc.id}।`,
+    `Supply has been restored to your area (${where}). Thank you for your patience. Ref: ${inc.id}.`);
   const calls = (await repo.callsForIncident(inc.id)).filter((c) => deriveCallState(c, inc).state !== 'Rejected');
   // Complaint phones need the pgcrypto migrations (db/migrations/*phone*.sql);
   // a database without them must not stop the trouble-call callbacks.
@@ -137,9 +147,11 @@ export function startNotifier() {
     if (inc.type === 'Scheduled') return;
     const { where } = describe(inc);
     const subject = `Power outage reported in ${where}`;
-    const body = `We have detected a power outage affecting ${where}` +
+    const body = bi(
+      `${where} में बिजली कटौती का पता चला है${custHi(inc.customers)}। हमारे दल को सूचित कर दिया गया है और वे कार्य कर रहे हैं। संदर्भ: ${inc.id}।`,
+      `We have detected a power outage affecting ${where}` +
       (inc.customers ? ` (approx. ${inc.customers} customers)` : '') +
-      `. Our crews have been notified and are responding. Incident ref: ${inc.id}.`;
+      `. Our crews have been notified and are responding. Incident ref: ${inc.id}.`);
     await sendEmail(inc.id, subject, body);
     await sendSms(inc.id, body);
   });
@@ -152,32 +164,43 @@ export function startNotifier() {
     const fmt = (iso) => new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' });
     if (kind === 'cancelled') {
       const subject = `Planned power shutdown in ${where} cancelled`;
-      const body = `The planned shutdown in ${where} on ${fmt(windowStart)} has been cancelled. Supply will not be interrupted. Ref: ${inc.id}.`;
+      const body = bi(
+        `${where} में ${fmtHi(windowStart)} को होने वाला नियोजित बिजली बंद रद्द कर दिया गया है। बिजली बाधित नहीं होगी। संदर्भ: ${inc.id}।`,
+        `The planned shutdown in ${where} on ${fmt(windowStart)} has been cancelled. Supply will not be interrupted. Ref: ${inc.id}.`);
       await sendEmail(inc.id, subject, body);
       await sendSms(inc.id, body);
       return;
     }
     if (kind === 'rescheduled') {
       const subject = `Planned power shutdown in ${where} rescheduled`;
-      const body = `The planned shutdown in ${where} has been moved. New time: ${fmt(windowStart)} to ${fmt(windowEnd)}` +
-        (previousWindowStart ? ` (was ${fmt(previousWindowStart)} to ${fmt(previousWindowEnd)})` : '') + ` for ${workDescription}. Ref: ${inc.id}.`;
+      const body = bi(
+        `${where} में नियोजित बिजली बंद का समय बदल गया है। नया समय: ${fmtHi(windowStart)} से ${fmtHi(windowEnd)}` +
+          (previousWindowStart ? ` (पहले ${fmtHi(previousWindowStart)} से ${fmtHi(previousWindowEnd)})` : '') + `, कार्य: ${workDescription}। संदर्भ: ${inc.id}।`,
+        `The planned shutdown in ${where} has been moved. New time: ${fmt(windowStart)} to ${fmt(windowEnd)}` +
+        (previousWindowStart ? ` (was ${fmt(previousWindowStart)} to ${fmt(previousWindowEnd)})` : '') + ` for ${workDescription}. Ref: ${inc.id}.`);
       await sendEmail(inc.id, subject, body);
       await sendSms(inc.id, body);
       return;
     }
     if (kind === 'extended') {
       const subject = `Planned power shutdown in ${where} extended`;
-      const body = `The planned shutdown in ${where} is taking longer than planned. Supply is now expected by ${fmt(windowEnd)}` +
-        (previousWindowEnd ? ` (previously ${fmt(previousWindowEnd)})` : '') + `. Reason: ${reason}. Ref: ${inc.id}.`;
+      const body = bi(
+        `${where} में नियोजित बिजली बंद में अपेक्षा से अधिक समय लग रहा है। अब बिजली ${fmtHi(windowEnd)} तक बहाल होने की उम्मीद है` +
+          (previousWindowEnd ? ` (पहले ${fmtHi(previousWindowEnd)})` : '') + `। कारण: ${reason}। संदर्भ: ${inc.id}।`,
+        `The planned shutdown in ${where} is taking longer than planned. Supply is now expected by ${fmt(windowEnd)}` +
+        (previousWindowEnd ? ` (previously ${fmt(previousWindowEnd)})` : '') + `. Reason: ${reason}. Ref: ${inc.id}.`);
       await sendEmail(inc.id, subject, body);
       await sendSms(inc.id, body);
       return;
     }
     const scope = deenergisation === 'partial' ? `Partial shutdown (${affectedSection || 'part of the area'})` : deenergisation === 'complete' ? 'Complete shutdown' : 'Planned shutdown';
     const subject = `Planned power shutdown in ${where}`;
-    const body = `${scope} in ${where} from ${fmt(windowStart)} to ${fmt(windowEnd)} for ${workDescription}` +
+    const scopeHi = deenergisation === 'partial' ? `आंशिक बिजली बंद (${affectedSection || 'क्षेत्र का एक भाग'})` : deenergisation === 'complete' ? 'पूर्ण बिजली बंद' : 'नियोजित बिजली बंद';
+    const body = bi(
+      `${where} में ${fmtHi(windowStart)} से ${fmtHi(windowEnd)} तक ${workDescription} के लिए ${scopeHi} रहेगा${custHi(inc.customers)}। कार्य पूरा होते ही बिजली बहाल कर दी जाएगी। संदर्भ: ${inc.id}।`,
+      `${scope} in ${where} from ${fmt(windowStart)} to ${fmt(windowEnd)} for ${workDescription}` +
       (inc.customers ? ` (approx. ${inc.customers} customers)` : '') +
-      `. Supply will be restored as soon as the work is complete. Ref: ${inc.id}.`;
+      `. Supply will be restored as soon as the work is complete. Ref: ${inc.id}.`);
     await sendEmail(inc.id, subject, body);
     await sendSms(inc.id, body);
   });
@@ -190,7 +213,9 @@ export function startNotifier() {
       if (s !== 'resolved') return;
       const { where } = describe(inc);
       const subject = `Planned work complete in ${where}`;
-      const body = `The planned work in ${where} is complete and supply has been restored. Thank you for your patience. Ref: ${inc.id}.`;
+      const body = bi(
+        `${where} में नियोजित कार्य पूरा हो गया है और बिजली बहाल कर दी गई है। आपके धैर्य के लिए धन्यवाद। संदर्भ: ${inc.id}।`,
+        `The planned work in ${where} is complete and supply has been restored. Thank you for your patience. Ref: ${inc.id}.`);
       await sendEmail(inc.id, subject, body);
       await sendSms(inc.id, body);
       return;
@@ -198,7 +223,9 @@ export function startNotifier() {
     if (s === 'resolved' || s === 'restored' || s === 'closed') {
       const { where } = describe(inc);
       const subject = `Power restored in ${where}`;
-      const body = `Power has been restored in ${where}. Thank you for your patience. Incident ref: ${inc.id}.`;
+      const body = bi(
+        `${where} में बिजली बहाल कर दी गई है। आपके धैर्य के लिए धन्यवाद। संदर्भ: ${inc.id}।`,
+        `Power has been restored in ${where}. Thank you for your patience. Incident ref: ${inc.id}.`);
       await sendEmail(inc.id, subject, body);
       await sendSms(inc.id, body);
     }
@@ -207,8 +234,10 @@ export function startNotifier() {
   bus.subscribe(TOPICS.ERT_CHANGED, async (inc) => {
     const { where } = describe(inc);
     const subject = `Updated restoration time for ${where}`;
-    const body = `The estimated restoration time for the outage in ${where} has changed to ` +
-      `${new Date(inc.ert).toLocaleString()}. Incident ref: ${inc.id}.`;
+    const body = bi(
+      `${where} में कटौती की अनुमानित बहाली का समय बदलकर ${fmtHi(inc.ert)} हो गया है। संदर्भ: ${inc.id}।`,
+      `The estimated restoration time for the outage in ${where} has changed to ` +
+      `${new Date(inc.ert).toLocaleString()}. Incident ref: ${inc.id}.`);
     await sendEmail(inc.id, subject, body);
     await sendSms(inc.id, body);
   });

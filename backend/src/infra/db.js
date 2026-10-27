@@ -625,6 +625,46 @@ export async function migrate() {
       resolution  TEXT
     );
     CREATE INDEX IF NOT EXISTS reassign_requests_open_idx ON reassign_requests(status, created_at DESC);
+
+    -- P8.6g availability samples, one per UPTIME_INTERVAL_S (realtime/uptime.js).
+    CREATE TABLE IF NOT EXISTS uptime_checks (
+      ts         TIMESTAMPTZ NOT NULL,
+      status     TEXT NOT NULL CHECK (status IN ('up', 'degraded', 'down')),
+      components JSONB NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS uptime_checks_ts_idx ON uptime_checks (ts);
+
+    -- Feeder managers: who gets the outage / restoration SMS for a feeder and the
+    -- report-builder summaries (Admin -> Feeder managers). Phone is kept in full
+    -- because it is needed to send; the API only ever returns it masked.
+    CREATE TABLE IF NOT EXISTS feeder_managers (
+      feeder     TEXT PRIMARY KEY,
+      name       TEXT NOT NULL,
+      phone      TEXT NOT NULL,
+      active     BOOLEAN NOT NULL DEFAULT true,
+      updated_by TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    -- Report builder: named report definitions (columns, filters, grouping) as JSON.
+    CREATE TABLE IF NOT EXISTS saved_reports (
+      id         TEXT PRIMARY KEY,
+      name       TEXT NOT NULL,
+      spec       JSONB NOT NULL,
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    -- Stored monthly reliability indices (POST /analytics/snapshot writes, GET /analytics/monthly reads).
+    -- repo.js used this table but nothing created it, so the monthly chart always failed with a 500.
+    CREATE TABLE IF NOT EXISTS monthly_indices (
+      month_key   TEXT PRIMARY KEY,
+      saidi       NUMERIC,
+      saifi       NUMERIC,
+      caidi       NUMERIC,
+      maifi       NUMERIC,
+      computed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
   `);
 
   // ID sequences for incidents.id / complaints.qid. These replace the old
@@ -683,12 +723,15 @@ export async function migrate() {
     -- incident's geog when the job is created; NULL when that is unknown.
     ALTER TABLE jobs ADD COLUMN IF NOT EXISTS geog public.geography(Point, 4326);
     CREATE INDEX IF NOT EXISTS idx_jobs_geog ON jobs USING GIST (geog);
+  `);
 
-    -- The network equipment that tripped, when the SCADA event named it by
-    -- mRID (OMS-05). The column always exists; its foreign key is added as
-    -- soon as network.* exists -- network_topology_schema.sql is a separate,
-    -- manual migration, so a database without it (CI, a fresh install)
-    -- still migrates, and gets the FK on the first boot after it is applied.
+  // The network equipment that tripped, when the SCADA event named it by
+  // mRID (OMS-05). The column always exists, with or without PostGIS (CI has
+  // none), because createIncident always writes it; its foreign key is added
+  // as soon as network.* exists -- network_topology_schema.sql is a separate,
+  // manual migration, so a database without it (CI, a fresh install) still
+  // migrates, and gets the FK on the first boot after it is applied.
+  await db.none(`
     ALTER TABLE incidents ADD COLUMN IF NOT EXISTS tripped_equipment_id BIGINT;
     DO $$
     BEGIN

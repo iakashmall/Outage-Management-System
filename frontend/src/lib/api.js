@@ -38,8 +38,10 @@ async function exportReliabilityReport(format, filters = {}) {
   URL.revokeObjectURL(url);
 }
 // Downloads a file from the API (with the login token) under the name the server gives it.
-async function download(path, fallbackName) {
-  const r = await fetch(`${BASE}${path}`, { headers: { ...(await freshAuthHeader()) } });
+async function download(path, fallbackName, body) {
+  const r = await fetch(`${BASE}${path}`, body
+    ? { method: 'POST', headers: { 'content-type': 'application/json', ...(await freshAuthHeader()) }, body: JSON.stringify(body) }
+    : { headers: { ...(await freshAuthHeader()) } });
   if (!r.ok) {
     const data = await r.json().catch(() => ({}));
     throw Object.assign(new Error(data.error || r.statusText), { data, status: r.status });
@@ -51,6 +53,8 @@ async function download(path, fallbackName) {
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 }
+const clean = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== '' && v != null));
+const exportStandardReport = (kind, params = {}) => download(`/reports/standard/${kind}?${new URLSearchParams({ ...clean(params), format: 'csv' })}`, `${kind}-report.csv`);
 const exportFeederKpi = (params = {}) => download(`/analytics/feeder-kpi/export?${new URLSearchParams(params)}`, 'feeder-kpi.csv');
 const exportFeederKpiPdf = (params = {}, feeders = []) => {
   const { feeder, ...rest } = params; // the PDF names its own feeders
@@ -96,6 +100,20 @@ export const api = {
   indicators: () => req('GET', '/indicators'),
   monthly: () => req('GET', '/analytics/monthly'),
   exportReliabilityReport,
+  standardReport: (kind, params = {}) => req('GET', `/reports/standard/${kind}?${new URLSearchParams(clean(params))}`),
+  exportStandardReport,
+  uptime: () => req('GET', '/uptime'),
+  feederManagers: () => req('GET', '/feeder-managers'),
+  setFeederManager: (feeder, b) => req('PUT', `/feeder-managers/${encodeURIComponent(feeder)}`, b),
+  removeFeederManager: (feeder) => req('DELETE', `/feeder-managers/${encodeURIComponent(feeder)}`),
+  smsFeederManager: (incidentId, message) => req('POST', `/incidents/${incidentId}/sms-feeder-manager`, { message }),
+  reportFields: () => req('GET', '/report-builder/fields'),
+  runReport: (spec) => req('POST', '/report-builder/run', spec),
+  exportBuiltReport: (spec, name) => download('/report-builder/run?format=csv', 'report.csv', { ...spec, name }),
+  savedReports: () => req('GET', '/report-builder/saved'),
+  saveReport: (name, spec) => req('POST', '/report-builder/saved', { name, spec }),
+  deleteReport: (id) => req('DELETE', `/report-builder/saved/${id}`),
+  smsReport: (name, spec) => req('POST', '/report-builder/sms', { name, spec }),
   mttr: () => req('GET', '/analytics/mttr'),
   slaCompliance: () => req('GET', '/analytics/sla'),
   crewProductivity: () => req('GET', '/analytics/crew-productivity'),

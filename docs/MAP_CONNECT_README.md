@@ -1,4 +1,4 @@
-# Connecting OMS to the in-house map server (Spintech-inhouse map)
+# Connecting OMS to the in-house map server (Spintech)
 
 Follow this **every time** you start working and want the map. The map server listens only on its own machine
 (`127.0.0.1:8095` there), so this PC reaches it through an SSH tunnel. The OMS backend then serves the map to the
@@ -41,7 +41,7 @@ Use separate terminals; leave them open.
 (`npm start` runs backend + web + mobile together instead of steps 5 and 6.)
 
 7. Log in (Keycloak) and open **Network Map**. The base map and the feeders, substations, crews and incidents should
-   all appear. The corner credit reads "Spintech-inhouse map".
+   all appear. The corner credit reads "Spintech".
 
 If the tunnel window is closed, or the PC sleeps, the base map goes blank. Re-run step 3 (it also reconnects by
 itself after a short drop) and refresh the page.

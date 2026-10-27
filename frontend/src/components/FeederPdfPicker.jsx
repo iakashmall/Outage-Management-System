@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useT } from '../lib/i18n.js';
 
 // "Export PDF" button with a feeder picker: tick feeders (or whole substations),
 // then download one PDF with a summary table and every KPI trend chart per feeder.
@@ -7,6 +8,7 @@ const MAX = 25; // the server's limit per PDF
 const shortSub = (s) => s.replace(/^33\/11 kV\s*/i, '').replace(/\s*S\/s$/i, '');
 
 export default function FeederPdfPicker({ feeders, initial = [], onExport, disabled }) {
+  const { t } = useT();
   const [open, setOpen] = useState(false);
   const [picked, setPicked] = useState(() => new Set());
   const [q, setQ] = useState('');
@@ -51,14 +53,14 @@ export default function FeederPdfPicker({ feeders, initial = [], onExport, disab
 
   return (
     <span className="fp" ref={boxRef}>
-      <button className="btn sm" onClick={toggleOpen} disabled={disabled} aria-expanded={open}>Export PDF</button>
+      <button className="btn sm" onClick={toggleOpen} disabled={disabled} aria-expanded={open}>{t('fp.export')}</button>
       {open && (
-        <div className="fp-pop" role="dialog" aria-label="Feeders to export">
+        <div className="fp-pop" role="dialog" aria-label={t('fp.dialog')}>
           <div className="fp-head">
-            <b>Feeders in the PDF</b>
-            <span className={picked.size > MAX ? 'fp-over' : 'muted'}>{picked.size} selected{picked.size > MAX ? ` · max ${MAX}` : ''}</span>
+            <b>{t('fp.head')}</b>
+            <span className={picked.size > MAX ? 'fp-over' : 'muted'}>{t('fp.selected', { n: picked.size })}{picked.size > MAX ? t('fp.max', { n: MAX }) : ''}</span>
           </div>
-          <input className="fp-search" placeholder="Search feeder or substation" value={q} onChange={(e) => setQ(e.target.value)} autoFocus /* eslint-disable-line jsx-a11y/no-autofocus -- opened by the user's own click */ />
+          <input className="fp-search" placeholder={t('fp.search')} value={q} onChange={(e) => setQ(e.target.value)} autoFocus /* eslint-disable-line jsx-a11y/no-autofocus -- opened by the user's own click */ />
           <div className="fp-list">
             {groups.map(([s, fs]) => {
               const all = fs.every((f) => picked.has(f));
@@ -67,7 +69,7 @@ export default function FeederPdfPicker({ feeders, initial = [], onExport, disab
                   <label className="fp-sub">
                     <input type="checkbox" checked={all} ref={(el) => { if (el) el.indeterminate = !all && fs.some((f) => picked.has(f)); }}
                       onChange={() => flip(fs, !all)} />
-                    {shortSub(s)} <span className="muted">({fs.length})</span>
+                    {s === 'Unassigned' ? t('fp.unassigned') : shortSub(s)} <span className="muted">({fs.length})</span>
                   </label>
                   {fs.map((f) => (
                     <label key={f} className="fp-item">
@@ -78,14 +80,14 @@ export default function FeederPdfPicker({ feeders, initial = [], onExport, disab
                 </div>
               );
             })}
-            {!groups.length && <div className="muted fp-none">No feeders match.</div>}
+            {!groups.length && <div className="muted fp-none">{t('fp.none')}</div>}
           </div>
           {err && <div className="fp-err">{err}</div>}
           <div className="fp-foot">
-            <button className="btn sm" onClick={() => setPicked(new Set())} disabled={!picked.size}>Clear</button>
-            <span className="muted">4 pages per feeder</span>
+            <button className="btn sm" onClick={() => setPicked(new Set())} disabled={!picked.size}>{t('fp.clear')}</button>
+            <span className="muted">{t('fp.pages')}</span>
             <button className="btn sm primary" onClick={go} disabled={busy || !picked.size || picked.size > MAX}>
-              {busy ? 'Building PDF…' : 'Download PDF'}
+              {busy ? t('fp.building') : t('fp.download')}
             </button>
           </div>
         </div>
