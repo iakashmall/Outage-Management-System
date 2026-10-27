@@ -1,4 +1,5 @@
 import { motion } from 'motion/react';
+import { useT } from '../lib/i18n.js';
 
 const RING_STROKE = 14;
 
@@ -36,10 +37,11 @@ function Ring({ metric, size, index }) {
 }
 
 export default function ReliabilityRings({ saidi, saifi, caidi, maifi }) {
+  const { t } = useT();
   const metrics = [
-    { label: 'SAIDI', value: saidi.value, target: saidi.target, unit: 'min', color: '#0e9f8e', textColor: '#0a7568', colorLight: '#5fd9c9', size: 168 },
+    { label: 'SAIDI', value: saidi.value, target: saidi.target, unit: t('rr.min'), color: '#0e9f8e', textColor: '#0a7568', colorLight: '#5fd9c9', size: 168 },
     { label: 'SAIFI', value: saifi.value, target: saifi.target, unit: '', color: '#2f6fed', colorLight: '#7ea6f7', size: 128 },
-    { label: 'CAIDI', value: caidi.value, target: caidi.target, unit: 'min', color: '#c8811a', textColor: '#905d13', colorLight: '#f0b967', size: 88 },
+    { label: 'CAIDI', value: caidi.value, target: caidi.target, unit: t('rr.min'), color: '#c8811a', textColor: '#905d13', colorLight: '#f0b967', size: 88 },
   ];
 
   return (
@@ -61,7 +63,7 @@ export default function ReliabilityRings({ saidi, saifi, caidi, maifi }) {
             <div style={{ fontSize: 20, fontWeight: 600, color: m.textColor || m.color }}>
               {m.value}{m.unit && ` ${m.unit}`}
               <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--muted)', marginLeft: 4 }}>
-                / {m.target}{m.unit && ` ${m.unit}`} target
+                / {m.target}{m.unit && ` ${m.unit}`} {t('rr.target')}
               </span>
             </div>
           </motion.div>

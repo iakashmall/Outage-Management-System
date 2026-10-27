@@ -1,12 +1,14 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import FlowField from './kokonutui/flow-field.jsx';
+import { useT, t as tr } from '../lib/i18n.js';
 
 const ease = [0.22, 0.61, 0.36, 1];
 const sf = "-apple-system, BlinkMacSystemFont, \"SF Pro Display\", system-ui, sans-serif";
 const sfText = "-apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, sans-serif";
 
 export default function LandingPage({ onEnter, username }) {
+  useT();
   const [fading, setFading] = useState(true);
   const [exiting, setExiting] = useState(false);
 
@@ -63,14 +65,14 @@ export default function LandingPage({ onEnter, username }) {
             margin: "0 0 16px",
           }}
         >
-          Outage Management,
+          {tr('splash.omTitle')}
           <br />
           <span style={{
             background: "linear-gradient(90deg, #fff 0%, rgba(255,255,255,0.55) 100%)",
             WebkitBackgroundClip: "text",
             WebkitTextFillColor: "transparent",
           }}>
-            reimagined.
+            {tr('splash.reimagined')}
           </span>
         </motion.h1>
 
@@ -112,7 +114,7 @@ export default function LandingPage({ onEnter, username }) {
             backdropFilter: "blur(20px)",
           }}
         >
-          Enter Control Room
+          {tr('splash.enter')}
         </motion.button>
 
         <motion.div

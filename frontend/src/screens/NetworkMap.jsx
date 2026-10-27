@@ -8,12 +8,16 @@ import { authHeader } from '../lib/auth.js';
 
 import { TRAIL_WINDOWS, DEFAULT_WINDOW, MAX_POINTS, windowMs, normalizeTrack, splitTrail, summarize, thinDots, fmtClock, fmtDur, fmtAgo } from '../lib/trail.js';
 import { Icon, SevBadge, StatusBadge, useLiveRefresh } from '../lib/ui.jsx';
+import { useT, t as tt, tOr } from '../lib/i18n.js';
 
 // VITE_BASEMAP_FALLBACK=osm: if the in-house basemap cannot load, show OpenStreetMap instead (loaded from the public
 // internet). Default: no fallback, just a notice; the OMS layers are drawn either way.
 const OSM_FALLBACK = String(import.meta.env.VITE_BASEMAP_FALLBACK || '').toLowerCase() === 'osm';
 
 const SEVC = { critical: '#e23b2e', high: '#ef9021', medium: '#3b82f6', low: '#22b06b' };
+// Severity and crew status are also shown by a letter / mark, not by colour alone (WCAG 1.4.1).
+const SEVL = { critical: 'C', high: 'H', medium: 'M', low: 'L' };
+const crewCls = (status) => `mk-crew s-${status || 'unknown'}`;
 const CREWC = { available: '#0fb39d', in_service: '#3b82f6', in_transit: '#ef9021', on_break: '#9fb0c4', off_shift: '#9fb0c4' };
 const PALETTE = ['#3b82f6', '#0fb39d', '#e0742b', '#8b5cf6', '#22b06b', '#e0447a', '#d1a017', '#2fa3a3', '#7a9e2e', '#c2622a', '#5b6ee0', '#c94f9a'];
 const feederColor = (name) => { if (!name) return '#9fb0c4'; let h = 0; for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) & 0xffff; return PALETTE[h % PALETTE.length]; };
@@ -53,6 +57,7 @@ const SCAN_ICON = () => L.divIcon({ className: '', html: '<div style="width:11px
 
 // mapFocus: { kind: 'scan', id, lat, lon, at } from another screen (Incidents' asset scans).
 export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
+  const { t, lang } = useT();
   const [net, setNet] = useState(null);
   const [inc, setInc] = useState([]);
   const [crews, setCrews] = useState([]);
@@ -156,9 +161,9 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
   const liveIndex = useMemo(() => {
     const out = [];
     inc.forEach((i) => i.lat && i.lon && out.push({ type: 'Incident', kind: 'incident', label: i.id, sub: i.zone, lat: i.lat, lon: i.lon, ref: i }));
-    crews.forEach((c) => c.lat && c.lon && out.push({ type: 'Crew', kind: 'crew', label: c.name, sub: (c.status || '').replace('_', ' '), lat: c.lat, lon: c.lon, ref: c }));
+    crews.forEach((c) => c.lat && c.lon && out.push({ type: 'Crew', kind: 'crew', label: c.name, sub: tOr(`map.cs.${c.status}`, (c.status || '').replace('_', ' ')), lat: c.lat, lon: c.lon, ref: c }));
     return out;
-  }, [inc, crews]);
+  }, [inc, crews, lang]);
 
   const RANK = { Substation: 0, Feeder: 1, Incident: 2, Crew: 3, CIM: 3.5, 'Power Txr': 4, DTR: 5, Switch: 6, RMU: 7, Fuse: 8 };
   const results = useMemo(() => {
@@ -187,6 +192,12 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     const bounds = L.latLngBounds([b.minLat, b.minLon], [b.maxLat, b.maxLon]);
     const map = L.map(boxRef.current, { preferCanvas: true, zoomControl: false, attributionControl: true, maxZoom: 19, zoomSnap: 0.25, wheelPxPerZoomLevel: 90 });
     map.fitBounds(bounds.pad(0.05));
+    // role=application makes NVDA/JAWS switch to focus mode on the map, so the arrow / + / - keys reach
+    // Leaflet's keyboard panning and zoom instead of being used for reading (WCAG 2.1.1).
+    const box = map.getContainer();
+    box.setAttribute('role', 'application');
+    box.setAttribute('aria-roledescription', tt('map.ariaRole'));
+    box.setAttribute('aria-label', tt('map.ariaMap'));
     // Basemap: vector map from the in-house map server, reached through the OMS backend (/api/map), so the
     // normal login protects it and nothing is loaded from the public internet. transformRequest attaches the
     // Bearer token to every map request (style, tiles, fonts). Leaflet layers (feeders, crews...) draw on top.
@@ -204,7 +215,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     try {
       gl = L.maplibreGL({
         style: '/api/map/style.json',
-        attributionControl: { customAttribution: 'Spintech-inhouse map' },
+        attributionControl: { customAttribution: 'Spintech' },
         transformRequest: (url) => (new URL(url, location.href).pathname.startsWith('/api/map/') ? { url, headers: authHeader() } : undefined),
       }).addTo(map);
       const glMap = gl.getMaplibreMap();
@@ -219,7 +230,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
       });
     } catch (e) { basemapFailed(e); }
     map.attributionControl.setPrefix(false); // drop the "Leaflet" prefix; the corner shows only our own credit
-    L.control.zoom({ position: 'topright' }).addTo(map);
+    L.control.zoom({ position: 'topright', zoomInTitle: t('map.zoomIn'), zoomOutTitle: t('map.zoomOut') }).addTo(map);
     mapRef.current = map;
     map.__bounds = bounds;
     setReady(true);
@@ -241,7 +252,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
       // wide, invisible "hit" line so the feeder is easy to hover/click...
       const hit = L.polyline(l.path, { color: col, weight: 14, opacity: 0, interactive: true });
       hit.on('click', () => pickFeeder(l.feeder));
-      hit.bindTooltip(`${l.feeder || 'Feeder'} · ${l.kv || 11} kV`, { sticky: true });
+      hit.bindTooltip(`${l.feeder || tt('map.feeder')} · ${l.kv || 11} kV`, { sticky: true });
       hit.addTo(groups.current.feeders);
       // ...and the thin, visible line drawn on top
       const pl = L.polyline(l.path, { color: col, weight: 3, opacity: 0.92, interactive: false });
@@ -253,8 +264,8 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     net.rmus.forEach((a) => L.circleMarker([a.lat, a.lon], { radius: 3, color: '#7a9e2e', weight: 0, fillOpacity: 0.9 }).on('click', () => select('rmu', a, 'RMU')).addTo(groups.current.rmus));
     net.switches.forEach((a) => L.circleMarker([a.lat, a.lon], { radius: 2.8, color: '#8b5cf6', weight: 0, fillOpacity: 0.85 }).on('click', () => select('switch', a, a.name || 'Switch')).addTo(groups.current.switches));
     net.distTx.forEach((a) => L.circleMarker([a.lat, a.lon], { radius: 3, color: '#3b82f6', weight: 0, fillOpacity: 0.85 }).bindTooltip(a.name || 'DTR').on('click', () => select('dt', a, a.name || 'DTR')).addTo(groups.current.distTx));
-    net.powerTx.forEach((a) => L.marker([a.lat, a.lon], { icon: L.divIcon({ className: '', html: '<div class="mk-ptx"></div>', iconSize: [12, 12] }), title: `Power transformer ${a.name || ''}`.trim() }).on('click', () => select('ptx', a, a.name || 'Power Txr')).addTo(groups.current.powerTx));
-    net.substations.forEach((s) => L.marker([s.lat, s.lon], { icon: L.divIcon({ className: '', html: `<div class="mk-ss"><span class="mk-ss-d"></span><span class="mk-ss-l">${clean(s.name)}</span></div>`, iconSize: [14, 14], iconAnchor: [7, 7] }), zIndexOffset: 500, title: `Substation ${clean(s.name)}` }).on('click', () => select('ss', s, s.name)).addTo(groups.current.substations));
+    net.powerTx.forEach((a) => L.marker([a.lat, a.lon], { icon: L.divIcon({ className: '', html: '<div class="mk-ptx"></div>', iconSize: [12, 12] }), title: tt('map.ttPowerTx', { name: a.name || '' }).trim() }).on('click', () => select('ptx', a, a.name || 'Power Txr')).addTo(groups.current.powerTx));
+    net.substations.forEach((s) => L.marker([s.lat, s.lon], { icon: L.divIcon({ className: '', html: `<div class="mk-ss"><span class="mk-ss-d"></span><span class="mk-ss-l">${clean(s.name)}</span></div>`, iconSize: [14, 14], iconAnchor: [7, 7] }), zIndexOffset: 500, title: tt('map.ttSubstation', { name: clean(s.name) }) }).on('click', () => select('ss', s, s.name)).addTo(groups.current.substations));
 
     groups.current.incidents = mk();
     groups.current.crews = mk();
@@ -322,8 +333,8 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     const g = L.layerGroup();
     const mkIcon = (cls, size) => L.divIcon({ className: '', html: `<div class="${cls}"></div>`, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
     const o = idx[trace.origin.cim_mrid];
-    if (o) L.marker(o.latlng, { icon: mkIcon('mk-origin', 22), zIndexOffset: 3000 }).bindTooltip('Trace origin').addTo(g);
-    trace.boundarySwitches.forEach((b) => { const t = idx[b.cim_mrid]; if (t) L.marker(t.latlng, { icon: mkIcon('mk-bound', 20), zIndexOffset: 2500 }).bindTooltip(`Boundary · ${b.cim_class} ${b.name || b.cim_mrid}`).addTo(g); });
+    if (o) L.marker(o.latlng, { icon: mkIcon('mk-origin', 22), zIndexOffset: 3000 }).bindTooltip(tt('map.ttOrigin')).addTo(g);
+    trace.boundarySwitches.forEach((b) => { const t = idx[b.cim_mrid]; if (t) L.marker(t.latlng, { icon: mkIcon('mk-bound', 20), zIndexOffset: 2500 }).bindTooltip(tt('map.ttBoundary', { cls: b.cim_class, name: b.name || b.cim_mrid })).addTo(g); });
     g.addTo(map); traceLayer.current = g;
     const pts = [...inSection, ...bound, trace.origin.cim_mrid].map((m) => idx[m]).filter(Boolean).flatMap((t) => (t.isLine ? t.layer.getLatLngs() : [t.latlng]));
     if (pts.length) map.flyToBounds(L.latLngBounds(pts).pad(0.25), { maxZoom: 19, duration: 0.6 });
@@ -335,10 +346,10 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     g.clearLayers();
     inc.filter((i) => i.lat && i.lon).forEach((i) => {
       const active = !['resolved', 'closed', 'cancelled'].includes(i.status);
-      const m = L.marker([i.lat, i.lon], { icon: L.divIcon({ className: '', html: `<div class="mk-inc ${active ? 'live' : ''}" style="--c:${SEVC[i.severity]}"></div>`, iconSize: [16, 16], iconAnchor: [8, 8] }), zIndexOffset: 1000, title: `Incident ${i.id}, ${i.severity}, ${String(i.status).replace('_', ' ')}` });
+      const m = L.marker([i.lat, i.lon], { icon: L.divIcon({ className: '', html: `<div class="mk-inc ${active ? 'live' : ''}" style="--c:${SEVC[i.severity]}">${SEVL[i.severity] || ''}</div>`, iconSize: [18, 18], iconAnchor: [9, 9] }), zIndexOffset: 1000, title: tt('map.ttIncident', { id: i.id, sev: tOr(`sev.${i.severity}`, i.severity), status: tOr(`st.${i.status}`, String(i.status).replace('_', ' ')) }) });
       m.on('click', () => select('incident', i, i.id)); m.addTo(g);
     });
-  }, [inc, ready]);
+  }, [inc, ready, lang]);
 
   // crew QR asset scans: where each asset was scanned (lat/long from the crew's phone)
   useEffect(() => {
@@ -346,11 +357,11 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     g.clearLayers();
     scans.filter((s) => Number.isFinite(s.lat) && Number.isFinite(s.lon)).forEach((s) => {
       L.marker([s.lat, s.lon], { icon: SCAN_ICON(), zIndexOffset: 800 })
-        .bindTooltip(`Asset ${s.asset_id || s.raw_value}`)
-        .on('click', () => select('scan', s, `Asset ${s.asset_id || s.raw_value}`))
+        .bindTooltip(tt('map.asset', { id: s.asset_id || s.raw_value }))
+        .on('click', () => select('scan', s, tt('map.asset', { id: s.asset_id || s.raw_value })))
         .addTo(g);
     });
-  }, [scans, ready]);
+  }, [scans, ready, lang]);
 
   // Opened from another screen on a point: show the scans layer, fly there, mark it.
   useEffect(() => {
@@ -360,7 +371,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     map.flyTo([mapFocus.lat, mapFocus.lon], 18, { duration: 0.6 });
     highlight(mapFocus.lat, mapFocus.lon);
     const s = scans.find((x) => x.id === mapFocus.id);
-    if (s) select('scan', s, `Asset ${s.asset_id || s.raw_value}`);
+    if (s) select('scan', s, tt('map.asset', { id: s.asset_id || s.raw_value }));
     else if (!scans.length) return; // scans still loading: try again when they arrive
     clearMapFocus?.();
   }, [mapFocus, ready, scans]); // eslint-disable-line
@@ -376,7 +387,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
       const color = CREWC[c.status] || '#9fb0c4';
       let e = live.get(c.id);
       if (!e) {
-        const m = L.marker([c.lat, c.lon], { icon: L.divIcon({ className: '', html: `<div class="mk-crew-wrap"><div class="mk-crew" style="--c:${color}"></div></div>`, iconSize: [16, 16], iconAnchor: [8, 8] }), zIndexOffset: 900, title: `Crew ${c.name || c.id}` });
+        const m = L.marker([c.lat, c.lon], { icon: L.divIcon({ className: '', html: `<div class="mk-crew-wrap"><div class="${crewCls(c.status)}" style="--c:${color}"></div></div>`, iconSize: [16, 16], iconAnchor: [8, 8] }), zIndexOffset: 900, title: tt('map.ttCrew', { name: c.name || c.id }) });
         e = { m, crew: c, at: Date.now(), heading: 0, raf: 0 };
         m.on('click', () => select('crew', e.crew, e.crew.name));
         // Leaflet rebuilds the icon element when the layer is toggled back on
@@ -384,6 +395,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
           const wrap = m.getElement()?.querySelector('.mk-crew-wrap');
           if (wrap) wrap.style.transform = `rotate(${e.heading}deg)`;
           wrap?.firstChild?.style.setProperty('--c', CREWC[e.crew.status] || '#9fb0c4');
+          if (wrap?.firstChild) wrap.firstChild.className = crewCls(e.crew.status);
         });
         m.addTo(g);
         live.set(c.id, e);
@@ -391,7 +403,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
       }
       e.crew = c;
       const el = e.m.getElement()?.querySelector('.mk-crew');
-      if (el) el.style.setProperty('--c', color);
+      if (el) { el.style.setProperty('--c', color); el.className = crewCls(c.status); }
       const from = e.m.getLatLng(), to = L.latLng(c.lat, c.lon);
       if (from.distanceTo(to) < 1) return;
       if (from.distanceTo(to) > 3) {
@@ -488,13 +500,13 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
       const { legs, gaps } = splitTrail(pts);
       legs.forEach((leg) => { if (leg.length > 1) L.polyline(leg.map((p) => [p.lat, p.lon]), { color: col, weight: 4, opacity: 0.85, lineJoin: 'round', interactive: false }).addTo(g); });
       gaps.forEach(([a, b]) => L.polyline([[a.lat, a.lon], [b.lat, b.lon]], { color: col, weight: 2.5, opacity: 0.7, dashArray: '2 8' })
-        .bindTooltip(`${nm}: no position received for ${fmtDur(b.t - a.t)} (${fmtClock(a.t)} – ${fmtClock(b.t)}); route unknown`, { sticky: true }).addTo(g));
+        .bindTooltip(tt('map.ttGap', { name: nm, dur: fmtDur(b.t - a.t), from: fmtClock(a.t), to: fmtClock(b.t) }), { sticky: true }).addTo(g));
       thinDots(pts).forEach((p) => L.circleMarker([p.lat, p.lon], { radius: 3.6, color: col, weight: p.late ? 2 : 1, fillColor: p.late ? '#ffffff' : col, fillOpacity: p.late ? 1 : 0.95 })
-        .bindTooltip(`${nm} · ${fmtClock(p.t)}${p.accuracy != null ? ` · ±${Math.round(p.accuracy)} m` : ''}${p.late ? ' · recorded offline, uploaded later' : ''}`).addTo(g));
+        .bindTooltip(`${nm} · ${fmtClock(p.t)}${p.accuracy != null ? ` · ±${Math.round(p.accuracy)} m` : ''}${p.late ? tt('map.ttLate') : ''}`).addTo(g));
       const f = pts[0];
-      L.circleMarker([f.lat, f.lon], { radius: 7, color: '#ffffff', weight: 2.5, fillColor: col, fillOpacity: 1 }).bindTooltip(`${nm} · trail start ${fmtClock(f.t)}`).addTo(g);
+      L.circleMarker([f.lat, f.lon], { radius: 7, color: '#ffffff', weight: 2.5, fillColor: col, fillOpacity: 1 }).bindTooltip(tt('map.ttStart', { name: nm, t: fmtClock(f.t) })).addTo(g);
     });
-  }, [trails, trailCrew, crewNamesKey, ready]); // eslint-disable-line
+  }, [trails, trailCrew, crewNamesKey, ready, lang]); // eslint-disable-line
 
   function focusTrail(id) {
     setLayers((l) => ({ ...l, trails: true }));
@@ -517,7 +529,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
   async function runTrace(mrid) {
     setTraceBusy(true);
     try { setTrace(await api.networkSection(mrid)); }
-    catch (e) { setTrace({ found: false, reason: e.message || 'Trace failed' }); }
+    catch (e) { setTrace({ found: false, reason: e.message || tt('map.traceFailed') }); }
     finally { setTraceBusy(false); }
   }
   const fitTopo = () => { const m = mapRef.current; if (m && m.__topoBounds) m.flyToBounds(m.__topoBounds.pad(0.15), { duration: 0.6 }); };
@@ -557,30 +569,30 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     select(item.kind, item.ref, item.label);
   }
 
-  if (!net) return <div className="empty"><span className="disp">Loading network…</span>Reading the Haridwar GIS model.</div>;
-  if (net.error) return <div className="screen-error"><h2>Network unavailable</h2><p>Could not load the topology from the backend.</p></div>;
+  if (!net) return <div className="empty"><span className="disp">{t('map.loading')}</span>{t('map.loadingSub')}</div>;
+  if (net.error) return <div className="screen-error"><h2>{t('map.unavail')}</h2><p>{t('map.unavailSub')}</p></div>;
   const c = net.counts || {};
   const plottedInc = inc.filter((i) => i.lat && i.lon);
 
   return (
     <>
       <div className="page-head">
-        <div><div className="eyebrow">Geospatial · Haridwar</div><h2>Network map</h2>
-          <p>{c.substations} substations · {c.distTx ? c.distTx.toLocaleString() : 0} DTRs · {c.feederLines} feeder spans · {Object.keys(feeders).length} circuits</p></div>
+        <div><div className="eyebrow">{t('map.eyebrow')}</div><h2>{t('map.title')}</h2>
+          <p>{t('map.summary', { ss: c.substations, dt: c.distTx ? c.distTx.toLocaleString() : 0, spans: c.feederLines, circuits: Object.keys(feeders).length })}</p></div>
       </div>
 
       <div className="map-wrap">
         <div className="layer-panel">
           {LAYER_GROUPS.filter(([group]) => topoOk || !group.startsWith('Topology')).map(([group, ls]) => (
             <div key={group} className="lp-group">
-              <div className="lp-h">{group}</div>
-              {group.startsWith('Topology') && <div className="lp-sub">From CIM import · click any item, then “Trace electrical section”</div>}
-              {ls.map(([k, label]) => {
+              <div className="lp-h">{t(`map.grp.${group.startsWith('Topology') ? 'Topology' : group}`)}</div>
+              {group.startsWith('Topology') && <div className="lp-sub">{t('map.topoSub')}</div>}
+              {ls.map(([k]) => {
                 const n = k.startsWith('topo') ? topoCounts[k] : k === 'incidents' ? plottedInc.length : k === 'crews' ? crews.length : k === 'trails' ? Object.values(trails).filter((p) => p && p.length).length : (c[k === 'feeders' ? 'feederLines' : k] || 0);
                 return (
                   <label key={k} className={`lp-row ${layers[k] ? 'on' : ''}`}>
                     <input type="checkbox" checked={!!layers[k]} onChange={() => setLayers((l) => ({ ...l, [k]: !l[k] }))} />
-                    <span className={`lp-swatch sw-${k}`} /><span className="lp-label">{label}</span>
+                    <span className={`lp-swatch sw-${k}`} /><span className="lp-label">{t(`map.ly.${k}`)}</span>
                     <span className="lp-count">{n && n.toLocaleString ? n.toLocaleString() : n}</span>
                   </label>
                 );
@@ -590,35 +602,33 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
                   busy={trailBusy} failed={trailFailed} onFocus={focusTrail} onAll={() => setTrailCrew(null)} />)}
             </div>
           ))}
-          {selFeeder && <button className="lp-clear" onClick={() => { setSelFeeder(null); setSel(null); }}>Clear feeder highlight</button>}
+          {selFeeder && <button className="lp-clear" onClick={() => { setSelFeeder(null); setSel(null); }}>{t('map.clearFeeder')}</button>}
 
           <div className="lp-group lp-key">
-            <div className="lp-h">Key</div>
-            <div className="lp-kt">Incident severity</div>
+            <div className="lp-h">{t('map.key')}</div>
+            <div className="lp-kt">{t('map.keySev')}</div>
             <div className="lp-kgrid">
-              <span className="lp-krow"><Sym shape="dot" color="#e23b2e" /> Critical</span>
-              <span className="lp-krow"><Sym shape="dot" color="#ef9021" /> High</span>
-              <span className="lp-krow"><Sym shape="dot" color="#3b82f6" /> Medium</span>
-              <span className="lp-krow"><Sym shape="dot" color="#22b06b" /> Low</span>
+              {['critical', 'high', 'medium', 'low'].map((k) => (
+                <span key={k} className="lp-krow"><span className="mk-inc lg-inc" style={{ '--c': SEVC[k] }} aria-hidden="true">{SEVL[k]}</span> {t(`map.sev.${k}`)}</span>
+              ))}
             </div>
-            <div className="lp-kt">Crew status</div>
+            <div className="lp-kt">{t('map.keyCrew')}</div>
             <div className="lp-kgrid">
-              <span className="lp-krow"><Sym shape="tri" color="#0fb39d" /> Available</span>
-              <span className="lp-krow"><Sym shape="tri" color="#ef9021" /> In transit</span>
-              <span className="lp-krow"><Sym shape="tri" color="#3b82f6" /> In service</span>
-              <span className="lp-krow"><Sym shape="tri" color="#9fb0c4" /> On break</span>
+              {['available', 'in_transit', 'in_service', 'on_break'].map((k) => (
+                <span key={k} className="lp-krow"><span className="lg-crew" aria-hidden="true"><span className={crewCls(k)} style={{ '--c': CREWC[k] }} /></span> {t(`map.key.${k}`)}</span>
+              ))}
             </div>
-            <div className="lp-knote">Active incidents show a pulsing ring. Feeder colour identifies its circuit.</div>
+            <div className="lp-knote">{t('map.keyNote')}</div>
           </div>
 
-          <div className="lp-hint">Drag to pan · scroll to zoom · click a feeder to trace its circuit</div>
+          <div className="lp-hint">{t('map.hint')}</div>
         </div>
 
         <div className="card map-stage">
           <div ref={boxRef} className="leaflet-host" />
           {basemapDown && (
             <div className="map-basemap-note" role="status">
-              Basemap unavailable - network layers are still shown{OSM_FALLBACK ? ' (OpenStreetMap fallback)' : ''}
+              {t('map.basemapDown')}{OSM_FALLBACK ? t('map.osmFallback') : ''}
             </div>
           )}
 
@@ -627,8 +637,8 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
               <Icon name="pin" size={15} />
               {/* Keyboard route to every map feature (markers on the canvas can't take focus):
                   a combobox - arrows move through results, Enter opens the active one. */}
-              <input value={query} placeholder="Search feeders, substations, DTRs, crews…"
-                aria-label="Search the network map" role="combobox" aria-autocomplete="list"
+              <input value={query} placeholder={t('map.searchPh')}
+                aria-label={t('map.searchAria')} role="combobox" aria-autocomplete="list"
                 aria-expanded={!!(openResults && query)} aria-controls="map-search-results"
                 aria-activedescendant={openResults && query && results[activeIdx] ? `map-result-${activeIdx}` : undefined}
                 onChange={(e) => { setQuery(e.target.value); setOpenResults(true); setActiveIdx(0); }}
@@ -640,15 +650,15 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
                   else if (e.key === 'Enter' && results[activeIdx]) goTo(results[activeIdx]);
                   else if (e.key === 'Escape') { setQuery(''); setOpenResults(false); }
                 }} />
-              {query && <button className="ms-clear" aria-label="Clear search" onMouseDown={(e) => e.preventDefault()} onClick={() => setQuery('')}><Icon name="x" size={13} /></button>}
+              {query && <button className="ms-clear" aria-label={t('map.clearSearch')} onMouseDown={(e) => e.preventDefault()} onClick={() => setQuery('')}><Icon name="x" size={13} /></button>}
             </div>
             {openResults && query && (
-              <div className="ms-results" id="map-search-results" role="listbox" aria-label="Search results">
-                {results.length === 0 && <div className="ms-empty" role="status">No matches for “{query}”.</div>}
+              <div className="ms-results" id="map-search-results" role="listbox" aria-label={t('map.results')}>
+                {results.length === 0 && <div className="ms-empty" role="status">{t('map.noMatch', { q: query })}</div>}
                 {results.map((r, i) => (
                   <button key={r.kind + r.label + i} id={`map-result-${i}`} role="option" aria-selected={i === activeIdx} tabIndex={-1}
                     className={`ms-item${i === activeIdx ? ' active' : ''}`} onMouseEnter={() => setActiveIdx(i)} onMouseDown={(e) => e.preventDefault()} onClick={() => goTo(r)}>
-                    <span className={`ms-tag tag-${r.kind}`}>{r.type}</span>
+                    <span className={`ms-tag tag-${r.kind}`}>{tOr(`map.type.${r.type}`, r.type)}</span>
                     <span className="ms-label">{r.label}</span>
                     {r.sub && <span className="ms-sub">{r.sub}</span>}
                   </button>
@@ -656,13 +666,13 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
               </div>
             )}
             {regions.length > 0 && (
-              <select className="ms-box" aria-label="Go to region" value={regionId} onChange={(e) => goRegion(e.target.value)}
+              <select className="ms-box" aria-label={t('map.goRegion')} value={regionId} onChange={(e) => goRegion(e.target.value)}
                 style={{ marginTop: 6, width: '100%', fontSize: 13, color: 'var(--ink)', cursor: 'pointer' }}>
-                <option value="">Go to region…</option>
+                <option value="">{t('map.goRegionOpt')}</option>
                 {['division', 'zone', 'substation', 'corridor', 'network'].map((kind) => {
                   const list = regions.filter((r) => r.kind === kind);
                   return list.length ? (
-                    <optgroup key={kind} label={{ division: 'Divisions', zone: 'Zones', substation: 'Substations', corridor: 'Corridors', network: 'Whole network' }[kind]}>
+                    <optgroup key={kind} label={t(`map.rg.${kind}`)}>
                       {list.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
                     </optgroup>
                   ) : null;
@@ -672,49 +682,49 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
           </div>
 
           <div className="map-tools">
-            <button className="map-fit" onClick={fitAll} title="Fit whole network"><Icon name="map" size={15} /> Fit</button>
-            {topoOk && <button className="map-fit topo" onClick={fitTopo} title="Jump to the CIM topology (Dehradun Ring Road)"><Icon name="pin" size={15} /> Dehradun</button>}
+            <button className="map-fit" onClick={fitAll} title={t('map.fitTitle')}><Icon name="map" size={15} /> {t('map.fit')}</button>
+            {topoOk && <button className="map-fit topo" onClick={fitTopo} title={t('map.dehradunTitle')}><Icon name="pin" size={15} /> {t('map.dehradun')}</button>}
           </div>
 
           {sel && (
-            <div className="map-detail card" ref={detailRef} tabIndex={-1} role="region" aria-label={`Selected: ${sel.kind === 'incident' ? sel.id : sel.label || sel.kind}`}>
-              <div className="card-h"><h3>{sel.kind === 'incident' ? sel.id : sel.kind === 'feeder' ? 'Feeder' : sel.label}</h3>
-                <button className="iconbtn" aria-label="Close" onClick={() => { setSel(null); setSelFeeder(null); setTrace(null); highlight(null); }}><Icon name="x" size={15} /></button></div>
+            <div className="map-detail card" ref={detailRef} tabIndex={-1} role="region" aria-label={t('map.selected', { x: sel.kind === 'incident' ? sel.id : sel.label || sel.kind })}>
+              <div className="card-h"><h3>{sel.kind === 'incident' ? sel.id : sel.kind === 'feeder' ? t('map.feeder') : sel.label}</h3>
+                <button className="iconbtn" aria-label={t('map.close')} onClick={() => { setSel(null); setSelFeeder(null); setTrace(null); highlight(null); }}><Icon name="x" size={15} /></button></div>
               <div className="card-b">
                 {sel.kind === 'incident' && <><div style={{ display: 'flex', gap: 7, marginBottom: 12 }}><SevBadge sev={sel.severity} /><StatusBadge status={sel.status} /></div>
-                  <KV k="Substation" v={sel.substation} /><KV k="Zone" v={sel.zone} /><KV k="Feeder" v={sel.feeder} mono /><KV k="Customers" v={(sel.customers || 0).toLocaleString()} mono /><KV k="Cause" v={sel.cause} /><KV k="Crew" v={sel.crew_id || 'unassigned'} /></>}
+                  <KV k={t('map.k.substation')} v={sel.substation} /><KV k={t('map.k.zone')} v={sel.zone} /><KV k={t('map.k.feeder')} v={sel.feeder} mono /><KV k={t('map.k.customers')} v={(sel.customers || 0).toLocaleString()} mono /><KV k={t('map.k.cause')} v={sel.cause} /><KV k={t('map.k.crew')} v={sel.crew_id || t('map.unassigned')} /></>}
                 {sel.kind === 'feeder' && <><div className="feeder-tag" style={{ background: sel.color }}>{sel.name}</div>
-                  <KV k="Voltage" v={sel.kv ? sel.kv + ' kV' : '11 kV'} /><KV k="Substation" v={sel.ss} /><KV k="Segments" v={sel.segs} mono /><KV k="Route length" v={sel.km ? sel.km.toFixed(2) + ' km' : '—'} mono /></>}
-                {sel.kind === 'ss' && <><span className="chip chip-soft">Substation</span><KV k="Voltage" v={sel.ratio} /><KV k="Capacity" v={sel.mva ? sel.mva + ' MVA' : '—'} /><KV k="Status" v={sel.status} /><KV k="Outgoing feeders" v={sel.feeders} /></>}
-                {sel.kind === 'ptx' && <><span className="chip chip-soft">Power transformer</span><KV k="HV" v={sel.hv ? sel.hv + ' kV' : '—'} /><KV k="LV" v={sel.lv ? sel.lv + ' kV' : '—'} /><KV k="Capacity" v={sel.mva ? sel.mva + ' MVA' : '—'} /><KV k="Status" v={sel.status} /></>}
-                {sel.kind === 'dt' && <><span className="chip chip-soft">Distribution transformer</span><KV k="Capacity" v={sel.kva ? sel.kva + ' kVA' : '—'} /><KV k="Feeder" v={sel.feeder} mono /><KV k="Substation code" v={sel.ss} mono /><KV k="Status" v={sel.status} /></>}
-                {sel.kind === 'switch' && <><span className="chip chip-soft">Switch</span><KV k="Type" v={sel.type} /><KV k="Voltage" v={sel.kv ? sel.kv + ' kV' : '—'} /><KV k="Status" v={sel.status} /></>}
-                {sel.kind === 'rmu' && <><span className="chip chip-soft">Ring main unit</span><KV k="ID" v={sel.id} mono /><KV k="Status" v={sel.status} /></>}
+                  <KV k={t('map.k.voltage')} v={sel.kv ? sel.kv + ' kV' : '11 kV'} /><KV k={t('map.k.substation')} v={sel.ss} /><KV k={t('map.k.segments')} v={sel.segs} mono /><KV k={t('map.k.routeLen')} v={sel.km ? sel.km.toFixed(2) + ' km' : '—'} mono /></>}
+                {sel.kind === 'ss' && <><span className="chip chip-soft">{t('map.k.substation')}</span><KV k={t('map.k.voltage')} v={sel.ratio} /><KV k={t('map.k.capacity')} v={sel.mva ? sel.mva + ' MVA' : '—'} /><KV k={t('map.k.status')} v={sel.status} /><KV k={t('map.k.outFeeders')} v={sel.feeders} /></>}
+                {sel.kind === 'ptx' && <><span className="chip chip-soft">{t('map.powerTx')}</span><KV k="HV" v={sel.hv ? sel.hv + ' kV' : '—'} /><KV k="LV" v={sel.lv ? sel.lv + ' kV' : '—'} /><KV k={t('map.k.capacity')} v={sel.mva ? sel.mva + ' MVA' : '—'} /><KV k={t('map.k.status')} v={sel.status} /></>}
+                {sel.kind === 'dt' && <><span className="chip chip-soft">{t('map.distTx')}</span><KV k={t('map.k.capacity')} v={sel.kva ? sel.kva + ' kVA' : '—'} /><KV k={t('map.k.feeder')} v={sel.feeder} mono /><KV k={t('map.k.ssCode')} v={sel.ss} mono /><KV k={t('map.k.status')} v={sel.status} /></>}
+                {sel.kind === 'switch' && <><span className="chip chip-soft">{t('map.switch')}</span><KV k={t('map.k.type')} v={sel.type} /><KV k={t('map.k.voltage')} v={sel.kv ? sel.kv + ' kV' : '—'} /><KV k={t('map.k.status')} v={sel.status} /></>}
+                {sel.kind === 'rmu' && <><span className="chip chip-soft">{t('map.rmu')}</span><KV k={t('map.k.id')} v={sel.id} mono /><KV k={t('map.k.status')} v={sel.status} /></>}
                 {sel.kind === 'topo' && <>
                   <span className="chip chip-soft">{sel.cls} · CIM</span>
-                  <KV k="mRID" v={sel.mrid} mono /><KV k="Name" v={sel.name} /><KV k="Feeder" v={sel.feeder} />
-                  <KV k="Rated voltage" v={sel.ratedVoltage ? (Number(sel.ratedVoltage) / 1000) + ' kV' : null} />
+                  <KV k="mRID" v={sel.mrid} mono /><KV k={t('map.k.name')} v={sel.name} /><KV k={t('map.k.feeder')} v={sel.feeder} />
+                  <KV k={t('map.k.ratedV')} v={sel.ratedVoltage ? (Number(sel.ratedVoltage) / 1000) + ' kV' : null} />
                   {!(trace && trace.found && trace.origin.cim_mrid === sel.mrid) && (
-                    <button className="trace-btn" disabled={traceBusy} onClick={() => runTrace(sel.mrid)}>{traceBusy ? 'Tracing…' : 'Trace electrical section'}</button>)}
+                    <button className="trace-btn" disabled={traceBusy} onClick={() => runTrace(sel.mrid)}>{traceBusy ? t('map.tracing') : t('map.traceBtn')}</button>)}
                   {trace && trace.found === false && <div className="trace-note">{trace.reason}</div>}
                   {trace && trace.found && trace.origin.cim_mrid === sel.mrid && (
                     <div className="trace-box">
-                      <h4>Section trace</h4>
+                      <h4>{t('map.sectionTrace')}</h4>
                       <div className="trace-stat">
-                        <div><b>{trace.sectionEquipment.length}</b><span>in section</span></div>
-                        <div><b>{trace.boundarySwitches.length}</b><span>boundary switches</span></div>
+                        <div><b>{trace.sectionEquipment.length}</b><span>{t('map.inSection')}</span></div>
+                        <div><b>{trace.boundarySwitches.length}</b><span>{t('map.boundarySw')}</span></div>
                       </div>
-                      <KV k="Protection ≤ 2 km" v={trace.nearbyProtectionAssets.length ? trace.nearbyProtectionAssets.map((a) => `${a.kind} ${a.name}`).join(', ') : 'none'} />
+                      <KV k={t('map.protection')} v={trace.nearbyProtectionAssets.length ? trace.nearbyProtectionAssets.map((a) => `${a.kind} ${a.name}`).join(', ') : t('map.none')} />
                       {trace.sectionEquipment.length === 1 && trace.boundarySwitches.length === 0 && (
-                        <div className="trace-note">Nothing else shares this device's connectivity node in the source data, so its section is just itself.</div>)}
-                      {trace.truncated && <div className="trace-note" style={{ color: '#b91c1c', fontWeight: 600 }}>Safety limit reached — the real section may be larger than shown.</div>}
+                        <div className="trace-note">{t('map.selfOnly')}</div>)}
+                      {trace.truncated && <div className="trace-note" style={{ color: '#b91c1c', fontWeight: 600 }}>{t('map.truncated')}</div>}
                       <div className="trace-note">{trace.caveat}</div>
-                      <button className="trace-btn ghost" onClick={() => setTrace(null)}>Clear trace</button>
+                      <button className="trace-btn ghost" onClick={() => setTrace(null)}>{t('map.clearTrace')}</button>
                     </div>)}
                 </>}
-                {sel.kind === 'scan' && <><span className="chip chip-soft">Crew QR asset scan</span><KV k="Asset" v={sel.asset_id || sel.raw_value} mono /><KV k="Crew" v={sel.crew_id} mono /><KV k="Job" v={sel.job_id} mono /><KV k="Incident" v={sel.incident_id} mono />
-                  <KV k="Scanned" v={sel.scanned_at ? new Date(sel.scanned_at).toLocaleString() : '—'} /><KV k="Lat / Long" v={`${Number(sel.lat).toFixed(6)}, ${Number(sel.lon).toFixed(6)}`} mono /></>}
-                {sel.kind === 'crew' && <><span className="chip chip-soft">Field crew</span><KV k="Lead" v={sel.lead} /><KV k="Status" v={sel.status ? sel.status.replace('_', ' ') : ''} /><KV k="Location" v={sel.location} /><KV k="Skills" v={sel.skills} />
+                {sel.kind === 'scan' && <><span className="chip chip-soft">{t('map.scanChip')}</span><KV k={t('map.k.asset')} v={sel.asset_id || sel.raw_value} mono /><KV k={t('map.k.crew')} v={sel.crew_id} mono /><KV k={t('map.k.job')} v={sel.job_id} mono /><KV k={t('map.k.incident')} v={sel.incident_id} mono />
+                  <KV k={t('map.k.scanned')} v={sel.scanned_at ? new Date(sel.scanned_at).toLocaleString() : '—'} /><KV k={t('map.k.latlon')} v={`${Number(sel.lat).toFixed(6)}, ${Number(sel.lon).toFixed(6)}`} mono /></>}
+                {sel.kind === 'crew' && <><span className="chip chip-soft">{t('map.fieldCrew')}</span><KV k={t('map.k.lead')} v={sel.lead} /><KV k={t('map.k.status')} v={sel.status ? tOr(`map.cs.${sel.status}`, sel.status.replace('_', ' ')) : ''} /><KV k={t('map.k.location')} v={sel.location} /><KV k={t('map.k.skills')} v={sel.skills} />
                   <CrewTrailInfo pts={trails[sel.id]} win={trailWin} lastFix={sel.location_updated_at} onShow={() => focusTrail(sel.id)} /></>}
               </div>
             </div>
@@ -728,59 +738,54 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
 // Side-panel list of crew trails: window picker, one row per crew, and an honest
 // "no fixes" line (with the last time the server heard from that crew) when there is nothing to draw.
 function TrailPanel({ crews, trails, trailCrew, trailWin, setTrailWin, busy, failed, onFocus, onAll }) {
+  const { t } = useT();
   const rows = trailCrew ? crews.filter((c) => c.id === trailCrew) : crews;
   return (
     <div className="trail-ctl">
-      <div className="trail-win" role="group" aria-label="Trail time window">
+      <div className="trail-win" role="group" aria-label={t('map.trailWin')}>
         {TRAIL_WINDOWS.map(([k]) => <button key={k} className={`tw ${trailWin === k ? 'on' : ''}`} onClick={() => setTrailWin(k)}>{k}</button>)}
       </div>
-      {trailCrew && <button className="lp-clear" onClick={onAll}>Showing one crew · show all crews</button>}
-      {failed && <div className="trail-warn">Some trails could not be loaded.</div>}
+      {trailCrew && <button className="lp-clear" onClick={onAll}>{t('map.oneCrew')}</button>}
+      {failed && <div className="trail-warn">{t('map.trailFail')}</div>}
       <div className="trail-list">
         {rows.map((c) => {
           const pts = trails[c.id], s = pts ? summarize(pts) : null;
           return (
             <button key={c.id} className="trail-row" onClick={() => onFocus(c.id)}
-              title={pts && !s.count ? `${c.name}: no position in the last ${trailWin}. Last heard ${c.location_updated_at ? fmtAgo(c.location_updated_at) : 'never'}.` : "Zoom to this crew's trail"}>
+              title={pts && !s.count ? t('map.noPosTitle', { name: c.name, win: trailWin, ago: c.location_updated_at ? fmtAgo(c.location_updated_at) : t('map.never') }) : t('map.zoomTrail')}>
               <span className="trail-sw" style={{ background: trailColor(c.id) }} />
               <span className="trail-name">{c.name}</span>
               <span className="trail-meta">
-                {!pts ? (busy ? 'loading…' : '—')
-                  : s.count ? `${s.count} fixes · ${(s.distanceM / 1000).toFixed(2)} km`
-                    : c.location_updated_at ? `no fixes · ${fmtAgo(c.location_updated_at)}` : 'no fixes yet'}
+                {!pts ? (busy ? t('map.loadingSm') : '—')
+                  : s.count ? t('map.fixesKm', { n: s.count, km: (s.distanceM / 1000).toFixed(2) })
+                    : c.location_updated_at ? t('map.noFixesAgo', { ago: fmtAgo(c.location_updated_at) }) : t('map.noFixesYet')}
               </span>
             </button>
           );
         })}
       </div>
-      <div className="lp-knote" title="Hollow dots were recorded offline and uploaded later. A dashed line means no position was received for 10+ minutes, so the route in between is unknown.">Hollow dot = recorded offline · dashed = 10+ min gap</div>
+      <div className="lp-knote" title={t('map.legendTitle')}>{t('map.legend')}</div>
     </div>
   );
 }
 
 // Trail summary + button inside the selected crew's detail card.
 function CrewTrailInfo({ pts, win, lastFix, onShow }) {
+  const { t } = useT();
   const s = pts ? summarize(pts) : null;
   return (
     <>
-      <button className="trace-btn trail-btn" onClick={onShow}>Show trail · last {win}</button>
+      <button className="trace-btn trail-btn" onClick={onShow}>{t('map.showTrail', { win })}</button>
       {s && s.count > 0 && <div className="trail-sum">
-        <KV k="Fixes" v={String(s.count)} mono /><KV k="Distance" v={`${(s.distanceM / 1000).toFixed(2)} km`} mono />
-        <KV k="First fix" v={fmtClock(s.firstT)} mono /><KV k="Last fix" v={`${fmtClock(s.lastT)} (${fmtAgo(s.lastT)})`} mono />
-        {s.lateCount > 0 && <KV k="Recorded offline" v={`${s.lateCount} fixes`} mono />}
-        {s.gapCount > 0 && <KV k="Gaps (10+ min)" v={String(s.gapCount)} mono />}
+        <KV k={t('map.k.fixes')} v={String(s.count)} mono /><KV k={t('map.k.distance')} v={`${(s.distanceM / 1000).toFixed(2)} km`} mono />
+        <KV k={t('map.k.firstFix')} v={fmtClock(s.firstT)} mono /><KV k={t('map.k.lastFix')} v={`${fmtClock(s.lastT)} (${fmtAgo(s.lastT)})`} mono />
+        {s.lateCount > 0 && <KV k={t('map.k.offline')} v={t('map.nFixes', { n: s.lateCount })} mono />}
+        {s.gapCount > 0 && <KV k={t('map.k.gaps')} v={String(s.gapCount)} mono />}
       </div>}
-      {s && s.count === 0 && <div className="trace-note">No position fixes from this crew's phone in the last {win}. Last heard: {lastFix ? fmtAgo(lastFix) : 'never'}. If the phone is outdoors with tracking on, check its location permission, battery settings and connection.</div>}
+      {s && s.count === 0 && <div className="trace-note">{t('map.noFixes', { win, ago: lastFix ? fmtAgo(lastFix) : t('map.never') })}</div>}
     </>
   );
 }
 
 function KV({ k, v, mono }) { return <div className="kv-row"><span className="k">{k}</span><span className={`v ${mono ? 'mono' : ''}`}>{v || '—'}</span></div>; }
 
-function Sym({ shape, color }) {
-  if (shape === 'line') return <span className="lg-sym lg-line" style={{ background: color }} />;
-  if (shape === 'dia') return <span className="lg-sym lg-dia" style={{ background: color }} />;
-  if (shape === 'sq') return <span className="lg-sym lg-sq" style={{ background: color }} />;
-  if (shape === 'tri') return <span className="lg-sym lg-tri" style={{ borderBottomColor: color }} />;
-  return <span className="lg-sym lg-dot" style={{ background: color }} />;
-}

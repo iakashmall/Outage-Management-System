@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api.js';
 import { timeAgo } from '../lib/ui.jsx';
+import { useT, t as tr, tOr } from '../lib/i18n.js';
 
 // Per-feeder ratings and limits behind the PFC feeder KPIs (Admin screen).
 // Saving a row changes today's live values within a minute; stored past days
@@ -22,6 +23,8 @@ const todayIst = () => new Date(Date.now() + 330 * 60_000).toISOString().slice(0
 const daysAgo = (n) => new Date(Date.now() + 330 * 60_000 - n * 86_400_000).toISOString().slice(0, 10);
 
 export default function FeederRatingsCard() {
+  useT();
+  const lab = (f) => tOr(`fr.f.${f.key}`, f.label);
   const [rows, setRows] = useState([]);
   const [edits, setEdits] = useState({}); // feeder -> { field: text }
   const [msg, setMsg] = useState(null); // { feeder?, ok, text }
@@ -47,7 +50,7 @@ export default function FeederRatingsCard() {
       const t = edits[r.feeder]?.[f.key];
       if (t == null || Number(t) === Number(r[f.key])) continue;
       const n = Number(t);
-      if (t.trim() === '' || !Number.isFinite(n) || n <= 0) return setMsg({ feeder: r.feeder, ok: false, text: `${f.label} must be a positive number` });
+      if (t.trim() === '' || !Number.isFinite(n) || n <= 0) return setMsg({ feeder: r.feeder, ok: false, text: tr('fr.positive', { f: lab(f) }) });
       patch[f.key] = n;
     }
     setBusy(r.feeder);
@@ -55,9 +58,9 @@ export default function FeederRatingsCard() {
       const row = await api.updateFeederKpiRating(r.feeder, patch);
       setRows((rs) => rs.map((x) => (x.feeder === r.feeder ? row : x)));
       setEdits((e) => { const n = { ...e }; delete n[r.feeder]; return n; });
-      setMsg({ feeder: r.feeder, ok: true, text: 'Saved. Recalculate past days to apply it to them.' });
+      setMsg({ feeder: r.feeder, ok: true, text: tr('fr.saved') });
     } catch (e) {
-      setMsg({ feeder: r.feeder, ok: false, text: e.status === 403 ? 'Your role cannot change ratings.' : e.message });
+      setMsg({ feeder: r.feeder, ok: false, text: e.status === 403 ? tr('fr.noRole') : e.message });
     } finally { setBusy(null); }
   };
 
@@ -65,27 +68,27 @@ export default function FeederRatingsCard() {
     setBusy('rollup');
     try {
       const r = await api.feederKpiRollup(range);
-      setMsg({ ok: true, text: `Recalculated ${r.recomputed} day(s).` });
+      setMsg({ ok: true, text: tr('fr.recalced', { n: r.recomputed }) });
     } catch (e) {
-      setMsg({ ok: false, text: e.status === 403 ? 'Your role cannot recalculate past days.' : e.message });
+      setMsg({ ok: false, text: e.status === 403 ? tr('fr.noRole2') : e.message });
     } finally { setBusy(null); }
   };
 
   return (
     <div className="card" style={{ marginTop: 16 }}>
       <div className="card-h">
-        <h3>Feeder KPI ratings &amp; limits</h3>
-        <input className="fr-filter" placeholder="Filter feeder or substation" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter feeders" />
+        <h3>{tr('fr.title')}</h3>
+        <input className="fr-filter" placeholder={tr('fr.filterPh')} value={filter} onChange={(e) => setFilter(e.target.value)} aria-label={tr('fr.filterAria')} />
       </div>
       <div className="card-b fr-bar">
-        <span className="muted">Limits are % of the feeder's nominal. Stress (FVSV / FCSV) counts only what is above the high limit.</span>
+        <span className="muted">{tr('fr.note')}</span>
         <span className="fr-recalc">
-          Recalculate past days
-          <input type="date" value={range.from} max={todayIst()} onChange={(e) => setRange((r) => ({ ...r, from: e.target.value }))} aria-label="From" />
-          to
-          <input type="date" value={range.to} max={todayIst()} onChange={(e) => setRange((r) => ({ ...r, to: e.target.value }))} aria-label="To" />
+          {tr('fr.recalcPast')}
+          <input type="date" value={range.from} max={todayIst()} onChange={(e) => setRange((r) => ({ ...r, from: e.target.value }))} aria-label={tr('fr.from')} />
+          {tr('fr.to')}
+          <input type="date" value={range.to} max={todayIst()} onChange={(e) => setRange((r) => ({ ...r, to: e.target.value }))} aria-label={tr('fr.To')} />
           <button className="btn sm" disabled={busy === 'rollup' || !range.from || !range.to || range.to < range.from} onClick={recalc}>
-            {busy === 'rollup' ? 'Recalculating…' : 'Recalculate'}
+            {busy === 'rollup' ? tr('fr.recalcing') : tr('fr.recalc')}
           </button>
         </span>
         {msg && !msg.feeder && <span className={msg.ok ? 'fr-ok' : 'fr-err'}>{msg.text}</span>}
@@ -94,9 +97,9 @@ export default function FeederRatingsCard() {
         <table className="tbl fr-tbl">
           <thead>
             <tr>
-              <th>Feeder</th><th>Substation</th>
-              {FIELDS.map((f) => <th key={f.key} className="fk-num">{f.label} <span className="muted">{f.unit}</span></th>)}
-              <th>Updated</th><th></th>
+              <th>{tr('col.feeder')}</th><th>{tr('fr.substation')}</th>
+              {FIELDS.map((f) => <th key={f.key} className="fk-num">{lab(f)} <span className="muted">{f.unit}</span></th>)}
+              <th>{tr('fm.updated')}</th><th></th>
             </tr>
           </thead>
           <tbody>
@@ -107,17 +110,17 @@ export default function FeederRatingsCard() {
                 {FIELDS.map((f) => (
                   <td key={f.key}>
                     <input className="fr-in mono" inputMode="decimal" value={value(r, f.key)}
-                      onChange={(e) => edit(r.feeder, f.key, e.target.value)} aria-label={`${r.feeder} ${f.label}`} />
+                      onChange={(e) => edit(r.feeder, f.key, e.target.value)} aria-label={`${r.feeder} ${lab(f)}`} />
                   </td>
                 ))}
-                <td className="muted">{r.updated_by ? `${r.updated_by}, ${timeAgo(r.updated_at)}` : 'default'}</td>
+                <td className="muted">{r.updated_by ? `${r.updated_by}, ${timeAgo(r.updated_at)}` : tr('fr.default')}</td>
                 <td>
-                  <button className="btn sm" disabled={!dirty(r) || busy === r.feeder} onClick={() => save(r)}>Save</button>
+                  <button className="btn sm" disabled={!dirty(r) || busy === r.feeder} onClick={() => save(r)}>{tr('fr.save')}</button>
                   {msg?.feeder === r.feeder && <div className={msg.ok ? 'fr-ok' : 'fr-err'}>{msg.text}</div>}
                 </td>
               </tr>
             ))}
-            {!shown.length && <tr><td colSpan={FIELDS.length + 4} className="empty">No feeders match.</td></tr>}
+            {!shown.length && <tr><td colSpan={FIELDS.length + 4} className="empty">{tr('fr.noMatch')}</td></tr>}
           </tbody>
         </table>
       </div>
