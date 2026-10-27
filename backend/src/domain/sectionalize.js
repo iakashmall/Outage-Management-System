@@ -25,9 +25,13 @@
 // SWITCH_CLASSES is deliberately explicit rather than inferred from a CIM
 // abstract-class hierarchy this codebase doesn't model -- easy to extend
 // when a new switch-like class shows up in a future import.
-const SWITCH_CLASSES = ['Breaker', 'Fuse', 'LoadBreakSwitch', 'ProtectedSwitch', 'Recloser', 'Switch', 'Disconnector', 'Jumper'];
+// The honesty text every trace carries (section trace, and supplyTrace.js).
+export const SECTION_CAVEAT = 'Switch open/closed state is not known (Switch.normalOpen is unpopulated in every source file seen so far) -- switches are reported as section BOUNDARIES, not as confirmed isolation points. No FaultIndicator data exists yet in any imported file.';
+
+export const SWITCH_CLASSES = ['Breaker', 'Fuse', 'LoadBreakSwitch', 'ProtectedSwitch', 'Recloser', 'Switch', 'Disconnector', 'Jumper'];
 
 import { db } from '../infra/db.js';
+import { equipmentByMrid, walk } from './networkGraph.js';
 
 /**
  * @param {string} cimMrid - the tripped device's CIM mRID (network.conducting_equipment.cim_mrid)
@@ -47,45 +51,15 @@ import { db } from '../infra/db.js';
  * says so (truncated: true) instead of quietly returning a partial section.
  */
 export async function traceSection(cimMrid, { maxHops = 1000, maxNodes = 20000, protectionRadiusM = 2000 } = {}) {
-  const origin = await db.oneOrNone(
-    `SELECT id, cim_mrid, cim_class, name FROM network.conducting_equipment WHERE cim_mrid = $1`,
-    [cimMrid]
-  );
+  const origin = await equipmentByMrid(cimMrid);
   if (!origin) return { found: false, reason: `no equipment with cim_mrid '${cimMrid}'` };
 
   const isSwitch = (cls) => SWITCH_CLASSES.includes(cls);
-  const seen = new Map(); // equipment id -> { equipment_id, cim_mrid, cim_class, name, depth, is_switch }
-  seen.set(String(origin.id), { equipment_id: origin.id, cim_mrid: origin.cim_mrid, cim_class: origin.cim_class, name: origin.name, depth: 0, is_switch: isSwitch(origin.cim_class) });
-
-  let frontier = [origin.id];
-  let depth = 0;
-  let truncated = false;
-  while (frontier.length) {
-    if (depth >= maxHops || seen.size >= maxNodes) { truncated = true; break; }
-    // One hop: every device sharing a connectivity node with anything in the frontier.
-    const neighbours = await db.any(
-      `SELECT DISTINCT ce2.id, ce2.cim_mrid, ce2.cim_class, ce2.name
-       FROM network.terminals t1
-       JOIN network.terminals t2 ON t2.connectivity_node_id = t1.connectivity_node_id AND t2.id <> t1.id
-       JOIN network.conducting_equipment ce2 ON ce2.id = t2.equipment_id
-       WHERE t1.equipment_id = ANY($1::bigint[])`,
-      [frontier]
-    );
-    const next = [];
-    for (const r of neighbours) {
-      const key = String(r.id);
-      if (seen.has(key)) continue;
-      const sw = isSwitch(r.cim_class);
-      seen.set(key, { equipment_id: r.id, cim_mrid: r.cim_mrid, cim_class: r.cim_class, name: r.name, depth: depth + 1, is_switch: sw });
-      // A switch found AFTER the origin bounds the section: it is recorded but not expanded past.
-      // (The origin's own class never blocks its first hop -- we trace away from it, not through it.)
-      if (!sw) next.push(r.id);
-    }
-    frontier = next;
-    depth++;
-  }
-
-  const rows = [...seen.values()];
+  // A switch found AFTER the origin bounds the section: it is recorded but not expanded past.
+  // (The origin's own class never blocks its first hop -- we trace away from it, not through it.)
+  const walked = await walk(origin, { expand: (r) => !isSwitch(r.cim_class), maxHops, maxNodes });
+  const truncated = walked.truncated;
+  const rows = walked.rows.map((r) => ({ ...r, is_switch: isSwitch(r.cim_class) }));
   const withinSection = rows.filter((r) => !r.is_switch || r.equipment_id === origin.id);
   const boundarySwitches = rows.filter((r) => r.is_switch && r.equipment_id !== origin.id);
 
@@ -114,6 +88,6 @@ export async function traceSection(cimMrid, { maxHops = 1000, maxNodes = 20000, 
     boundarySwitches: boundarySwitches.map((r) => ({ cim_mrid: r.cim_mrid, cim_class: r.cim_class, name: r.name, hops: r.depth })),
     nearbyProtectionAssets: nearbyProtection, // [] today -- see module header
     truncated,                                 // true only if a safety limit stopped the walk early
-    caveat: 'Switch open/closed state is not known (Switch.normalOpen is unpopulated in every source file seen so far) -- switches are reported as section BOUNDARIES, not as confirmed isolation points. No FaultIndicator data exists yet in any imported file.',
+    caveat: SECTION_CAVEAT,
   };
 }

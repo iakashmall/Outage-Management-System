@@ -695,6 +695,129 @@ const server = app.listen(PORT, async () => {
     check('fault GET /incidents/:id still lists next states', Array.isArray(fg.body.nextStates) && fg.body.nextStates.includes('closed') && !fg.body.plannedOutageId);
     check('fault mobile job routes untouched (no planned-outage view)', (await call('c5', 'GET', `/mobile/jobs/${fj}/planned-outage`)).body.code === 'NOT_A_PLANNED_JOB');
 
+    // OMS-05 item 1: a switching plan owned by a fault incident. Same rules
+    // and safety log as a planned outage's, except (decided 2026-10-26): no
+    // permit gate, and only the last restore step moves the incident --
+    // toward Pending Verification, never to resolved.
+    console.log('-- fault incident switching plan (OMS-05)');
+    {
+      const inc = (await call('op', 'POST', '/incidents', { zone: 'Mayapur', severity: 'high', type: 'Power Outage' })).body;
+      await call('op', 'POST', `/incidents/${inc.id}/assign`, { crewId: 'C005' });
+      const fjob = (await repo.jobsForIncident(inc.id))[0].id;
+      const site = await repo.incident(inc.id);
+      await call('c5', 'PATCH', `/mobile/jobs/${fjob}/status`, { status: 'On Site', lat: site.lat, lon: site.lon });
+      check('fault incident in progress with crew C005', (await repo.incident(inc.id)).status === 'in_progress');
+
+      r = await call('op', 'GET', `/incidents/${inc.id}/switching-plan`);
+      check('GET plan before any draft -> plan null', r.status === 200 && r.body.plan === null && r.body.steps.length === 0);
+      r = await call('c5', 'GET', `/incidents/${inc.id}/switching-plan`);
+      check('crew-only token cannot read the incident plan (403)', r.status === 403);
+      r = await call('op', 'POST', `/incidents/${inc.id}/switching-plan/draft`, { workMrid: 'NOPE' });
+      check('draft from trace with an unknown device -> clear error, no plan created',
+        [409, 404].includes(r.status) && ['NETWORK_UNAVAILABLE', 'EQUIPMENT_NOT_FOUND'].includes(r.body.code)
+        && (await call('op', 'GET', `/incidents/${inc.id}/switching-plan`)).body.plan === null, r.body.code);
+
+      const fsteps = [
+        { phase: 'isolate', seq: 1, action: 'open', device_label: 'CB-21', location: 'MAYAPUR S/s', assignee: 'control_room' },
+        { phase: 'isolate', seq: 2, action: 'open', device_label: 'AB P-31', location: 'Pole 31', assignee: 'crew', assignee_crew_id: 'C005' },
+        { phase: 'restore', seq: 1, action: 'close', device_label: 'AB P-31', location: 'Pole 31', assignee: 'crew', assignee_crew_id: 'C005' },
+        { phase: 'restore', seq: 2, action: 'close', device_label: 'CB-21', location: 'MAYAPUR S/s', assignee: 'control_room' },
+      ];
+      r = await call('c5', 'PUT', `/incidents/${inc.id}/switching-plan/steps`, { steps: fsteps });
+      check('crew cannot edit an incident plan (403)', r.status === 403);
+      // Regression (found on the dashboard 2026-10-26): a refused FIRST save
+      // used to leave an empty draft plan behind. Creating the plan and saving
+      // its steps are now one transaction, checked first.
+      r = await call('op', 'PUT', `/incidents/${inc.id}/switching-plan/steps`, { steps: [{ ...fsteps[0], device_label: '', location: '' }] });
+      const plansAfterRefusal = await db.one('SELECT count(*)::int n FROM switching_plans WHERE incident_id=$1', [inc.id]);
+      check('a refused first save creates no plan (0 plans, not an empty draft)',
+        r.status === 400 && r.body.code === 'BAD_STEPS' && plansAfterRefusal.n === 0
+        && (await call('op', 'GET', `/incidents/${inc.id}/switching-plan`)).body.plan === null, `${r.status} ${r.body.code} plans=${plansAfterRefusal.n}`);
+      check('... and its refusal is still in the incident\'s safety log',
+        (await repo.incidentSafetyLog(inc.id)).some((l) => l.action === 'plan.edit.rejected' && l.details.code === 'BAD_STEPS' && l.entity_id === inc.id));
+      r = await call('op', 'POST', `/incidents/${inc.id}/switching-plan/approve`);
+      check('approving before any plan exists -> NO_PLAN, still nothing created', r.status === 404 && r.body.code === 'NO_PLAN'
+        && (await db.one('SELECT count(*)::int n FROM switching_plans WHERE incident_id=$1', [inc.id])).n === 0);
+      r = await call('op', 'PUT', `/incidents/${inc.id}/switching-plan/steps`, { steps: fsteps });
+      check('steps saved -> draft plan owned by the incident',
+        r.status === 200 && r.body.incidentPlan?.plan.state === 'draft' && r.body.incidentPlan.steps.length === 4 && !r.body.outage);
+      const planRow = await db.one('SELECT * FROM switching_plans WHERE incident_id=$1', [inc.id]);
+      check('plan row: incident_id set, planned_outage_id NULL', planRow.planned_outage_id === null);
+      r = await call('op', 'PUT', `/incidents/${incId}/switching-plan/steps`, { steps: fsteps });
+      check('a planned outage\'s incident is refused (its plan lives on the outage)', r.status === 409 && r.body.code === 'USE_PLANNED_OUTAGE_PLAN');
+      r = await call('op', 'PUT', `/incidents/${fault.id}/switching-plan/steps`, { steps: fsteps });
+      check('no new plan on a resolved incident', r.status === 409 && r.body.code === 'INCIDENT_NOT_ACTIVE');
+
+      check('approve', (await call('op', 'POST', `/incidents/${inc.id}/switching-plan/approve`)).body.incidentPlan?.plan.state === 'approved');
+      check('unapprove before switching', (await call('op', 'POST', `/incidents/${inc.id}/switching-plan/unapprove`)).body.incidentPlan?.plan.state === 'draft');
+      await call('op', 'POST', `/incidents/${inc.id}/switching-plan/approve`);
+      r = await call('op', 'PUT', `/incidents/${inc.id}/switching-plan/steps`, { steps: fsteps });
+      check('approved plan cannot be edited -> PLAN_NOT_DRAFT', r.body.code === 'PLAN_NOT_DRAFT');
+
+      const fids = Object.fromEntries((await call('op', 'GET', `/incidents/${inc.id}/switching-plan`)).body.steps.map((s) => [`${s.phase}${s.seq}`, s.id]));
+      r = await call('c5', 'POST', `/mobile/switching-steps/${fids.restore1}/confirm`, { clientConfirmationId: 'f-r1-early' });
+      check('restore before isolation -> ISOLATION_INCOMPLETE', r.body.code === 'ISOLATION_INCOMPLETE');
+      r = await call('c3', 'POST', `/mobile/switching-steps/${fids.isolate2}/confirm`, { clientConfirmationId: 'f-c3' });
+      check('another crew on a crew step -> 403 WRONG_ASSIGNEE', r.status === 403 && r.body.code === 'WRONG_ASSIGNEE');
+      r = await call('op', 'POST', `/switching-steps/${fids.isolate1}/confirm`, { clientConfirmationId: 'f-i1' });
+      check('control-room isolate step confirmed; incident unchanged', r.status === 200 && (await repo.incident(inc.id)).status === 'in_progress' && r.body.transitions.length === 0);
+      r = await call('c5', 'POST', `/mobile/switching-steps/${fids.isolate2}/confirm`, { clientConfirmationId: 'f-i2' });
+      check('crew isolate step confirmed (own crew)', r.status === 200);
+      r = await call('c5', 'POST', `/mobile/switching-steps/${fids.restore1}/confirm`, { clientConfirmationId: 'f-r1' });
+      check('restore needs no permit on a fault plan; not the last -> incident unchanged',
+        r.status === 200 && (await repo.incident(inc.id)).status === 'in_progress' && r.body.transitions.length === 0);
+      r = await call('op', 'POST', `/switching-steps/${fids.restore2}/confirm`, { clientConfirmationId: 'f-r2' });
+      const after = await repo.incident(inc.id);
+      check('last restore step -> Pending Verification, NOT resolved',
+        r.status === 200 && after.status === 'pending' && !after.resolved_at && r.body.transitions[0]?.to === 'pending', after.status);
+      r = await call('op', 'POST', `/switching-steps/${fids.restore2}/confirm`, { clientConfirmationId: 'f-r2' });
+      check('same confirmation again -> replay, nothing new', r.status === 200 && r.body.replay === true);
+      const tl = (await repo.incidentEvents(inc.id)).filter((e) => e.kind === 'switching');
+      check('every confirmed step is on the incident timeline', tl.length === 4 && tl.every((e) => /Switching (isolate|restore) step \d confirmed/.test(e.note)));
+
+      const flog = (await call('op', 'GET', `/incidents/${inc.id}/safety-log`)).body;
+      const acts = flog.map((l) => l.action);
+      check('safety log: plan create/edit/approve/unapprove, 4 step confirms, the transition, the refusals',
+        ['plan.create', 'plan.edit', 'plan.approve', 'plan.unapprove', 'incident.transition', 'step.confirm.rejected', 'plan.edit.rejected'].every((a) => acts.includes(a))
+        && acts.filter((a) => a === 'step.confirm').length === 4, acts.join(','));
+      check('safety log rows owned by the incident only', flog.length > 0 && flog.every((l) => l.incident_id === inc.id && l.planned_outage_id === null));
+      check('safety log step rows keep the same fields as a planned outage\'s',
+        flog.filter((l) => l.action === 'step.confirm').every((l) => l.occurred_at && l.details.clientConfirmationId && 'receivedAt' in l.details && 'performedAt' in l.details));
+      // Field for field against a planned outage's step.confirm row: the same
+      // detail keys, and the actor columns filled the same way.
+      const poRow = (await repo.safetyLog(po.id)).find((l) => l.action === 'step.confirm');
+      const crewRow = flog.find((l) => l.action === 'step.confirm' && l.details.clientConfirmationId === 'f-i2');
+      const keys = (l) => Object.keys(l.details).sort().join(',');
+      check('incident step.confirm rows carry every detail key a planned outage\'s does, and its actor columns',
+        !!poRow && flog.filter((l) => l.action === 'step.confirm').every((l) => keys(l) === keys(poRow) && l.actor && l.actor_role)
+        && crewRow?.actor_crew_id === 'C005' && crewRow.details.assigneeCrewId === 'C005' && crewRow.details.device === 'AB P-31',
+        `${poRow && keys(poRow)} vs ${crewRow && keys(crewRow)}`);
+      let blocked = 0;
+      for (const sql of ['UPDATE safety_log SET actor = $1 WHERE incident_id = $2', 'DELETE FROM safety_log WHERE incident_id = $2']) {
+        try { await db.none(sql, ['x', inc.id]); } catch { blocked++; }
+      }
+      check('incident safety log rows cannot be changed or deleted', blocked === 2);
+
+      r = await call('op', 'PATCH', `/incidents/${inc.id}/status`, { status: 'resolved' });
+      check('resolution stays with the existing flow (Pending Verification -> resolved)', r.status === 200 && r.body.status === 'resolved');
+
+      // From Dispatched (no crew on site yet) the fault lifecycle has no move
+      // to Pending Verification: the status stays and the timeline says why.
+      const d = (await call('op', 'POST', '/incidents', { zone: 'Mayapur', severity: 'medium', type: 'Power Outage' })).body;
+      await call('op', 'POST', `/incidents/${d.id}/assign`, { crewId: 'C003' });
+      await call('op', 'PUT', `/incidents/${d.id}/switching-plan/steps`, { steps: [
+        { phase: 'isolate', seq: 1, action: 'open', device_label: 'CB-9', location: 'MAYAPUR S/s', assignee: 'control_room' },
+        { phase: 'restore', seq: 1, action: 'close', device_label: 'CB-9', location: 'MAYAPUR S/s', assignee: 'control_room' },
+      ] });
+      await call('op', 'POST', `/incidents/${d.id}/switching-plan/approve`);
+      const dids = (await call('op', 'GET', `/incidents/${d.id}/switching-plan`)).body.steps.map((s) => s.id);
+      await call('op', 'POST', `/switching-steps/${dids[0]}/confirm`, { clientConfirmationId: 'd-i1' });
+      r = await call('op', 'POST', `/switching-steps/${dids[1]}/confirm`, { clientConfirmationId: 'd-r1' });
+      check('last restore while Dispatched: status left, timeline notes it',
+        r.status === 200 && (await repo.incident(d.id)).status === 'dispatched'
+        && (await repo.incidentEvents(d.id)).some((e) => e.kind === 'switching' && e.note.startsWith('Supply restored by switching plan; incident left')));
+    }
+
     // Last: it resets the data. `npm run seed -- --force` and selftest.js
     // must still work on a database that has planned outages in it.
     console.log('-- seed --force with planned outages present');

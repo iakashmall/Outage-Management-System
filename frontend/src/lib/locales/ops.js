@@ -287,6 +287,12 @@ export const en = {
   'cmp.fedFrom': 'fed from',
   'cmp.kSource': 'Source substation',
   'cmp.correlatedNote': '{n} complaints correlated to this incident: ',
+  // OMS-05: a fault incident's own switching plan (Incidents drawer)
+  'inc.tripped': 'Tripped equipment',
+  'inc.unnamed': 'unnamed',
+  'inc.noPlan': 'No switching plan for this incident.',
+  'inc.startPlan': 'Start switching plan',
+  'inc.planNote': "No work permits on a fault. Confirming the last restore step moves the incident to Pending Verification at most; the crew's completion still resolves it.",
 };
 
 export const hi = {
@@ -573,4 +579,10 @@ export const hi = {
   'cmp.fedFrom': 'आपूर्ति स्रोत',
   'cmp.kSource': 'स्रोत उपकेंद्र',
   'cmp.correlatedNote': 'इस घटना से {n} शिकायतें सहसंबद्ध: ',
+  // OMS-05: फॉल्ट घटना की अपनी स्विचिंग योजना
+  'inc.tripped': 'ट्रिप हुआ उपकरण',
+  'inc.unnamed': 'अनाम',
+  'inc.noPlan': 'इस घटना के लिए कोई स्विचिंग योजना नहीं।',
+  'inc.startPlan': 'स्विचिंग योजना शुरू करें',
+  'inc.planNote': 'फॉल्ट पर कोई कार्य परमिट नहीं होता। अंतिम बहाली चरण की पुष्टि घटना को अधिकतम सत्यापन लंबित स्थिति में ले जाती है; घटना का समाधान दल के कार्य पूरा करने से ही होता है।',
 };

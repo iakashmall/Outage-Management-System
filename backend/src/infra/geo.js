@@ -8,7 +8,7 @@ try { NET = JSON.parse(readFileSync(join(_dir, 'network.json'), 'utf8')); } catc
 
 const codeToSub = new Map(NET.substations.map((s) => [s.code, s]));
 
-const hav = (aLat, aLon, bLat, bLon) => {
+export const hav = (aLat, aLon, bLat, bLon) => {
   const R = 6371, dLat = (bLat - aLat) * Math.PI / 180, dLon = (bLon - aLon) * Math.PI / 180;
   const s = Math.sin(dLat / 2) ** 2 + Math.cos(aLat * Math.PI / 180) * Math.cos(bLat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(s));

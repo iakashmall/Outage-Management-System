@@ -25,6 +25,8 @@ const hav = (a, b) => { const R = 6371, dLat = (b[0] - a[0]) * Math.PI / 180, dL
 // compass bearing a→b in degrees (0 = north), for pointing the crew arrow
 const bearing = (a, b) => { const r = Math.PI / 180, y = Math.sin((b.lng - a.lng) * r) * Math.cos(b.lat * r), x = Math.cos(a.lat * r) * Math.sin(b.lat * r) - Math.sin(a.lat * r) * Math.cos(b.lat * r) * Math.cos((b.lng - a.lng) * r); return (Math.atan2(y, x) / r + 360) % 360; };
 const clean = (n) => (n || '').replace(/33\/11 kV/i, '').replace(/S\/s/i, '').trim();
+// search: placeholder names in the source data ("0", "1", blank) count as no name
+const realName = (n) => (n == null || ['', '0', '1'].includes(String(n).trim()) ? null : n);
 
 const LAYER_GROUPS = [
   ['Network', [['htLines', 'HT network', true], ['feeders', 'Feeder lines', true], ['substations', 'Substations', true],
@@ -32,13 +34,15 @@ const LAYER_GROUPS = [
     ['switches', 'Switches', false], ['rmus', 'RMUs', false], ['fuses', 'Drop-out fuses', false]]],
   ['Operations', [['incidents', 'Incidents', true], ['crews', 'Crews', true], ['trails', 'Crew trails', false], ['scans', 'Asset scans (crew QR, 7 days)', true]]],
 ];
-// CIM topology (network.* PostGIS schema) -- real connectivity data, imported
-// from a CIM RDF/XML export. Separate from the Haridwar layers above, which
-// still come from network.json.
-LAYER_GROUPS.splice(1, 0, ['Topology · CIM (Dehradun)', [
-  ['topoLines', 'Lines (ACLineSegment)', true],
+// CIM topology (network.* PostGIS schema) -- connectivity data imported from a
+// CIM export or inferred from GIS. Separate from the Haridwar layers above,
+// which still come from network.json. The heading shown names the imported
+// substations (topoTitle below); this key only identifies the group.
+LAYER_GROUPS.splice(1, 0, ['Topology · CIM', [
+  // one control for lines and devices (groups topoLines + topoEquip): they are
+  // one layer, never useful apart
+  ['topo', 'Lines & devices', true],
   ['topoStruct', 'Poles & junctions', true],
-  ['topoEquip', 'Transformers, fuses, switches', true],
 ]]);
 const ALL = LAYER_GROUPS.flatMap(([, ls]) => ls);
 const TOPO_STYLE = {
@@ -48,6 +52,10 @@ const TOPO_STYLE = {
 };
 const topoGroupOf = (cls) => (cls === 'ACLineSegment' ? 'topoLines' : ['Structure', 'Junction', 'Meter'].includes(cls) ? 'topoStruct' : 'topoEquip');
 const SECTION_COLOR = '#ff6a00';
+const SIM_COLOR = '#7c3aed';  // what-if: devices that lose supply (a simulation, never live state)
+const TRACE_MAX_ZOOM = 17;     // fly-to-fit cap for any trace
+const SMALL_SECTION = 10;      // below this, say the section is likely limited by missing connectivity data
+const TWIN_SAME_SPOT_M = 25;   // search: a flat asset this close to its topology twin is the same marker on screen
 // One stable colour per crew for its trail (a crew keeps its colour as its status changes).
 const TRAIL_COLORS = ['#e11d48', '#7c3aed', '#0891b2', '#ca8a04', '#16a34a', '#db2777', '#2563eb', '#ea580c'];
 const trailColor = (id) => { let h = 0; for (let i = 0; i < String(id).length; i++) h = (h * 31 + String(id).charCodeAt(i)) >>> 0; return TRAIL_COLORS[h % TRAIL_COLORS.length]; };
@@ -64,6 +72,12 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
   const [sel, setSel] = useState(null);
   const [selFeeder, setSelFeeder] = useState(null);
   const [layers, setLayers] = useState(Object.fromEntries(ALL.map(([k, , on]) => [k, on])));
+  // Raw GIS lines inside an imported-topology area are hidden by default (the
+  // topology draws them, cleaned). Once the user toggles "HT network" /
+  // "Feeder lines" themselves, that choice covers those segments too.
+  const [rawTouched, setRawTouched] = useState({ htLines: false, feeders: false });
+  const [rawUnderTopo, setRawUnderTopo] = useState({ htLines: 0, feeders: 0 });
+  const [rawNoteDismissed, setRawNoteDismissed] = useState(false);
   const [ready, setReady] = useState(false);
   const [query, setQuery] = useState('');
   const [openResults, setOpenResults] = useState(false);
@@ -85,6 +99,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
   const groups = useRef({});
   const crewMarkers = useRef(new Map()); // crew id -> { m, crew, at, heading, raf }
   const feederIdx = useRef({});
+  const rawSegs = useRef({ htLines: [], feeders: [] }); // raw GIS segments, see the build effect
   const hiRef = useRef(null);
   const topoIdx = useRef({});       // mrid -> { layer, isLine, base, latlng }
   const traceLayer = useRef(null);  // origin / boundary markers for the active trace
@@ -115,6 +130,10 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
   useEffect(() => { if (sel && sel.kind === 'incident') setSel((s) => ({ ...s, ...(inc.find((i) => i.id === s.id) || {}) })); }, [inc]); // eslint-disable-line
 
   const topoOk = !!(topo && !topo.error && topo.features && topo.features.length);
+  // Substations with imported topology, from the API -- nothing here names a place.
+  const topoAreas = topoOk ? topo.meta?.areas || [] : [];
+  const topoTitle = topoAreas.length === 1 ? t('map.topoOne', { name: clean(topoAreas[0].name) || topoAreas[0].code })
+    : topoAreas.length > 1 ? t('map.topoMany', { n: topoAreas.length }) : t('map.topoNone');
   const topoCounts = useMemo(() => {
     const m = { topoLines: 0, topoStruct: 0, topoEquip: 0 };
     if (topoOk) topo.features.forEach((f) => { m[topoGroupOf(f.properties.cls)]++; });
@@ -142,18 +161,37 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
   const searchIndex = useMemo(() => {
     if (!net) return [];
     const out = [];
-    const push = (type, kind, label, ref, sub) => label && out.push({ type, kind, label: String(label), sub, lat: ref.lat, lon: ref.lon, ref });
-    net.substations.forEach((s) => push('Substation', 'ss', clean(s.name) || s.name, s, s.name));
-    net.powerTx.forEach((a) => push('Power Txr', 'ptx', a.name || 'Power transformer', a));
-    net.distTx.forEach((a) => push('DTR', 'dt', a.name || a.id, a, a.feeder));
-    net.switches.forEach((a) => push('Switch', 'switch', a.name || a.id, a));
-    net.rmus.forEach((a) => push('RMU', 'rmu', a.id || a.name, a));
-    net.fuses.forEach((a) => push('Fuse', 'fuse', a.id || a.name, a));
+    // Every topology feature, found by its name or its mRID (Haridwar fuses
+    // have no name). The sub-line carries the mRID so same-named devices can
+    // be told apart; when the label already is the mRID, the class alone.
+    // twins: base mRID (without the importer's #2, #3 suffix) -> entries.
+    const twins = {};
     if (topoOk) topo.features.forEach((f) => {
-      const p = f.properties; if (!p.name || p.name === p.mrid) return; // numeric-only names are not useful to search
+      const p = f.properties;
       const [lo, la] = f.geometry.type === 'Point' ? f.geometry.coordinates : f.geometry.coordinates[0];
-      push('CIM', 'topo', p.name, { ...p, lat: la, lon: lo }, p.cls);
+      const named = realName(p.name) && p.name !== p.mrid;
+      const it = { type: 'CIM', kind: 'topo', label: named ? String(p.name) : p.mrid, mrid: p.mrid,
+        sub: named ? `${p.cls} · ${p.mrid}` : p.cls, lat: la, lon: lo, ref: { ...p, lat: la, lon: lo } };
+      out.push(it);
+      (twins[p.mrid.replace(/#\d+$/, '')] ||= []).push(it);
     });
+    // A flat-layer asset that is also imported topology (mRID = class prefix +
+    // its id) is listed only when it would look different: a name the
+    // topology result does not show, or a visibly different spot on the map.
+    const looksSame = (prefix, a, label) => {
+      const ts = twins[prefix + a.id]; if (!ts) return false;
+      const t = ts.reduce((b, x) => (hav([a.lat, a.lon], [x.lat, x.lon]) < hav([a.lat, a.lon], [b.lat, b.lon]) ? x : b));
+      const sameName = String(label) === String(a.id) || String(label) === t.label;
+      return sameName && hav([a.lat, a.lon], [t.lat, t.lon]) * 1000 < TWIN_SAME_SPOT_M;
+    };
+    const push = (type, kind, label, ref, sub, prefix) => label && !(prefix && looksSame(prefix, ref, label))
+      && out.push({ type, kind, label: String(label), sub, lat: ref.lat, lon: ref.lon, ref });
+    net.substations.forEach((s) => push('Substation', 'ss', clean(s.name) || s.name, s, s.name));
+    net.powerTx.forEach((a) => push('Power Txr', 'ptx', realName(a.name) || 'Power transformer', a, undefined, 'PT:'));
+    net.distTx.forEach((a) => push('DTR', 'dt', realName(a.name) || a.id, a, a.feeder, 'DT:'));
+    net.switches.forEach((a) => push('Switch', 'switch', realName(a.name) || a.id, a, undefined, 'SW:'));
+    net.rmus.forEach((a) => push('RMU', 'rmu', a.id || realName(a.name), a, undefined, 'RMU:'));
+    net.fuses.forEach((a) => push('Fuse', 'fuse', a.id || realName(a.name), a, undefined, 'FUSE:'));
     Object.values(feeders).forEach((f) => out.push({ type: 'Feeder', kind: 'feeder', label: f.name, sub: (f.kv || 11) + ' kV', ref: f }));
     return out;
   }, [net, feeders, topo]); // eslint-disable-line
@@ -171,9 +209,9 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     if (!q) return [];
     const hits = [];
     for (const it of [...liveIndex, ...searchIndex]) {
-      const l = it.label.toLowerCase();
-      const i = l.indexOf(q);
-      if (i !== -1) hits.push({ ...it, starts: i === 0 });
+      const i = it.label.toLowerCase().indexOf(q);
+      const m = i === -1 && it.mrid ? it.mrid.toLowerCase().indexOf(q) : -1; // topology: the mRID too
+      if (i !== -1 || m !== -1) hits.push({ ...it, starts: i === 0 || m === 0 });
     }
     hits.sort((a, b) => (b.starts - a.starts) || ((RANK[a.type] ?? 9) - (RANK[b.type] ?? 9)) || a.label.localeCompare(b.label));
     return hits.slice(0, 30);
@@ -242,12 +280,18 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     if (!ready || !mapRef.current || !net || groups.current.built) return;
     const map = mapRef.current;
     const mk = () => L.layerGroup();
-    ['htLines', 'feeders', 'substations', 'powerTx', 'distTx', 'switches', 'rmus', 'fuses'].forEach((k) => (groups.current[k] = mk()));
+    ['htLines', 'feeders', 'substations', 'powerTx', 'distTx', 'switches', 'rmus', 'fuses', 'htLinesTopo', 'feedersTopo'].forEach((k) => (groups.current[k] = mk()));
 
-    net.htLines.forEach((l) => L.polyline(l.path, { color: '#3f5a86', weight: 2, opacity: 0.9, interactive: false }).addTo(groups.current.htLines));
+    // Raw segments are remembered so the effect below can move the ones that
+    // imported topology already draws into htLinesTopo / feedersTopo.
+    rawSegs.current = { htLines: [], feeders: [] };
+    net.htLines.forEach((l, index) => {
+      const pl = L.polyline(l.path, { color: '#3f5a86', weight: 2, opacity: 0.9, interactive: false }).addTo(groups.current.htLines);
+      rawSegs.current.htLines.push({ index, layers: [pl] });
+    });
 
     feederIdx.current = {};
-    net.feederLines.forEach((l) => {
+    net.feederLines.forEach((l, index) => {
       const col = feederColor(l.feeder);
       // wide, invisible "hit" line so the feeder is easy to hover/click...
       const hit = L.polyline(l.path, { color: col, weight: 14, opacity: 0, interactive: true });
@@ -258,6 +302,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
       const pl = L.polyline(l.path, { color: col, weight: 3, opacity: 0.92, interactive: false });
       pl.addTo(groups.current.feeders);
       (feederIdx.current[l.feeder] = feederIdx.current[l.feeder] || []).push(pl);
+      rawSegs.current.feeders.push({ index, layers: [hit, pl] });
     });
 
     net.fuses.forEach((a) => L.circleMarker([a.lat, a.lon], { radius: 2.5, color: '#b98a5e', weight: 0, fillOpacity: 0.85 }).addTo(groups.current.fuses));
@@ -289,7 +334,9 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
       if (f.geometry.type === 'LineString') {
         const latlngs = f.geometry.coordinates.map(([lo, la]) => [la, lo]);
         latlngs.forEach((ll) => bounds.extend(ll));
-        const base = { color: '#0e7490', weight: 3, opacity: 0.9 };
+        // coloured by the assigned feeder (cleaned, from network.feeders) with the
+        // same hash as the raw feeder layer; teal when the line has no feeder
+        const base = { color: p.feederId ? feederColor(p.feederId) : '#0e7490', weight: 3, opacity: 0.9 };
         // wide invisible line so a thin cable is easy to click, thin visible line on top
         const hit = L.polyline(latlngs, { color: '#0e7490', weight: 14, opacity: 0, interactive: true });
         hit.on('click', () => selectTopo(p, latlngs[0]));
@@ -311,34 +358,55 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     });
     map.__topoBounds = bounds.isValid() ? bounds : null;
     groups.current.topoBuilt = true;
-    ['topoLines', 'topoStruct', 'topoEquip'].forEach((k) => { if (layers[k]) groups.current[k].addTo(map); });
+    // devices drawn above lines: topoEquip is added after topoLines
+    groups.current.topo = L.layerGroup([groups.current.topoLines, groups.current.topoEquip]);
+    ['topo', 'topoStruct'].forEach((k) => { if (layers[k]) groups.current[k].addTo(map); });
   }, [ready, topo]); // eslint-disable-line
 
-  // section trace: highlight the electrical section, mark the origin and boundary switches, dim the rest
+  // Trace highlight, one effect for the three trace kinds (trace.kind):
+  //   section  -- the electrical section, origin and boundary switches
+  //   upstream -- the path to the nearest substation, switches on it marked
+  //   whatif   -- the devices that lose supply (in SIM_COLOR), the opened device
+  // Everything else is dimmed.
+  const traceView = useMemo(() => {
+    if (!trace || trace.found === false || trace.error) return null;
+    if (trace.kind === 'upstream') {
+      if (!trace.pathFound) return null;
+      const eq = trace.path.filter((p) => p.type === 'equipment').map((p) => p.cim_mrid);
+      return { hit: new Set(eq), color: SECTION_COLOR, origin: trace.origin.cim_mrid, originTip: tt('map.ttTraced'),
+        marks: trace.switchesOnPath.map((s) => [s.cim_mrid, tt('map.ttSwitchOnPath', { cls: s.cim_class, name: s.name || s.cim_mrid })]) };
+    }
+    if (trace.kind === 'whatif') {
+      const opened = trace.assumedOpen[0]?.cim_mrid;
+      return { hit: new Set(trace.lostSupply.map((e) => e.cim_mrid)), color: SIM_COLOR, origin: opened, originTip: tt('map.ttSimOpen'), marks: [] };
+    }
+    return { hit: new Set(trace.sectionEquipment.map((e) => e.cim_mrid)), color: SECTION_COLOR, origin: trace.origin.cim_mrid, originTip: tt('map.ttOrigin'),
+      marks: trace.boundarySwitches.map((b) => [b.cim_mrid, tt('map.ttBoundary', { cls: b.cim_class, name: b.name || b.cim_mrid })]) };
+  }, [trace, lang]); // lang: the tooltips are translated
   useEffect(() => {
     const map = mapRef.current; if (!map || !groups.current.topoBuilt) return;
     if (traceLayer.current) { map.removeLayer(traceLayer.current); traceLayer.current = null; }
     const idx = topoIdx.current;
-    const active = !!(trace && trace.found);
-    const inSection = new Set(active ? trace.sectionEquipment.map((e) => e.cim_mrid) : []);
-    const bound = new Set(active ? trace.boundarySwitches.map((e) => e.cim_mrid) : []);
+    const v = traceView;
+    const marked = new Set(v ? v.marks.map(([m]) => m) : []);
     Object.entries(idx).forEach(([mrid, t]) => {
-      if (!active) { t.layer.setStyle(t.base); return; }
-      const hit = inSection.has(mrid) || bound.has(mrid) || mrid === trace.origin.cim_mrid;
-      if (t.isLine) t.layer.setStyle(hit ? { color: SECTION_COLOR, weight: 6, opacity: 1 } : { ...t.base, opacity: 0.2 });
-      else t.layer.setStyle(hit ? { ...t.base, fillColor: SECTION_COLOR, radius: t.base.radius + 2, fillOpacity: 1 } : { ...t.base, fillOpacity: 0.2, opacity: 0.3 });
+      if (!v) { t.layer.setStyle(t.base); return; }
+      const hit = v.hit.has(mrid) || marked.has(mrid) || mrid === v.origin;
+      if (t.isLine) t.layer.setStyle(hit ? { color: v.color, weight: 6, opacity: 1 } : { ...t.base, opacity: 0.2 });
+      else t.layer.setStyle(hit ? { ...t.base, fillColor: v.color, radius: t.base.radius + 2, fillOpacity: 1 } : { ...t.base, fillOpacity: 0.2, opacity: 0.3 });
       if (hit && t.layer.bringToFront) t.layer.bringToFront();
     });
-    if (!active) return;
+    if (!v) return;
     const g = L.layerGroup();
     const mkIcon = (cls, size) => L.divIcon({ className: '', html: `<div class="${cls}"></div>`, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
-    const o = idx[trace.origin.cim_mrid];
-    if (o) L.marker(o.latlng, { icon: mkIcon('mk-origin', 22), zIndexOffset: 3000 }).bindTooltip(tt('map.ttOrigin')).addTo(g);
-    trace.boundarySwitches.forEach((b) => { const t = idx[b.cim_mrid]; if (t) L.marker(t.latlng, { icon: mkIcon('mk-bound', 20), zIndexOffset: 2500 }).bindTooltip(tt('map.ttBoundary', { cls: b.cim_class, name: b.name || b.cim_mrid })).addTo(g); });
+    const o = idx[v.origin];
+    if (o) L.marker(o.latlng, { icon: mkIcon('mk-origin', 22), zIndexOffset: 3000 }).bindTooltip(v.originTip).addTo(g);
+    v.marks.forEach(([m, tip]) => { const t = idx[m]; if (t) L.marker(t.latlng, { icon: mkIcon('mk-bound', 20), zIndexOffset: 2500 }).bindTooltip(tip).addTo(g); });
     g.addTo(map); traceLayer.current = g;
-    const pts = [...inSection, ...bound, trace.origin.cim_mrid].map((m) => idx[m]).filter(Boolean).flatMap((t) => (t.isLine ? t.layer.getLatLngs() : [t.latlng]));
-    if (pts.length) map.flyToBounds(L.latLngBounds(pts).pad(0.25), { maxZoom: 19, duration: 0.6 });
-  }, [trace, ready, topo]);
+    const pts = [...v.hit, ...marked, v.origin].map((m) => idx[m]).filter(Boolean).flatMap((t) => (t.isLine ? t.layer.getLatLngs() : [t.latlng]));
+    // capped: a tiny section must not zoom in past street level
+    if (pts.length) map.flyToBounds(L.latLngBounds(pts).pad(0.25), { maxZoom: TRACE_MAX_ZOOM, duration: 0.6 });
+  }, [traceView, ready, topo]); // eslint-disable-line
 
   // rebuild incident markers on live updates
   useEffect(() => {
@@ -429,6 +497,26 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     live.forEach((e, id) => { if (!seen.has(id)) { cancelAnimationFrame(e.raf); g.removeLayer(e.m); live.delete(id); } });
   }, [crews, ready]);
 
+  // Sort raw segments: one whose own line was imported into the topology (the
+  // API lists them by index, matched by id -- not by position) is already
+  // drawn, cleaned, by the topology layer, so it moves to htLinesTopo /
+  // feedersTopo. Every other raw line stays exactly as before.
+  useEffect(() => {
+    if (!ready || !groups.current.built) return;
+    const imported = topoOk ? topo.meta?.rawImported || {} : {};
+    const sets = { htLines: new Set(imported.htLines || []), feeders: new Set(imported.feederLines || []) };
+    const moved = { htLines: 0, feeders: 0 };
+    for (const k of ['htLines', 'feeders']) {
+      for (const seg of rawSegs.current[k]) {
+        const hide = sets[k].has(seg.index);
+        const [from, to] = hide ? [groups.current[k], groups.current[`${k}Topo`]] : [groups.current[`${k}Topo`], groups.current[k]];
+        seg.layers.forEach((pl) => { if (from.hasLayer(pl)) { from.removeLayer(pl); to.addLayer(pl); } });
+        if (hide) moved[k]++;
+      }
+    }
+    setRawUnderTopo(moved);
+  }, [ready, topo]); // eslint-disable-line
+
   // toggle layers on/off
   useEffect(() => {
     const map = mapRef.current; if (!map || !groups.current.built) return;
@@ -437,7 +525,14 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
       if (on && !map.hasLayer(g)) g.addTo(map);
       if (!on && map.hasLayer(g)) map.removeLayer(g);
     });
-  }, [layers, ready]);
+    // raw segments under imported topology: only on an explicit user choice
+    ['htLines', 'feeders'].forEach((k) => {
+      const g = groups.current[`${k}Topo`]; if (!g) return;
+      const on = layers[k] && rawTouched[k];
+      if (on && !map.hasLayer(g)) g.addTo(map);
+      if (!on && map.hasLayer(g)) map.removeLayer(g);
+    });
+  }, [layers, rawTouched, ready]);
 
   // ---- crew trails ---------------------------------------------------------------
   // The path each crew's phone has reported (GET /mobile/crews/:id/track), drawn from the
@@ -526,14 +621,28 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
 
   function select(kind, obj, label) { setTrace(null); setSel({ kind, label, ...obj }); if (kind !== 'feeder') setSelFeeder(null); }
   function selectTopo(p, latlng) { setTrace(null); setSel({ kind: 'topo', label: p.name || p.mrid, ...p, lat: latlng[0], lon: latlng[1] }); setSelFeeder(null); }
-  async function runTrace(mrid) {
-    setTraceBusy(true);
-    try { setTrace(await api.networkSection(mrid)); }
-    catch (e) { setTrace({ found: false, reason: e.message || tt('map.traceFailed') }); }
+  // kind: 'section' (Trace electrical section), 'upstream' (Trace to source),
+  // 'whatif' (Simulate opening). The result is kept with its kind and the
+  // device it was run for (trace.for), so the card shows it only for that device.
+  async function runTrace(mrid, kind = 'section') {
+    setTraceBusy(kind);
+    try {
+      const r = kind === 'upstream' ? await api.networkUpstream(mrid)
+        : kind === 'whatif' ? await api.networkWhatIf({ assumedOpen: [mrid] })
+        : await api.networkSection(mrid);
+      setTrace({ ...r, kind, for: mrid });
+    } catch (e) { setTrace({ found: false, kind, for: mrid, reason: e.data?.message || e.data?.reason || e.message || tt('map.traceFailed') }); }
     finally { setTraceBusy(false); }
   }
-  const fitTopo = () => { const m = mapRef.current; if (m && m.__topoBounds) m.flyToBounds(m.__topoBounds.pad(0.15), { duration: 0.6 }); };
-  function pickFeeder(name) { setSelFeeder(name); setSel({ kind: 'feeder', ...feeders[name] }); }
+  // Jump to one imported substation's topology (its bbox from the API), or to
+  // all of it when no area is given.
+  const fitTopo = (area) => {
+    const m = mapRef.current; if (!m) return;
+    const b = area?.bbox?.every(Number.isFinite) ? L.latLngBounds([area.bbox[1], area.bbox[0]], [area.bbox[3], area.bbox[2]]) : m.__topoBounds;
+    if (b) m.flyToBounds(b.pad(0.15), { duration: 0.6 });
+  };
+  // Picking a feeder is an explicit ask to see its raw lines, even under topology.
+  function pickFeeder(name) { setSelFeeder(name); setSel({ kind: 'feeder', ...feeders[name] }); setRawTouched((t) => ({ ...t, feeders: true })); }
   const fitAll = () => { const m = mapRef.current; if (m && m.__bounds) m.flyToBounds(m.__bounds.pad(0.05), { duration: 0.5 }); };
 
   function highlight(lat, lon) {
@@ -544,8 +653,15 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
   }
   // fly the map to a searched item and reveal / highlight it
   // Fly to a region chosen from the OMS's own GIS data (substation areas, zones, divisions).
+  // 'topo:<mrid>' (or 'topo:*' for all) jumps to imported topology instead,
+  // switching the topology layers on so there is something to see there.
   function goRegion(id) {
     setRegionId(id);
+    if (id.startsWith('topo:')) {
+      setLayers((l) => ({ ...l, topo: true, topoStruct: true }));
+      fitTopo(topoAreas.find((a) => `topo:${a.mrid}` === id));
+      return;
+    }
     const r = regions.find((x) => x.id === id);
     const map = mapRef.current;
     if (!r || !map) return;
@@ -557,6 +673,16 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     const layerKey = { ss: 'substations', ptx: 'powerTx', dt: 'distTx', switch: 'switches', rmu: 'rmus', fuse: 'fuses', feeder: 'feeders', incident: 'incidents', crew: 'crews' }[item.kind];
     if (layerKey && !layers[layerKey]) setLayers((l) => ({ ...l, [layerKey]: true }));
     setQuery(''); setOpenResults(false);
+    // A topology device opens exactly as clicking its marker does (selectTopo:
+    // detail panel with the trace buttons), with its layer switched on.
+    if (item.kind === 'topo') {
+      const k = topoGroupOf(item.ref.cls) === 'topoStruct' ? 'topoStruct' : 'topo';
+      if (!layers[k]) setLayers((l) => ({ ...l, [k]: true }));
+      map.flyTo([item.lat, item.lon], Math.max(map.getZoom(), 16), { duration: 0.6 });
+      highlight(item.lat, item.lon);
+      selectTopo(item.ref, [item.lat, item.lon]);
+      return;
+    }
     if (item.kind === 'feeder') {
       const f = feeders[item.label]; pickFeeder(item.label); highlight(null);
       if (f) map.flyToBounds(L.latLngBounds([f.minLat, f.minLon], [f.maxLat, f.maxLon]).pad(0.25), { maxZoom: 16, duration: 0.6 });
@@ -572,6 +698,10 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
   if (!net) return <div className="empty"><span className="disp">{t('map.loading')}</span>{t('map.loadingSub')}</div>;
   if (net.error) return <div className="screen-error"><h2>{t('map.unavail')}</h2><p>{t('map.unavailSub')}</p></div>;
   const c = net.counts || {};
+  // Both raw line layers actually on screen (ticked, and not entirely hidden
+  // under imported topology) -- they never visually join, so say why.
+  const rawShowing = (k, total) => layers[k] && (rawTouched[k] || rawUnderTopo[k] < (total || 0));
+  const rawBothShowing = rawShowing('htLines', c.htLines) && rawShowing('feeders', c.feederLines);
   const plottedInc = inc.filter((i) => i.lat && i.lon);
 
   return (
@@ -585,18 +715,32 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
         <div className="layer-panel">
           {LAYER_GROUPS.filter(([group]) => topoOk || !group.startsWith('Topology')).map(([group, ls]) => (
             <div key={group} className="lp-group">
-              <div className="lp-h">{t(`map.grp.${group.startsWith('Topology') ? 'Topology' : group}`)}</div>
+              <div className="lp-h">{group.startsWith('Topology') ? topoTitle : t(`map.grp.${group}`)}</div>
               {group.startsWith('Topology') && <div className="lp-sub">{t('map.topoSub')}</div>}
-              {ls.map(([k]) => {
-                const n = k.startsWith('topo') ? topoCounts[k] : k === 'incidents' ? plottedInc.length : k === 'crews' ? crews.length : k === 'trails' ? Object.values(trails).filter((p) => p && p.length).length : (c[k === 'feeders' ? 'feederLines' : k] || 0);
+              {ls.map(([k, label]) => {
+                const n = k === 'topo' ? topoCounts.topoLines + topoCounts.topoEquip : k.startsWith('topo') ? topoCounts[k] : k === 'incidents' ? plottedInc.length : k === 'crews' ? crews.length : k === 'trails' ? Object.values(trails).filter((p) => p && p.length).length : (c[k === 'feeders' ? 'feederLines' : k] || 0);
                 return (
                   <label key={k} className={`lp-row ${layers[k] ? 'on' : ''}`}>
-                    <input type="checkbox" checked={!!layers[k]} onChange={() => setLayers((l) => ({ ...l, [k]: !l[k] }))} />
-                    <span className={`lp-swatch sw-${k}`} /><span className="lp-label">{t(`map.ly.${k}`)}</span>
+                    <input type="checkbox" checked={!!layers[k]} onChange={() => {
+                      setLayers((l) => ({ ...l, [k]: !l[k] }));
+                      if (k in rawTouched) setRawTouched((t) => ({ ...t, [k]: true }));
+                    }} />
+                    <span className={`lp-swatch sw-${k}`} /><span className="lp-label">{tOr(`map.ly.${k}`, label)}
+                      {k in rawTouched && !rawTouched[k] && rawUnderTopo[k] > 0 && (
+                        <span className="lp-hidden" title={t('map.rawHiddenTitle')}>
+                          {t('map.rawHidden', { n: rawUnderTopo[k].toLocaleString() })}</span>)}
+                      {k === 'topo' && (
+                        <span className="lp-hidden">{t('map.topoLinesDevices', { l: topoCounts.topoLines.toLocaleString(), d: topoCounts.topoEquip.toLocaleString() })}</span>)}
+                    </span>
                     <span className="lp-count">{n && n.toLocaleString ? n.toLocaleString() : n}</span>
                   </label>
                 );
               })}
+              {group === 'Network' && rawBothShowing && !rawNoteDismissed && (
+                <div className="lp-hint lp-rawnote" role="note">
+                  {t('map.rawNote')}
+                  <button className="ms-clear" aria-label={t('map.dismissNote')} onClick={() => setRawNoteDismissed(true)}><Icon name="x" size={12} /></button>
+                </div>)}
               {group === 'Operations' && trailsOn && (
                 <TrailPanel crews={crews} trails={trails} trailCrew={trailCrew} trailWin={trailWin} setTrailWin={setTrailWin}
                   busy={trailBusy} failed={trailFailed} onFocus={focusTrail} onAll={() => setTrailCrew(null)} />)}
@@ -625,6 +769,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
         </div>
 
         <div className="card map-stage">
+          {trace?.kind === 'whatif' && trace.simulation && <div className="sim-banner" role="status">{t('map.simBanner')}</div>}
           <div ref={boxRef} className="leaflet-host" />
           {basemapDown && (
             <div className="map-basemap-note" role="status">
@@ -665,7 +810,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
                 ))}
               </div>
             )}
-            {regions.length > 0 && (
+            {(regions.length > 0 || topoAreas.length > 0) && (
               <select className="ms-box" aria-label={t('map.goRegion')} value={regionId} onChange={(e) => goRegion(e.target.value)}
                 style={{ marginTop: 6, width: '100%', fontSize: 13, color: 'var(--ink)', cursor: 'pointer' }}>
                 <option value="">{t('map.goRegionOpt')}</option>
@@ -677,13 +822,17 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
                     </optgroup>
                   ) : null;
                 })}
+                {topoAreas.length > 0 && (
+                  <optgroup label={t('map.importedTopo')}>
+                    {topoAreas.length > 1 && <option value="topo:*">{t('map.allImportedTopo')}</option>}
+                    {topoAreas.map((a) => <option key={a.mrid} value={`topo:${a.mrid}`}>{clean(a.name) || a.code} · {a.equipment.toLocaleString()}</option>)}
+                  </optgroup>)}
               </select>
             )}
           </div>
 
           <div className="map-tools">
             <button className="map-fit" onClick={fitAll} title={t('map.fitTitle')}><Icon name="map" size={15} /> {t('map.fit')}</button>
-            {topoOk && <button className="map-fit topo" onClick={fitTopo} title={t('map.dehradunTitle')}><Icon name="pin" size={15} /> {t('map.dehradun')}</button>}
           </div>
 
           {sel && (
@@ -704,23 +853,8 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
                   <span className="chip chip-soft">{sel.cls} · CIM</span>
                   <KV k="mRID" v={sel.mrid} mono /><KV k={t('map.k.name')} v={sel.name} /><KV k={t('map.k.feeder')} v={sel.feeder} />
                   <KV k={t('map.k.ratedV')} v={sel.ratedVoltage ? (Number(sel.ratedVoltage) / 1000) + ' kV' : null} />
-                  {!(trace && trace.found && trace.origin.cim_mrid === sel.mrid) && (
-                    <button className="trace-btn" disabled={traceBusy} onClick={() => runTrace(sel.mrid)}>{traceBusy ? t('map.tracing') : t('map.traceBtn')}</button>)}
-                  {trace && trace.found === false && <div className="trace-note">{trace.reason}</div>}
-                  {trace && trace.found && trace.origin.cim_mrid === sel.mrid && (
-                    <div className="trace-box">
-                      <h4>{t('map.sectionTrace')}</h4>
-                      <div className="trace-stat">
-                        <div><b>{trace.sectionEquipment.length}</b><span>{t('map.inSection')}</span></div>
-                        <div><b>{trace.boundarySwitches.length}</b><span>{t('map.boundarySw')}</span></div>
-                      </div>
-                      <KV k={t('map.protection')} v={trace.nearbyProtectionAssets.length ? trace.nearbyProtectionAssets.map((a) => `${a.kind} ${a.name}`).join(', ') : t('map.none')} />
-                      {trace.sectionEquipment.length === 1 && trace.boundarySwitches.length === 0 && (
-                        <div className="trace-note">{t('map.selfOnly')}</div>)}
-                      {trace.truncated && <div className="trace-note" style={{ color: '#b91c1c', fontWeight: 600 }}>{t('map.truncated')}</div>}
-                      <div className="trace-note">{trace.caveat}</div>
-                      <button className="trace-btn ghost" onClick={() => setTrace(null)}>{t('map.clearTrace')}</button>
-                    </div>)}
+                  <TraceCard trace={trace && trace.for === sel.mrid ? trace : null} busy={traceBusy}
+                    onRun={(kind) => runTrace(sel.mrid, kind)} onClear={() => setTrace(null)} />
                 </>}
                 {sel.kind === 'scan' && <><span className="chip chip-soft">{t('map.scanChip')}</span><KV k={t('map.k.asset')} v={sel.asset_id || sel.raw_value} mono /><KV k={t('map.k.crew')} v={sel.crew_id} mono /><KV k={t('map.k.job')} v={sel.job_id} mono /><KV k={t('map.k.incident')} v={sel.incident_id} mono />
                   <KV k={t('map.k.scanned')} v={sel.scanned_at ? new Date(sel.scanned_at).toLocaleString() : '—'} /><KV k={t('map.k.latlon')} v={`${Number(sel.lat).toFixed(6)}, ${Number(sel.lon).toFixed(6)}`} mono /></>}
@@ -788,4 +922,72 @@ function CrewTrailInfo({ pts, win, lastFix, onShow }) {
 }
 
 function KV({ k, v, mono }) { return <div className="kv-row"><span className="k">{k}</span><span className={`v ${mono ? 'mono' : ''}`}>{v || '—'}</span></div>; }
+
+// The trace card in a topology device's detail panel: section trace, trace to
+// source and simulate opening (OMS-05), each with the honesty text its result
+// carries -- switch states unknown, inferred connectivity, simulation not live.
+function TraceCard({ trace, busy, onRun, onClear }) {
+  const { t } = useT();
+  const btn = (kind, label, busyLabel) => (
+    <button key={kind} className={`trace-btn${kind === 'section' ? '' : ' ghost'}`} disabled={!!busy} onClick={() => onRun(kind)}>{busy === kind ? busyLabel : label}</button>);
+  const Notes = ({ r }) => <>
+    {r.truncated && <div className="trace-note" style={{ color: '#b91c1c', fontWeight: 600 }}>{r.truncatedNote || t('map.truncated')}</div>}
+    {r.inferredNote && <div className="trace-note"><b>{t('map.inferred')}</b> {r.inferredNote}</div>}
+    {r.caveat && <div className="trace-note">{r.caveat}</div>}
+  </>;
+  const clear = <button className="trace-btn ghost" onClick={onClear}>{t('map.clearTrace')}</button>;
+
+  if (!trace) return <>{btn('section', t('map.traceBtn'), t('map.tracing'))}{btn('upstream', t('map.traceUpBtn'), t('map.tracing'))}{btn('whatif', t('map.simBtn'), t('map.simulating'))}</>;
+  if (trace.found === false) return <><div className="trace-note">{trace.reason}</div>{clear}</>;
+
+  if (trace.kind === 'upstream') return (
+    <div className="trace-box">
+      <h4>{t('map.upTitle')}</h4>
+      {trace.pathFound ? <>
+        <div className="trace-stat">
+          <div><b>{trace.source.hops}</b><span>{t('map.hopsToSs')}</span></div>
+          <div><b>{trace.switchesOnPath.length}</b><span>{t('map.swOnPath')}</span></div>
+        </div>
+        <KV k={t('map.k.ssBus')} v={trace.source.node} mono />
+        <KV k={t('map.k.otherSs')} v={String(trace.alternateSourcesInComponent)} />
+        {trace.switchesOnPath.length > 0 && <div className="trace-note">{trace.switchesOnPath.map((s) => `${s.cim_class} ${s.name || s.cim_mrid}`).join(', ')}</div>}
+        <div className="trace-note">{trace.switchStateNote}</div>
+      </> : <div className="trace-note" style={{ fontWeight: 600 }}>{trace.reason}</div>}
+      <Notes r={trace} />{clear}
+    </div>);
+
+  if (trace.kind === 'whatif') {
+    const dt = trace.distributionTransformers;
+    return (
+      <div className="trace-box sim">
+        <h4>{t('map.simTitle')}</h4>
+        {trace.assumedOpen.filter((d) => !d.effective).map((d) => <div key={d.cim_mrid} className="trace-note" style={{ fontWeight: 600 }}>{d.reason}</div>)}
+        <div className="trace-stat">
+          <div><b>{trace.counts.lostDevices}</b><span>{t('map.lostDevices')}</span></div>
+          <div><b>{dt.count}</b><span>{t('map.distTxs')}</span></div>
+        </div>
+        <KV k={t('map.k.kvaAffected')} v={dt.kvaIsLowerBound ? `≥ ${dt.kvaTotal}` : String(dt.kvaTotal)} mono />
+        <div className="trace-note">{dt.label}</div>
+        <KV k={t('map.k.source')} v={trace.source.mrids.join(', ')} mono />
+        {trace.source.note && <div className="trace-note">{trace.source.note}{trace.source.alternateSourcesInComponent ? t('map.otherSsUnused', { n: trace.source.alternateSourcesInComponent }) : ''}</div>}
+        <div className="trace-note">{trace.assumptions.baseline}</div>
+        <Notes r={trace} />{clear}
+      </div>);
+  }
+
+  return (
+    <div className="trace-box">
+      <h4>{t('map.sectionTrace')}</h4>
+      <div className="trace-stat">
+        <div><b>{trace.sectionEquipment.length}</b><span>{t('map.inSection')}</span></div>
+        <div><b>{trace.boundarySwitches.length}</b><span>{t('map.boundarySw')}</span></div>
+      </div>
+      <KV k={t('map.protection')} v={trace.nearbyProtectionAssets.length ? trace.nearbyProtectionAssets.map((a) => `${a.kind} ${a.name}`).join(', ') : t('map.none')} />
+      {trace.sectionEquipment.length === 1 && trace.boundarySwitches.length === 0 ? (
+        <div className="trace-note">{t('map.selfOnly')}</div>
+      ) : trace.sectionEquipment.length < SMALL_SECTION && (
+        <div className="trace-note">{t('map.smallSection')}</div>)}
+      <Notes r={trace} />{clear}
+    </div>);
+}
 

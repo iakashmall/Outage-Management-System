@@ -3,6 +3,7 @@
 import 'dotenv/config'; // loads .env into process.env
 process.env.PORT = process.env.PORT || '4100'; // so the restoration publisher's mock-DMS URL matches this test server
 import express from 'express';
+import { readFileSync } from 'node:fs';
 import { db, migrate } from './infra/db.js';
 import { seed } from './infra/seed.js';
 import { api, pickIncident } from './routes/api.js';
@@ -491,6 +492,92 @@ const server = app.listen(4100, async () => {
   check('POST /scada/simulate rejects an unknown event (400)', (await j('POST', '/scada/simulate', { tag: 'X.Y', event: 'blink' })).status === 400);
   check('POST /scada/fault still ingests for system_admin (202)', (await j('POST', '/scada/fault', { tag: 'ZZ.FDR1.CB1.MINOR', condition: 'MINOR' })).status === 202);
   if (savedSimFlag === undefined) delete process.env.ENABLE_SCADA_SIMULATION; else process.env.ENABLE_SCADA_SIMULATION = savedSimFlag;
+
+  // ---- OMS-05: a SCADA event naming its tripped equipment by mRID ----
+  // Needs PostGIS and network.* (a separate migration, applied here when
+  // missing). Test equipment lives under its own substation/feeder names so
+  // no seeded incident can absorb these events through dedup.
+  const postgis = await db.oneOrNone("SELECT 1 FROM pg_extension WHERE extname = 'postgis'");
+  if (!postgis) {
+    check('equipment link (OMS-05) skipped: no PostGIS on this database', true);
+  } else {
+    if (!(await db.one("SELECT to_regclass('network.conducting_equipment') IS NOT NULL AS ok")).ok) {
+      await db.none(readFileSync(new URL('../../db/migrations/network_topology_schema.sql', import.meta.url), 'utf8'));
+    }
+    await migrate(); // adds incidents_tripped_equipment_id_fkey now that network.* exists
+    // A re-run on the same database starts clean: earlier runs' test incidents are closed.
+    await db.none("UPDATE incidents SET status = 'closed' WHERE substation LIKE 'SELFTEST EQ%' OR zone LIKE 'SELFTEST%'");
+    const addEquipment = async (sub, feeder, mrid, lat, lon) => {
+      await db.none(`INSERT INTO network.substations (cim_mrid, name, code) VALUES ($1, $1, $1) ON CONFLICT (cim_mrid) DO NOTHING`, [sub]);
+      await db.none(`INSERT INTO network.feeders (cim_mrid, name, code, substation_id)
+        VALUES ($1, $1, $1, (SELECT id FROM network.substations WHERE cim_mrid = $2)) ON CONFLICT (cim_mrid) DO NOTHING`, [feeder, sub]);
+      await db.none(`INSERT INTO network.conducting_equipment (cim_mrid, cim_class, name, feeder_id, geog)
+        VALUES ($1, 'Breaker', 'Test CB', (SELECT id FROM network.feeders WHERE cim_mrid = $2),
+          ${lat == null ? 'NULL' : 'public.ST_SetSRID(public.ST_MakePoint($4, $3), 4326)::public.geography'})
+        ON CONFLICT (cim_mrid) DO NOTHING`, [mrid, feeder, lat, lon]);
+      return db.one('SELECT id FROM network.conducting_equipment WHERE cim_mrid = $1', [mrid]);
+    };
+    const eq1 = await addEquipment('SELFTEST EQ1 S/s', 'SELFTEST-EQ1-A', 'SELFTEST:CB-EQ1', 29.95, 78.16);
+    const eq2 = await addEquipment('SELFTEST EQ2 S/s', 'SELFTEST-EQ2-A', 'SELFTEST:CB-EQ2', 29.96, 78.17);
+    const eq3 = await addEquipment('SELFTEST EQ3 S/s', 'SELFTEST-EQ3-A', 'SELFTEST:CB-EQ3', null, null);
+    _resetDedupState();
+    const waitFor = async (fn) => { for (let i = 0; i < 40; i++) { const v = await fn(); if (v) return v; await new Promise((r) => setTimeout(r, 100)); } return null; };
+    const byTag = (tag) => waitFor(() => db.oneOrNone(`SELECT * FROM incidents WHERE trip_tag = $1 OR open_trip_tags ? $1 ORDER BY opened_at DESC LIMIT 1`, [tag]));
+    const sameSpot = (incId, table = 'incidents') => db.one(
+      `SELECT public.ST_Distance(x.geog, ce.geog) AS m FROM ${table} x, network.conducting_equipment ce WHERE x.id = $1 AND ce.cim_mrid = 'SELFTEST:CB-EQ1'`, [incId]);
+
+    // 1) /scada/fault WITH cim_mrid: the equipment wins over the event's own (deliberately wrong) lat/lon.
+    const f1 = await j('POST', '/scada/fault', { tag: 'SELFTEST.EQ1.CB1.TRIP', cim_mrid: 'SELFTEST:CB-EQ1', lat: 10, lon: 10, customers: 300 });
+    const i1 = f1.status === 202 && await byTag('SELFTEST.EQ1.CB1.TRIP');
+    check('scada/fault with cim_mrid -> incident linked to that equipment', !!i1 && Number(i1.tripped_equipment_id) === Number(eq1.id), i1 && `${i1.id} -> ${i1.tripped_equipment_id}`);
+    check('... its location is the equipment\'s own point, not the event\'s lat/lon',
+      !!i1 && Math.abs(i1.lat - 29.95) < 1e-9 && Math.abs(i1.lon - 78.16) < 1e-9 && (await sameSpot(i1.id)).m < 0.01, i1 && `${i1.lat},${i1.lon}`);
+    check('... feeder and substation from the equipment\'s network.* hierarchy',
+      !!i1 && i1.feeder === 'SELFTEST-EQ1-A' && i1.substation === 'SELFTEST EQ1 S/s', i1 && `${i1.feeder} / ${i1.substation}`);
+    check('... timeline names the tripped equipment',
+      !!i1 && (await repo.incidentEvents(i1.id)).some((e) => e.note.startsWith('Tripped equipment: Breaker Test CB (SELFTEST:CB-EQ1)')));
+    const a1 = i1 && await j('POST', `/incidents/${i1.id}/assign`, { crewId: 'C003' });
+    const job1 = a1?.body?.job;
+    check('a job for it carries the incident\'s geog', !!job1 && (await sameSpot(job1.id, 'jobs')).m < 0.01, job1?.id);
+
+    // 2) Regression: WITHOUT cim_mrid nothing changes -- tag-parsed feeder/substation, no location, no link.
+    const f2 = await j('POST', '/scada/fault', { tag: 'SELFTESTNO.FDRX.CB1.TRIP' });
+    const i2 = f2.status === 202 && await byTag('SELFTESTNO.FDRX.CB1.TRIP');
+    check('scada/fault without cim_mrid: exactly as before (tag hierarchy, no location, no link)',
+      !!i2 && i2.feeder === 'SELFTESTNO.FDRX' && i2.substation === 'SELFTESTNO' && i2.lat == null && i2.lon == null
+      && i2.geog == null && i2.tripped_equipment_id == null, i2 && `${i2.feeder} ${i2.lat} ${i2.tripped_equipment_id}`);
+    const a2 = i2 && await j('POST', `/incidents/${i2.id}/assign`, { crewId: 'C005' });
+    check('... and its job has no geog either', !!a2?.body?.job && (await db.one('SELECT geog FROM jobs WHERE id = $1', [a2.body.job.id])).geog == null);
+    // GET /incidents/:id (the dashboard drawer) names the tripped equipment only when linked.
+    const g1 = i1 && (await j('GET', `/incidents/${i1.id}`)).body;
+    const g2 = i2 && (await j('GET', `/incidents/${i2.id}`)).body;
+    check('GET /incidents/:id: tripped_equipment {name, cim_mrid} when linked, absent when not',
+      g1?.tripped_equipment?.name === 'Test CB' && g1.tripped_equipment.cim_mrid === 'SELFTEST:CB-EQ1'
+      && !!g2 && !('tripped_equipment' in g2), JSON.stringify(g1?.tripped_equipment));
+
+    // 3) An mRID not in network.*: reported, and located as if no mRID had been sent.
+    const f3 = await j('POST', '/scada/fault', { tag: 'SELFTESTUNK.FDRY.CB1.TRIP', cim_mrid: 'SELFTEST:NO-SUCH-DEVICE' });
+    const i3 = f3.status === 202 && await byTag('SELFTESTUNK.FDRY.CB1.TRIP');
+    check('unknown cim_mrid: no link, tag location, and the timeline says so',
+      !!i3 && i3.tripped_equipment_id == null && i3.feeder === 'SELFTESTUNK.FDRY' && i3.geog == null
+      && (await repo.incidentEvents(i3.id)).some((e) => e.note.startsWith('Equipment SELFTEST:NO-SUCH-DEVICE is not in the network model')));
+
+    // 4) Equipment with no position: linked, but no invented point.
+    const i4 = (await handleScadaEvent({ tag: 'SELFTESTPOS.X.CB1.TRIP', cim_mrid: 'SELFTEST:CB-EQ3', condition: 'CRITICAL' }))?.incidentId;
+    const inc4 = i4 && await repo.incident(i4);
+    check('equipment without a position: linked, no location invented',
+      !!inc4 && Number(inc4.tripped_equipment_id) === Number(eq3.id) && inc4.lat == null && inc4.geog == null && inc4.substation === 'SELFTEST EQ3 S/s');
+
+    // 5) A tag-only incident is linked when a later event on the same feeder names its equipment.
+    const first = await handleScadaEvent({ tag: 'SELFTESTB.X.CB1.TRIP', feeder: 'SELFTEST-EQ2-A', substation: 'SELFTEST EQ2 S/s', condition: 'CRITICAL' });
+    const before = first && await repo.incident(first.incidentId);
+    const second = await handleScadaEvent({ tag: 'SELFTESTB.X.CB2.TRIP', cim_mrid: 'SELFTEST:CB-EQ2', condition: 'CRITICAL' });
+    const after = first && await repo.incident(first.incidentId);
+    check('a later event naming the equipment links the tag-only incident it joins',
+      !!before && before.tripped_equipment_id == null && before.lat == null && second?.deduplicated === true && second.incidentId === first.incidentId
+      && Number(after.tripped_equipment_id) === Number(eq2.id) && Math.abs(after.lat - 29.96) < 1e-9 && after.geog != null,
+      after && `${after.tripped_equipment_id} ${after.lat},${after.lon}`);
+  }
 
   console.log('\n  OMS backend self-test\n  ' + '-'.repeat(40));
   results.forEach(([s, n, e]) => console.log(`  [${s}] ${n} ${e}`));
