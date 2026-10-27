@@ -25,6 +25,8 @@ const hav = (a, b) => { const R = 6371, dLat = (b[0] - a[0]) * Math.PI / 180, dL
 // compass bearing a→b in degrees (0 = north), for pointing the crew arrow
 const bearing = (a, b) => { const r = Math.PI / 180, y = Math.sin((b.lng - a.lng) * r) * Math.cos(b.lat * r), x = Math.cos(a.lat * r) * Math.sin(b.lat * r) - Math.sin(a.lat * r) * Math.cos(b.lat * r) * Math.cos((b.lng - a.lng) * r); return (Math.atan2(y, x) / r + 360) % 360; };
 const clean = (n) => (n || '').replace(/33\/11 kV/i, '').replace(/S\/s/i, '').trim();
+// search: placeholder names in the source data ("0", "1", blank) count as no name
+const realName = (n) => (n == null || ['', '0', '1'].includes(String(n).trim()) ? null : n);
 
 const LAYER_GROUPS = [
   ['Network', [['htLines', 'HT network', true], ['feeders', 'Feeder lines', true], ['substations', 'Substations', true],
@@ -53,6 +55,7 @@ const SECTION_COLOR = '#ff6a00';
 const SIM_COLOR = '#7c3aed';  // what-if: devices that lose supply (a simulation, never live state)
 const TRACE_MAX_ZOOM = 17;     // fly-to-fit cap for any trace
 const SMALL_SECTION = 10;      // below this, say the section is likely limited by missing connectivity data
+const TWIN_SAME_SPOT_M = 25;   // search: a flat asset this close to its topology twin is the same marker on screen
 // One stable colour per crew for its trail (a crew keeps its colour as its status changes).
 const TRAIL_COLORS = ['#e11d48', '#7c3aed', '#0891b2', '#ca8a04', '#16a34a', '#db2777', '#2563eb', '#ea580c'];
 const trailColor = (id) => { let h = 0; for (let i = 0; i < String(id).length; i++) h = (h * 31 + String(id).charCodeAt(i)) >>> 0; return TRAIL_COLORS[h % TRAIL_COLORS.length]; };
@@ -158,18 +161,37 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
   const searchIndex = useMemo(() => {
     if (!net) return [];
     const out = [];
-    const push = (type, kind, label, ref, sub) => label && out.push({ type, kind, label: String(label), sub, lat: ref.lat, lon: ref.lon, ref });
-    net.substations.forEach((s) => push('Substation', 'ss', clean(s.name) || s.name, s, s.name));
-    net.powerTx.forEach((a) => push('Power Txr', 'ptx', a.name || 'Power transformer', a));
-    net.distTx.forEach((a) => push('DTR', 'dt', a.name || a.id, a, a.feeder));
-    net.switches.forEach((a) => push('Switch', 'switch', a.name || a.id, a));
-    net.rmus.forEach((a) => push('RMU', 'rmu', a.id || a.name, a));
-    net.fuses.forEach((a) => push('Fuse', 'fuse', a.id || a.name, a));
+    // Every topology feature, found by its name or its mRID (Haridwar fuses
+    // have no name). The sub-line carries the mRID so same-named devices can
+    // be told apart; when the label already is the mRID, the class alone.
+    // twins: base mRID (without the importer's #2, #3 suffix) -> entries.
+    const twins = {};
     if (topoOk) topo.features.forEach((f) => {
-      const p = f.properties; if (!p.name || p.name === p.mrid) return; // numeric-only names are not useful to search
+      const p = f.properties;
       const [lo, la] = f.geometry.type === 'Point' ? f.geometry.coordinates : f.geometry.coordinates[0];
-      push('CIM', 'topo', p.name, { ...p, lat: la, lon: lo }, p.cls);
+      const named = realName(p.name) && p.name !== p.mrid;
+      const it = { type: 'CIM', kind: 'topo', label: named ? String(p.name) : p.mrid, mrid: p.mrid,
+        sub: named ? `${p.cls} · ${p.mrid}` : p.cls, lat: la, lon: lo, ref: { ...p, lat: la, lon: lo } };
+      out.push(it);
+      (twins[p.mrid.replace(/#\d+$/, '')] ||= []).push(it);
     });
+    // A flat-layer asset that is also imported topology (mRID = class prefix +
+    // its id) is listed only when it would look different: a name the
+    // topology result does not show, or a visibly different spot on the map.
+    const looksSame = (prefix, a, label) => {
+      const ts = twins[prefix + a.id]; if (!ts) return false;
+      const t = ts.reduce((b, x) => (hav([a.lat, a.lon], [x.lat, x.lon]) < hav([a.lat, a.lon], [b.lat, b.lon]) ? x : b));
+      const sameName = String(label) === String(a.id) || String(label) === t.label;
+      return sameName && hav([a.lat, a.lon], [t.lat, t.lon]) * 1000 < TWIN_SAME_SPOT_M;
+    };
+    const push = (type, kind, label, ref, sub, prefix) => label && !(prefix && looksSame(prefix, ref, label))
+      && out.push({ type, kind, label: String(label), sub, lat: ref.lat, lon: ref.lon, ref });
+    net.substations.forEach((s) => push('Substation', 'ss', clean(s.name) || s.name, s, s.name));
+    net.powerTx.forEach((a) => push('Power Txr', 'ptx', realName(a.name) || 'Power transformer', a, undefined, 'PT:'));
+    net.distTx.forEach((a) => push('DTR', 'dt', realName(a.name) || a.id, a, a.feeder, 'DT:'));
+    net.switches.forEach((a) => push('Switch', 'switch', realName(a.name) || a.id, a, undefined, 'SW:'));
+    net.rmus.forEach((a) => push('RMU', 'rmu', a.id || realName(a.name), a, undefined, 'RMU:'));
+    net.fuses.forEach((a) => push('Fuse', 'fuse', a.id || realName(a.name), a, undefined, 'FUSE:'));
     Object.values(feeders).forEach((f) => out.push({ type: 'Feeder', kind: 'feeder', label: f.name, sub: (f.kv || 11) + ' kV', ref: f }));
     return out;
   }, [net, feeders, topo]); // eslint-disable-line
@@ -187,9 +209,9 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     if (!q) return [];
     const hits = [];
     for (const it of [...liveIndex, ...searchIndex]) {
-      const l = it.label.toLowerCase();
-      const i = l.indexOf(q);
-      if (i !== -1) hits.push({ ...it, starts: i === 0 });
+      const i = it.label.toLowerCase().indexOf(q);
+      const m = i === -1 && it.mrid ? it.mrid.toLowerCase().indexOf(q) : -1; // topology: the mRID too
+      if (i !== -1 || m !== -1) hits.push({ ...it, starts: i === 0 || m === 0 });
     }
     hits.sort((a, b) => (b.starts - a.starts) || ((RANK[a.type] ?? 9) - (RANK[b.type] ?? 9)) || a.label.localeCompare(b.label));
     return hits.slice(0, 30);
@@ -651,6 +673,16 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     const layerKey = { ss: 'substations', ptx: 'powerTx', dt: 'distTx', switch: 'switches', rmu: 'rmus', fuse: 'fuses', feeder: 'feeders', incident: 'incidents', crew: 'crews' }[item.kind];
     if (layerKey && !layers[layerKey]) setLayers((l) => ({ ...l, [layerKey]: true }));
     setQuery(''); setOpenResults(false);
+    // A topology device opens exactly as clicking its marker does (selectTopo:
+    // detail panel with the trace buttons), with its layer switched on.
+    if (item.kind === 'topo') {
+      const k = topoGroupOf(item.ref.cls) === 'topoStruct' ? 'topoStruct' : 'topo';
+      if (!layers[k]) setLayers((l) => ({ ...l, [k]: true }));
+      map.flyTo([item.lat, item.lon], Math.max(map.getZoom(), 16), { duration: 0.6 });
+      highlight(item.lat, item.lon);
+      selectTopo(item.ref, [item.lat, item.lon]);
+      return;
+    }
     if (item.kind === 'feeder') {
       const f = feeders[item.label]; pickFeeder(item.label); highlight(null);
       if (f) map.flyToBounds(L.latLngBounds([f.minLat, f.minLon], [f.maxLat, f.maxLon]).pad(0.25), { maxZoom: 16, duration: 0.6 });
