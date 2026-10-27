@@ -25,7 +25,7 @@ const hav = (a, b) => { const R = 6371, dLat = (b[0] - a[0]) * Math.PI / 180, dL
 // compass bearing a→b in degrees (0 = north), for pointing the crew arrow
 const bearing = (a, b) => { const r = Math.PI / 180, y = Math.sin((b.lng - a.lng) * r) * Math.cos(b.lat * r), x = Math.cos(a.lat * r) * Math.sin(b.lat * r) - Math.sin(a.lat * r) * Math.cos(b.lat * r) * Math.cos((b.lng - a.lng) * r); return (Math.atan2(y, x) / r + 360) % 360; };
 const clean = (n) => (n || '').replace(/33\/11 kV/i, '').replace(/S\/s/i, '').trim();
-// search: placeholder names in the source data ("0", "1", blank) count as no name
+// placeholder names in the source data ("0", "1", blank) count as no name, in search and on the map
 const realName = (n) => (n == null || ['', '0', '1'].includes(String(n).trim()) ? null : n);
 
 const LAYER_GROUPS = [
@@ -56,6 +56,7 @@ const SIM_COLOR = '#7c3aed';  // what-if: devices that lose supply (a simulation
 const TRACE_MAX_ZOOM = 17;     // fly-to-fit cap for any trace
 const SMALL_SECTION = 10;      // below this, say the section is likely limited by missing connectivity data
 const TWIN_SAME_SPOT_M = 25;   // search: a flat asset this close to its topology twin is the same marker on screen
+const STACK_M = 2;             // topology devices closer than this are drawn over each other: a click offers them all
 // One stable colour per crew for its trail (a crew keeps its colour as its status changes).
 const TRAIL_COLORS = ['#e11d48', '#7c3aed', '#0891b2', '#ca8a04', '#16a34a', '#db2777', '#2563eb', '#ea580c'];
 const trailColor = (id) => { let h = 0; for (let i = 0; i < String(id).length; i++) h = (h * 31 + String(id).charCodeAt(i)) >>> 0; return TRAIL_COLORS[h % TRAIL_COLORS.length]; };
@@ -307,9 +308,9 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
 
     net.fuses.forEach((a) => L.circleMarker([a.lat, a.lon], { radius: 2.5, color: '#b98a5e', weight: 0, fillOpacity: 0.85 }).addTo(groups.current.fuses));
     net.rmus.forEach((a) => L.circleMarker([a.lat, a.lon], { radius: 3, color: '#7a9e2e', weight: 0, fillOpacity: 0.9 }).on('click', () => select('rmu', a, 'RMU')).addTo(groups.current.rmus));
-    net.switches.forEach((a) => L.circleMarker([a.lat, a.lon], { radius: 2.8, color: '#8b5cf6', weight: 0, fillOpacity: 0.85 }).on('click', () => select('switch', a, a.name || 'Switch')).addTo(groups.current.switches));
-    net.distTx.forEach((a) => L.circleMarker([a.lat, a.lon], { radius: 3, color: '#3b82f6', weight: 0, fillOpacity: 0.85 }).bindTooltip(a.name || 'DTR').on('click', () => select('dt', a, a.name || 'DTR')).addTo(groups.current.distTx));
-    net.powerTx.forEach((a) => L.marker([a.lat, a.lon], { icon: L.divIcon({ className: '', html: '<div class="mk-ptx"></div>', iconSize: [12, 12] }), title: tt('map.ttPowerTx', { name: a.name || '' }).trim() }).on('click', () => select('ptx', a, a.name || 'Power Txr')).addTo(groups.current.powerTx));
+    net.switches.forEach((a) => L.circleMarker([a.lat, a.lon], { radius: 2.8, color: '#8b5cf6', weight: 0, fillOpacity: 0.85 }).on('click', () => select('switch', a, realName(a.name) || a.id || 'Switch')).addTo(groups.current.switches));
+    net.distTx.forEach((a) => L.circleMarker([a.lat, a.lon], { radius: 3, color: '#3b82f6', weight: 0, fillOpacity: 0.85 }).bindTooltip(realName(a.name) || 'DTR').on('click', () => select('dt', a, realName(a.name) || 'DTR')).addTo(groups.current.distTx));
+    net.powerTx.forEach((a) => L.marker([a.lat, a.lon], { icon: L.divIcon({ className: '', html: '<div class="mk-ptx"></div>', iconSize: [12, 12] }), title: tt('map.ttPowerTx', { name: realName(a.name) || '' }).trim() }).on('click', () => select('ptx', a, realName(a.name) || 'Power Txr')).addTo(groups.current.powerTx));
     net.substations.forEach((s) => L.marker([s.lat, s.lon], { icon: L.divIcon({ className: '', html: `<div class="mk-ss"><span class="mk-ss-d"></span><span class="mk-ss-l">${clean(s.name)}</span></div>`, iconSize: [14, 14], iconAnchor: [7, 7] }), zIndexOffset: 500, title: tt('map.ttSubstation', { name: clean(s.name) }) }).on('click', () => select('ss', s, s.name)).addTo(groups.current.substations));
 
     groups.current.incidents = mk();
@@ -340,7 +341,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
         // wide invisible line so a thin cable is easy to click, thin visible line on top
         const hit = L.polyline(latlngs, { color: '#0e7490', weight: 14, opacity: 0, interactive: true });
         hit.on('click', () => selectTopo(p, latlngs[0]));
-        hit.bindTooltip(`${p.cls} · ${p.name || p.mrid}`, { sticky: true });
+        hit.bindTooltip(`${p.cls} · ${realName(p.name) || p.mrid}`, { sticky: true });
         hit.addTo(grp);
         const pl = L.polyline(latlngs, { ...base, interactive: false }).addTo(grp);
         topoIdx.current[p.mrid] = { layer: pl, isLine: true, base, latlng: latlngs[0] };
@@ -350,10 +351,10 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
         const st = TOPO_STYLE[p.cls] || { color: '#6b7a90', r: 3.5 };
         const base = { radius: st.r, color: '#ffffff', weight: 1.4, fillColor: st.color, fillOpacity: 0.95, opacity: 1 };
         const m = L.circleMarker([la, lo], base);
-        m.bindTooltip(`${p.cls} · ${p.name || p.mrid}`);
-        m.on('click', () => selectTopo(p, [la, lo]));
+        m.bindTooltip(`${p.cls} · ${realName(p.name) || p.mrid}`);
+        m.on('click', () => pickTopoAt(p, [la, lo]));
         m.addTo(grp);
-        topoIdx.current[p.mrid] = { layer: m, isLine: false, base, latlng: [la, lo] };
+        topoIdx.current[p.mrid] = { layer: m, isLine: false, base, latlng: [la, lo], p };
       }
     });
     map.__topoBounds = bounds.isValid() ? bounds : null;
@@ -374,14 +375,14 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
       if (!trace.pathFound) return null;
       const eq = trace.path.filter((p) => p.type === 'equipment').map((p) => p.cim_mrid);
       return { hit: new Set(eq), color: SECTION_COLOR, origin: trace.origin.cim_mrid, originTip: tt('map.ttTraced'),
-        marks: trace.switchesOnPath.map((s) => [s.cim_mrid, tt('map.ttSwitchOnPath', { cls: s.cim_class, name: s.name || s.cim_mrid })]) };
+        marks: trace.switchesOnPath.map((s) => [s.cim_mrid, tt('map.ttSwitchOnPath', { cls: s.cim_class, name: realName(s.name) || s.cim_mrid })]) };
     }
     if (trace.kind === 'whatif') {
       const opened = trace.assumedOpen[0]?.cim_mrid;
       return { hit: new Set(trace.lostSupply.map((e) => e.cim_mrid)), color: SIM_COLOR, origin: opened, originTip: tt('map.ttSimOpen'), marks: [] };
     }
     return { hit: new Set(trace.sectionEquipment.map((e) => e.cim_mrid)), color: SECTION_COLOR, origin: trace.origin.cim_mrid, originTip: tt('map.ttOrigin'),
-      marks: trace.boundarySwitches.map((b) => [b.cim_mrid, tt('map.ttBoundary', { cls: b.cim_class, name: b.name || b.cim_mrid })]) };
+      marks: trace.boundarySwitches.map((b) => [b.cim_mrid, tt('map.ttBoundary', { cls: b.cim_class, name: realName(b.name) || b.cim_mrid })]) };
   }, [trace, lang]); // lang: the tooltips are translated
   useEffect(() => {
     const map = mapRef.current; if (!map || !groups.current.topoBuilt) return;
@@ -620,7 +621,20 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
   }, [selFeeder]);
 
   function select(kind, obj, label) { setTrace(null); setSel({ kind, label, ...obj }); if (kind !== 'feeder') setSelFeeder(null); }
-  function selectTopo(p, latlng) { setTrace(null); setSel({ kind: 'topo', label: p.name || p.mrid, ...p, lat: latlng[0], lon: latlng[1] }); setSelFeeder(null); }
+  function selectTopo(p, latlng) { setTrace(null); setSel({ kind: 'topo', label: realName(p.name) || p.mrid, ...p, lat: latlng[0], lon: latlng[1] }); setSelFeeder(null); }
+  // A click on a topology device that shares its spot with others (in the GIS data a switch
+  // or fuse is often recorded on the same pole as its transformer, so only the top dot can be
+  // clicked): list every visible device there and let the user pick, instead of guessing.
+  function pickTopoAt(p, latlng) {
+    const map = mapRef.current, here = L.latLng(latlng);
+    const stacked = Object.values(topoIdx.current)
+      .filter((x) => !x.isLine && map && map.hasLayer(x.layer) && here.distanceTo(x.latlng) <= STACK_M)
+      .map((x) => x.p)
+      .sort((a, b) => a.cls.localeCompare(b.cls) || a.mrid.localeCompare(b.mrid));
+    if (stacked.length < 2) return selectTopo(p, latlng);
+    setTrace(null); setSelFeeder(null);
+    setSel({ kind: 'topoStack', label: tt('map.stackTitle', { n: stacked.length }), items: stacked, lat: latlng[0], lon: latlng[1] });
+  }
   // kind: 'section' (Trace electrical section), 'upstream' (Trace to source),
   // 'whatif' (Simulate opening). The result is kept with its kind and the
   // device it was run for (trace.for), so the card shows it only for that device.
@@ -851,10 +865,18 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
                 {sel.kind === 'rmu' && <><span className="chip chip-soft">{t('map.rmu')}</span><KV k={t('map.k.id')} v={sel.id} mono /><KV k={t('map.k.status')} v={sel.status} /></>}
                 {sel.kind === 'topo' && <>
                   <span className="chip chip-soft">{sel.cls} · CIM</span>
-                  <KV k="mRID" v={sel.mrid} mono /><KV k={t('map.k.name')} v={sel.name} /><KV k={t('map.k.feeder')} v={sel.feeder} />
+                  <KV k="mRID" v={sel.mrid} mono /><KV k={t('map.k.name')} v={realName(sel.name)} /><KV k={t('map.k.feeder')} v={sel.feeder} />
                   <KV k={t('map.k.ratedV')} v={sel.ratedVoltage ? (Number(sel.ratedVoltage) / 1000) + ' kV' : null} />
                   <TraceCard trace={trace && trace.for === sel.mrid ? trace : null} busy={traceBusy}
                     onRun={(kind) => runTrace(sel.mrid, kind)} onClear={() => setTrace(null)} />
+                </>}
+                {sel.kind === 'topoStack' && <>
+                  <div className="trace-note" style={{ marginTop: 0 }}>{t('map.stackNote', { m: STACK_M })}</div>
+                  {sel.items.map((it) => (
+                    <button key={it.mrid} className="trace-btn ghost" style={{ textAlign: 'left' }}
+                      onClick={() => selectTopo(it, topoIdx.current[it.mrid]?.latlng || [sel.lat, sel.lon])}>
+                      {it.cls}{realName(it.name) && it.name !== it.mrid ? ` · ${it.name}` : ''}<br /><span className="mono" style={{ fontWeight: 400, fontSize: 11 }}>{it.mrid}</span>
+                    </button>))}
                 </>}
                 {sel.kind === 'scan' && <><span className="chip chip-soft">{t('map.scanChip')}</span><KV k={t('map.k.asset')} v={sel.asset_id || sel.raw_value} mono /><KV k={t('map.k.crew')} v={sel.crew_id} mono /><KV k={t('map.k.job')} v={sel.job_id} mono /><KV k={t('map.k.incident')} v={sel.incident_id} mono />
                   <KV k={t('map.k.scanned')} v={sel.scanned_at ? new Date(sel.scanned_at).toLocaleString() : '—'} /><KV k={t('map.k.latlon')} v={`${Number(sel.lat).toFixed(6)}, ${Number(sel.lon).toFixed(6)}`} mono /></>}
@@ -950,7 +972,7 @@ function TraceCard({ trace, busy, onRun, onClear }) {
         </div>
         <KV k={t('map.k.ssBus')} v={trace.source.node} mono />
         <KV k={t('map.k.otherSs')} v={String(trace.alternateSourcesInComponent)} />
-        {trace.switchesOnPath.length > 0 && <div className="trace-note">{trace.switchesOnPath.map((s) => `${s.cim_class} ${s.name || s.cim_mrid}`).join(', ')}</div>}
+        {trace.switchesOnPath.length > 0 && <div className="trace-note">{trace.switchesOnPath.map((s) => `${s.cim_class} ${realName(s.name) || s.cim_mrid}`).join(', ')}</div>}
         <div className="trace-note">{trace.switchStateNote}</div>
       </> : <div className="trace-note" style={{ fontWeight: 600 }}>{trace.reason}</div>}
       <Notes r={trace} />{clear}

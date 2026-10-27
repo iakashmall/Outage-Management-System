@@ -186,6 +186,9 @@ export const en = {
   'map.k.source': 'Source',
   'map.otherSsUnused': ' {n} other substation(s) are reachable in this component and are not used.',
   'map.smallSection': 'A section this small is likely limited by missing connectivity data, not by the network itself.',
+  // stacked topology devices: one click, a list to pick from
+  'map.stackTitle': '{n} devices at this spot',
+  'map.stackNote': 'These devices are within {m} m of each other in the network data, so they are drawn on top of one another. Pick one:',
 };
 
 export const hi = {
@@ -375,4 +378,7 @@ export const hi = {
   'map.k.source': 'स्रोत',
   'map.otherSsUnused': ' इस हिस्से में {n} अन्य उपकेंद्र पहुँच में हैं, जिनका उपयोग नहीं किया गया।',
   'map.smallSection': 'इतना छोटा सेक्शन संभवतः कनेक्टिविटी डेटा की कमी के कारण है, नेटवर्क के कारण नहीं।',
+  // एक ही जगह पर कई टोपोलॉजी उपकरण
+  'map.stackTitle': 'इस जगह पर {n} उपकरण',
+  'map.stackNote': 'नेटवर्क डेटा में ये उपकरण एक-दूसरे से {m} मीटर के भीतर हैं, इसलिए ये एक के ऊपर एक दिखते हैं। एक चुनें:',
 };
