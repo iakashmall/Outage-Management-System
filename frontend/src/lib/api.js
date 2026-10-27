@@ -114,6 +114,8 @@ export const api = {
   networkTopology: () => req('GET', '/network/topology'),
   mapRegions: () => req('GET', '/map/regions'),   // regions the OMS can cut out of the in-house map
   networkSection: (mrid) => req('GET', `/network/section/${encodeURIComponent(mrid)}`),
+  networkUpstream: (mrid) => req('GET', `/network/upstream/${encodeURIComponent(mrid)}`), // OMS-05: path to the nearest substation
+  networkWhatIf: (body) => req('POST', '/network/whatif', body),                               // OMS-05: { assumedOpen, sourceMrid? }
   
   network: () => req('GET', '/network'),
   complaints: () => req('GET', '/complaints'),

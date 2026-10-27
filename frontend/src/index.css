@@ -992,3 +992,6 @@ button.kh-more:hover{text-decoration:underline}
 
 /* Visually hidden, still read by screen readers (chart data tables). */
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+/* OMS-05 what-if: a simulation, never live state */
+.trace-box.sim{background:#f5f3ff;border-color:#c4b5fd}.trace-box.sim h4{color:#5b21b6}
+.sim-banner{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:1000;background:#5b21b6;color:#fff;font-weight:700;font-size:13px;padding:7px 14px;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.25);pointer-events:none}

@@ -16,6 +16,7 @@ import { sendReportNow } from '../realtime/scheduledReports.js';
 import { resolve as resolveAsset, substations as netSubstations } from '../infra/geo.js';
 import { cacheGet, cacheSet, cacheDel } from '../infra/redis.js';
 import { traceSection } from '../domain/sectionalize.js';
+import { traceUpstream, simulateOpen } from '../domain/supplyTrace.js';
 import { topologyGeoJSON } from '../domain/topology.js';
 import { decodePhotoDataUrl, compressPhoto, PHOTO_STAGES } from '../domain/photos.js';
 import { siteCheck } from '../domain/geofence.js';
@@ -140,6 +141,20 @@ api.get('/network/section/:cimMrid', async (req, res) => {
   const result = await traceSection(req.params.cimMrid);
   if (!result.found) return res.status(404).json(result);
   res.json(result);
+});
+// OMS-05: path from a device to the nearest substation bus node. A device
+// with no such path gets 200 with pathFound: false -- a finding, not an error.
+api.get('/network/upstream/:cimMrid', async (req, res) => {
+  const result = await traceUpstream(req.params.cimMrid);
+  if (!result.found) return res.status(404).json(result);
+  res.json(result);
+});
+// OMS-05: what-if -- { assumedOpen: [mRID...], sourceMrid? }. A simulation
+// on the network model, never live state; changes nothing.
+api.post('/network/whatif', async (req, res) => {
+  const out = await simulateOpen(req.body || {});
+  if (out.error) return res.status(out.error.status).json(out.error);
+  res.json(out);
 });
 
 // ---------- incidents ----------

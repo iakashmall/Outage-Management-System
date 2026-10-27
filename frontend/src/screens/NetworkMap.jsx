@@ -46,6 +46,9 @@ const TOPO_STYLE = {
 };
 const topoGroupOf = (cls) => (cls === 'ACLineSegment' ? 'topoLines' : ['Structure', 'Junction', 'Meter'].includes(cls) ? 'topoStruct' : 'topoEquip');
 const SECTION_COLOR = '#ff6a00';
+const SIM_COLOR = '#7c3aed';  // what-if: devices that lose supply (a simulation, never live state)
+const TRACE_MAX_ZOOM = 17;     // fly-to-fit cap for any trace
+const SMALL_SECTION = 10;      // below this, say the section is likely limited by missing connectivity data
 // One stable colour per crew for its trail (a crew keeps its colour as its status changes).
 const TRAIL_COLORS = ['#e11d48', '#7c3aed', '#0891b2', '#ca8a04', '#16a34a', '#db2777', '#2563eb', '#ea580c'];
 const trailColor = (id) => { let h = 0; for (let i = 0; i < String(id).length; i++) h = (h * 31 + String(id).charCodeAt(i)) >>> 0; return TRAIL_COLORS[h % TRAIL_COLORS.length]; };
@@ -327,31 +330,50 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     ['topo', 'topoStruct'].forEach((k) => { if (layers[k]) groups.current[k].addTo(map); });
   }, [ready, topo]); // eslint-disable-line
 
-  // section trace: highlight the electrical section, mark the origin and boundary switches, dim the rest
+  // Trace highlight, one effect for the three trace kinds (trace.kind):
+  //   section  -- the electrical section, origin and boundary switches
+  //   upstream -- the path to the nearest substation, switches on it marked
+  //   whatif   -- the devices that lose supply (in SIM_COLOR), the opened device
+  // Everything else is dimmed.
+  const traceView = useMemo(() => {
+    if (!trace || trace.found === false || trace.error) return null;
+    if (trace.kind === 'upstream') {
+      if (!trace.pathFound) return null;
+      const eq = trace.path.filter((p) => p.type === 'equipment').map((p) => p.cim_mrid);
+      return { hit: new Set(eq), color: SECTION_COLOR, origin: trace.origin.cim_mrid, originTip: 'Traced from here',
+        marks: trace.switchesOnPath.map((s) => [s.cim_mrid, `Switch on path · ${s.cim_class} ${s.name || s.cim_mrid} · state unknown`]) };
+    }
+    if (trace.kind === 'whatif') {
+      const opened = trace.assumedOpen[0]?.cim_mrid;
+      return { hit: new Set(trace.lostSupply.map((e) => e.cim_mrid)), color: SIM_COLOR, origin: opened, originTip: 'Simulated open', marks: [] };
+    }
+    return { hit: new Set(trace.sectionEquipment.map((e) => e.cim_mrid)), color: SECTION_COLOR, origin: trace.origin.cim_mrid, originTip: 'Trace origin',
+      marks: trace.boundarySwitches.map((b) => [b.cim_mrid, `Boundary · ${b.cim_class} ${b.name || b.cim_mrid}`]) };
+  }, [trace]);
   useEffect(() => {
     const map = mapRef.current; if (!map || !groups.current.topoBuilt) return;
     if (traceLayer.current) { map.removeLayer(traceLayer.current); traceLayer.current = null; }
     const idx = topoIdx.current;
-    const active = !!(trace && trace.found);
-    const inSection = new Set(active ? trace.sectionEquipment.map((e) => e.cim_mrid) : []);
-    const bound = new Set(active ? trace.boundarySwitches.map((e) => e.cim_mrid) : []);
+    const v = traceView;
+    const marked = new Set(v ? v.marks.map(([m]) => m) : []);
     Object.entries(idx).forEach(([mrid, t]) => {
-      if (!active) { t.layer.setStyle(t.base); return; }
-      const hit = inSection.has(mrid) || bound.has(mrid) || mrid === trace.origin.cim_mrid;
-      if (t.isLine) t.layer.setStyle(hit ? { color: SECTION_COLOR, weight: 6, opacity: 1 } : { ...t.base, opacity: 0.2 });
-      else t.layer.setStyle(hit ? { ...t.base, fillColor: SECTION_COLOR, radius: t.base.radius + 2, fillOpacity: 1 } : { ...t.base, fillOpacity: 0.2, opacity: 0.3 });
+      if (!v) { t.layer.setStyle(t.base); return; }
+      const hit = v.hit.has(mrid) || marked.has(mrid) || mrid === v.origin;
+      if (t.isLine) t.layer.setStyle(hit ? { color: v.color, weight: 6, opacity: 1 } : { ...t.base, opacity: 0.2 });
+      else t.layer.setStyle(hit ? { ...t.base, fillColor: v.color, radius: t.base.radius + 2, fillOpacity: 1 } : { ...t.base, fillOpacity: 0.2, opacity: 0.3 });
       if (hit && t.layer.bringToFront) t.layer.bringToFront();
     });
-    if (!active) return;
+    if (!v) return;
     const g = L.layerGroup();
     const mkIcon = (cls, size) => L.divIcon({ className: '', html: `<div class="${cls}"></div>`, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
-    const o = idx[trace.origin.cim_mrid];
-    if (o) L.marker(o.latlng, { icon: mkIcon('mk-origin', 22), zIndexOffset: 3000 }).bindTooltip('Trace origin').addTo(g);
-    trace.boundarySwitches.forEach((b) => { const t = idx[b.cim_mrid]; if (t) L.marker(t.latlng, { icon: mkIcon('mk-bound', 20), zIndexOffset: 2500 }).bindTooltip(`Boundary · ${b.cim_class} ${b.name || b.cim_mrid}`).addTo(g); });
+    const o = idx[v.origin];
+    if (o) L.marker(o.latlng, { icon: mkIcon('mk-origin', 22), zIndexOffset: 3000 }).bindTooltip(v.originTip).addTo(g);
+    v.marks.forEach(([m, tip]) => { const t = idx[m]; if (t) L.marker(t.latlng, { icon: mkIcon('mk-bound', 20), zIndexOffset: 2500 }).bindTooltip(tip).addTo(g); });
     g.addTo(map); traceLayer.current = g;
-    const pts = [...inSection, ...bound, trace.origin.cim_mrid].map((m) => idx[m]).filter(Boolean).flatMap((t) => (t.isLine ? t.layer.getLatLngs() : [t.latlng]));
-    if (pts.length) map.flyToBounds(L.latLngBounds(pts).pad(0.25), { maxZoom: 19, duration: 0.6 });
-  }, [trace, ready, topo]);
+    const pts = [...v.hit, ...marked, v.origin].map((m) => idx[m]).filter(Boolean).flatMap((t) => (t.isLine ? t.layer.getLatLngs() : [t.latlng]));
+    // capped: a tiny section must not zoom in past street level
+    if (pts.length) map.flyToBounds(L.latLngBounds(pts).pad(0.25), { maxZoom: TRACE_MAX_ZOOM, duration: 0.6 });
+  }, [traceView, ready, topo]); // eslint-disable-line
 
   // rebuild incident markers on live updates
   useEffect(() => {
@@ -565,10 +587,17 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
 
   function select(kind, obj, label) { setTrace(null); setSel({ kind, label, ...obj }); if (kind !== 'feeder') setSelFeeder(null); }
   function selectTopo(p, latlng) { setTrace(null); setSel({ kind: 'topo', label: p.name || p.mrid, ...p, lat: latlng[0], lon: latlng[1] }); setSelFeeder(null); }
-  async function runTrace(mrid) {
-    setTraceBusy(true);
-    try { setTrace(await api.networkSection(mrid)); }
-    catch (e) { setTrace({ found: false, reason: e.message || 'Trace failed' }); }
+  // kind: 'section' (Trace electrical section), 'upstream' (Trace to source),
+  // 'whatif' (Simulate opening). The result is kept with its kind and the
+  // device it was run for (trace.for), so the card shows it only for that device.
+  async function runTrace(mrid, kind = 'section') {
+    setTraceBusy(kind);
+    try {
+      const r = kind === 'upstream' ? await api.networkUpstream(mrid)
+        : kind === 'whatif' ? await api.networkWhatIf({ assumedOpen: [mrid] })
+        : await api.networkSection(mrid);
+      setTrace({ ...r, kind, for: mrid });
+    } catch (e) { setTrace({ found: false, kind, for: mrid, reason: e.data?.message || e.data?.reason || e.message || 'Trace failed' }); }
     finally { setTraceBusy(false); }
   }
   // Jump to one imported substation's topology (its bbox from the API), or to
@@ -698,6 +727,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
         </div>
 
         <div className="card map-stage">
+          {trace?.kind === 'whatif' && trace.simulation && <div className="sim-banner" role="status">Simulation - not live state</div>}
           <div ref={boxRef} className="leaflet-host" />
           {basemapDown && (
             <div className="map-basemap-note" role="status">
@@ -781,23 +811,8 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
                   <span className="chip chip-soft">{sel.cls} · CIM</span>
                   <KV k="mRID" v={sel.mrid} mono /><KV k="Name" v={sel.name} /><KV k="Feeder" v={sel.feeder} />
                   <KV k="Rated voltage" v={sel.ratedVoltage ? (Number(sel.ratedVoltage) / 1000) + ' kV' : null} />
-                  {!(trace && trace.found && trace.origin.cim_mrid === sel.mrid) && (
-                    <button className="trace-btn" disabled={traceBusy} onClick={() => runTrace(sel.mrid)}>{traceBusy ? 'Tracing…' : 'Trace electrical section'}</button>)}
-                  {trace && trace.found === false && <div className="trace-note">{trace.reason}</div>}
-                  {trace && trace.found && trace.origin.cim_mrid === sel.mrid && (
-                    <div className="trace-box">
-                      <h4>Section trace</h4>
-                      <div className="trace-stat">
-                        <div><b>{trace.sectionEquipment.length}</b><span>in section</span></div>
-                        <div><b>{trace.boundarySwitches.length}</b><span>boundary switches</span></div>
-                      </div>
-                      <KV k="Protection ≤ 2 km" v={trace.nearbyProtectionAssets.length ? trace.nearbyProtectionAssets.map((a) => `${a.kind} ${a.name}`).join(', ') : 'none'} />
-                      {trace.sectionEquipment.length === 1 && trace.boundarySwitches.length === 0 && (
-                        <div className="trace-note">Nothing else shares this device's connectivity node in the source data, so its section is just itself.</div>)}
-                      {trace.truncated && <div className="trace-note" style={{ color: '#b91c1c', fontWeight: 600 }}>Safety limit reached — the real section may be larger than shown.</div>}
-                      <div className="trace-note">{trace.caveat}</div>
-                      <button className="trace-btn ghost" onClick={() => setTrace(null)}>Clear trace</button>
-                    </div>)}
+                  <TraceCard trace={trace && trace.for === sel.mrid ? trace : null} busy={traceBusy}
+                    onRun={(kind) => runTrace(sel.mrid, kind)} onClear={() => setTrace(null)} />
                 </>}
                 {sel.kind === 'scan' && <><span className="chip chip-soft">Crew QR asset scan</span><KV k="Asset" v={sel.asset_id || sel.raw_value} mono /><KV k="Crew" v={sel.crew_id} mono /><KV k="Job" v={sel.job_id} mono /><KV k="Incident" v={sel.incident_id} mono />
                   <KV k="Scanned" v={sel.scanned_at ? new Date(sel.scanned_at).toLocaleString() : '—'} /><KV k="Lat / Long" v={`${Number(sel.lat).toFixed(6)}, ${Number(sel.lon).toFixed(6)}`} mono /></>}
@@ -870,4 +885,71 @@ function Sym({ shape, color }) {
   if (shape === 'sq') return <span className="lg-sym lg-sq" style={{ background: color }} />;
   if (shape === 'tri') return <span className="lg-sym lg-tri" style={{ borderBottomColor: color }} />;
   return <span className="lg-sym lg-dot" style={{ background: color }} />;
+}
+
+// The trace card in a topology device's detail panel: section trace, trace to
+// source and simulate opening (OMS-05), each with the honesty text its result
+// carries -- switch states unknown, inferred connectivity, simulation not live.
+function TraceCard({ trace, busy, onRun, onClear }) {
+  const btn = (kind, label, busyLabel) => (
+    <button key={kind} className={`trace-btn${kind === 'section' ? '' : ' ghost'}`} disabled={!!busy} onClick={() => onRun(kind)}>{busy === kind ? busyLabel : label}</button>);
+  const Notes = ({ t }) => <>
+    {t.truncated && <div className="trace-note" style={{ color: '#b91c1c', fontWeight: 600 }}>{t.truncatedNote || 'Safety limit reached — the real result may be larger than shown.'}</div>}
+    {t.inferredNote && <div className="trace-note"><b>Inferred:</b> {t.inferredNote}</div>}
+    {t.caveat && <div className="trace-note">{t.caveat}</div>}
+  </>;
+  const clear = <button className="trace-btn ghost" onClick={onClear}>Clear</button>;
+
+  if (!trace) return <>{btn('section', 'Trace electrical section', 'Tracing…')}{btn('upstream', 'Trace to source', 'Tracing…')}{btn('whatif', 'Simulate opening', 'Simulating…')}</>;
+  if (trace.found === false) return <><div className="trace-note">{trace.reason}</div>{clear}</>;
+
+  if (trace.kind === 'upstream') return (
+    <div className="trace-box">
+      <h4>Trace to source</h4>
+      {trace.pathFound ? <>
+        <div className="trace-stat">
+          <div><b>{trace.source.hops}</b><span>hops to substation</span></div>
+          <div><b>{trace.switchesOnPath.length}</b><span>switches on path</span></div>
+        </div>
+        <KV k="Substation bus" v={trace.source.node} mono />
+        <KV k="Other substations reachable" v={String(trace.alternateSourcesInComponent)} />
+        {trace.switchesOnPath.length > 0 && <div className="trace-note">{trace.switchesOnPath.map((s) => `${s.cim_class} ${s.name || s.cim_mrid}`).join(', ')}</div>}
+        <div className="trace-note">{trace.switchStateNote}</div>
+      </> : <div className="trace-note" style={{ fontWeight: 600 }}>{trace.reason}</div>}
+      <Notes t={trace} />{clear}
+    </div>);
+
+  if (trace.kind === 'whatif') {
+    const dt = trace.distributionTransformers;
+    return (
+      <div className="trace-box sim">
+        <h4>Simulate opening · not live state</h4>
+        {trace.assumedOpen.filter((d) => !d.effective).map((d) => <div key={d.cim_mrid} className="trace-note" style={{ fontWeight: 600 }}>{d.reason}</div>)}
+        <div className="trace-stat">
+          <div><b>{trace.counts.lostDevices}</b><span>devices lose supply</span></div>
+          <div><b>{dt.count}</b><span>distribution transformers</span></div>
+        </div>
+        <KV k="kVA affected" v={dt.kvaIsLowerBound ? `≥ ${dt.kvaTotal}` : String(dt.kvaTotal)} mono />
+        <div className="trace-note">{dt.label}</div>
+        <KV k="Source" v={trace.source.mrids.join(', ')} mono />
+        {trace.source.note && <div className="trace-note">{trace.source.note}{trace.source.alternateSourcesInComponent ? ` ${trace.source.alternateSourcesInComponent} other substation(s) are reachable in this component and are not used.` : ''}</div>}
+        <div className="trace-note">{trace.assumptions.baseline}</div>
+        <Notes t={trace} />{clear}
+      </div>);
+  }
+
+  return (
+    <div className="trace-box">
+      <h4>Section trace</h4>
+      <div className="trace-stat">
+        <div><b>{trace.sectionEquipment.length}</b><span>in section</span></div>
+        <div><b>{trace.boundarySwitches.length}</b><span>boundary switches</span></div>
+      </div>
+      <KV k="Protection ≤ 2 km" v={trace.nearbyProtectionAssets.length ? trace.nearbyProtectionAssets.map((a) => `${a.kind} ${a.name}`).join(', ') : 'none'} />
+      {trace.sectionEquipment.length === 1 && trace.boundarySwitches.length === 0 ? (
+        <div className="trace-note">Nothing else shares this device's connectivity node in the source data, so its section is just itself.</div>
+      ) : trace.sectionEquipment.length < SMALL_SECTION && (
+        <div className="trace-note">A section this small is likely limited by missing connectivity data, not by the network itself.</div>)}
+      <Notes t={trace} />{clear}
+    </div>);
 }

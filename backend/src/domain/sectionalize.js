@@ -25,7 +25,10 @@
 // SWITCH_CLASSES is deliberately explicit rather than inferred from a CIM
 // abstract-class hierarchy this codebase doesn't model -- easy to extend
 // when a new switch-like class shows up in a future import.
-const SWITCH_CLASSES = ['Breaker', 'Fuse', 'LoadBreakSwitch', 'ProtectedSwitch', 'Recloser', 'Switch', 'Disconnector', 'Jumper'];
+// The honesty text every trace carries (section trace, and supplyTrace.js).
+export const SECTION_CAVEAT = 'Switch open/closed state is not known (Switch.normalOpen is unpopulated in every source file seen so far) -- switches are reported as section BOUNDARIES, not as confirmed isolation points. No FaultIndicator data exists yet in any imported file.';
+
+export const SWITCH_CLASSES = ['Breaker', 'Fuse', 'LoadBreakSwitch', 'ProtectedSwitch', 'Recloser', 'Switch', 'Disconnector', 'Jumper'];
 
 import { db } from '../infra/db.js';
 import { equipmentByMrid, walk } from './networkGraph.js';
@@ -85,6 +88,6 @@ export async function traceSection(cimMrid, { maxHops = 1000, maxNodes = 20000, 
     boundarySwitches: boundarySwitches.map((r) => ({ cim_mrid: r.cim_mrid, cim_class: r.cim_class, name: r.name, hops: r.depth })),
     nearbyProtectionAssets: nearbyProtection, // [] today -- see module header
     truncated,                                 // true only if a safety limit stopped the walk early
-    caveat: 'Switch open/closed state is not known (Switch.normalOpen is unpopulated in every source file seen so far) -- switches are reported as section BOUNDARIES, not as confirmed isolation points. No FaultIndicator data exists yet in any imported file.',
+    caveat: SECTION_CAVEAT,
   };
 }
