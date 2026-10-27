@@ -723,12 +723,15 @@ export async function migrate() {
     -- incident's geog when the job is created; NULL when that is unknown.
     ALTER TABLE jobs ADD COLUMN IF NOT EXISTS geog public.geography(Point, 4326);
     CREATE INDEX IF NOT EXISTS idx_jobs_geog ON jobs USING GIST (geog);
+  `);
 
-    -- The network equipment that tripped, when the SCADA event named it by
-    -- mRID (OMS-05). The column always exists; its foreign key is added as
-    -- soon as network.* exists -- network_topology_schema.sql is a separate,
-    -- manual migration, so a database without it (CI, a fresh install)
-    -- still migrates, and gets the FK on the first boot after it is applied.
+  // The network equipment that tripped, when the SCADA event named it by
+  // mRID (OMS-05). The column always exists, with or without PostGIS (CI has
+  // none), because createIncident always writes it; its foreign key is added
+  // as soon as network.* exists -- network_topology_schema.sql is a separate,
+  // manual migration, so a database without it (CI, a fresh install) still
+  // migrates, and gets the FK on the first boot after it is applied.
+  await db.none(`
     ALTER TABLE incidents ADD COLUMN IF NOT EXISTS tripped_equipment_id BIGINT;
     DO $$
     BEGIN
