@@ -3,7 +3,7 @@
 // the job's location, by the phone's GPS. The server checks the same rule
 // (backend/src/domain/geofence.js) on the position sent with the update.
 
-export const SITE_RADIUS_M = 100;
+export const SITE_RADIUS_M = 50;
 export const SITE_STATUSES = ["On Site", "Work Started"];
 
 const finite = (n) => typeof n === "number" && Number.isFinite(n);

@@ -490,12 +490,18 @@ function MessagePanel({ incidentId }) {
 
   const load = () => api.messages(incidentId).then(setMsgs).catch(() => setMsgs([]));
   useEffect(() => { load(); }, [incidentId]); // eslint-disable-line
-  // New messages (from the crew app or another operator) appear as they arrive.
+  // New messages (from the crew app or another operator) appear as they
+  // arrive; a socket reconnect reloads whatever was missed while it was down.
   useEffect(() => {
     const h = (m) => { if (m?.incident_id === incidentId) load(); };
     socket.on('oms.message.posted', h);
-    return () => socket.off('oms.message.posted', h);
+    socket.on('connect', load);
+    return () => { socket.off('oms.message.posted', h); socket.off('connect', load); };
   }, [incidentId]); // eslint-disable-line
+  // Keep the newest message in view.
+  const listRef = useRef(null);
+  const lastId = msgs[msgs.length - 1]?.id;
+  useEffect(() => { if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight; }, [lastId]);
 
   const send = async () => {
     if (!text.trim() || busy) return;
@@ -508,7 +514,7 @@ function MessagePanel({ incidentId }) {
   return (
     <div style={{ margin: '20px 0 10px' }}>
       <div className="eyebrow">Crew and dispatcher messages</div>
-      <div style={{ maxHeight: 220, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8, margin: '10px 0' }}>
+      <div ref={listRef} style={{ maxHeight: 220, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8, margin: '10px 0' }}>
         {msgs.length === 0 && <div style={{ fontSize: 13, opacity: 0.6 }}>No messages yet.</div>}
         {msgs.map((m) => (
           <div key={m.id} style={{ background: m.sender_role === 'field_crew' ? '#fff4e0' : '#f2f5f9', borderRadius: 8, padding: '8px 10px', borderLeft: m.sender_role === 'field_crew' ? '3px solid #e08a1e' : 'none' }}>
