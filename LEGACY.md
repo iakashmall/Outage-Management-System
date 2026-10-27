@@ -20,8 +20,10 @@ How to run it against a local stack and install it on a phone:
 
 - `mobile/` is a Vite web PWA for crews (workspace `mobile`), not the
   native app.
-- `mobile-native-fixed/` is an older Expo copy of the crew app with a
-  different EAS project. It is stale; do not build or fix it.
+- `mobile-native-fixed/` (an older Expo copy of the crew app with a
+  different EAS project) was removed on 2026-10-27. An older copy is kept
+  at tag `archive/adeeb-mobile-native-2026-09-02`; the last version is in
+  master commit `1bdf489`.
 - `mobile_backup/` and `mobile_pre_adeeb_merge/` are git-ignored local copies.
 
 ## Legacy prototype
@@ -30,7 +32,9 @@ These root paths are the **original pre-Phase-8 prototype** (the combined
 web crew app and photo upload service; see `INTEGRATION_NOTES.md`), kept
 for reference:
 
-- `server/`
+- `server/` (photo upload service): removed on 2026-10-27. It is not in
+  tag `archive/adeeb-mobile-native-2026-09-02`; the last version is in
+  master commit `1bdf489`.
 - `index.html`
 - `vite.config.js` (the root web build, `src/main.jsx` / `src/App.jsx`)
 

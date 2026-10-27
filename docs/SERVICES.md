@@ -31,7 +31,7 @@ Five things are deployed by the project itself: **backend**, **control-room web 
 | Control-room web app | `frontend/` | React 18, Vite 8, Tailwind 4, shadcn/radix, Leaflet + MapLibre GL, keycloak-js, socket.io-client | 5173 (15173 on this PC) | Operator UI: Dashboard, Incidents, Dispatch, Dispatch workload, Planned outages, Network map, Alarms, TCS, Complaints, Analytics, Admin |
 | **Crew app (APK)** | repo root: `index.js` -> `src/NativeApp.jsx`, `app.json`, `app.config.js`, `eas.json` | Expo 57, React Native 0.86, React 19. Package `com.omscrew.mobile`, name "OMS Crew" | none (client) | Crew jobs, status flow, planned-outage panel, safety checklist, fault diagnosis, parts, QR scan, photos, messages, offline map and routing, background GPS, biometric lock. See section 4 |
 | Crew web PWA | `mobile/` | React 18, Vite, keycloak-js | 5174 | Browser version of the crew app. **Not the APK** (see `LEGACY.md`) |
-| Legacy / stale | `server/`, `mobile-native-fixed/`, `mobile_backup/`, `mobile_pre_adeeb_merge/` | | | Pre-Phase-8 prototype (photo upload server) and old copies. Do not build or fix |
+| Legacy / stale | `mobile_backup/`, `mobile_pre_adeeb_merge/` | | | Old local copies. Do not build or fix. `server/` (prototype photo upload server) and `mobile-native-fixed/` were removed on 2026-10-27 (older crew-app copy at tag `archive/adeeb-mobile-native-2026-09-02`; last versions of both in master commit `1bdf489`) |
 
 ## 3. Infrastructure services (`docker-compose.yml`)
 

@@ -7,8 +7,9 @@ asset scans, background GPS tracking and the offline map pack all go through
 the same authenticated `/api` routes the backend already protects.
 
 The APK is built from the **Expo app at the repo root** (`index.js` →
-`src/NativeApp.jsx`, `app.json`, `eas.json`). `mobile/` is the web PWA and
-`mobile-native-fixed/` is a stale copy; neither is the crew APK (see
+`src/NativeApp.jsx`, `app.json`, `eas.json`). `mobile/` is the web PWA, not
+the crew APK. The stale `mobile-native-fixed/` copy was removed on
+2026-10-27 (older copy at tag `archive/adeeb-mobile-native-2026-09-02`; see
 `LEGACY.md`).
 
 Everything below runs on **one PC** (the "server"). The phone must be on the
