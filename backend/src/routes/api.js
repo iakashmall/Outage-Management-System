@@ -148,12 +148,10 @@ api.get('/incidents', async (req, res) => res.json(await repo.incidents()));
 api.get('/incidents/:id', async (req, res) => {
   const inc = await repo.incident(req.params.id);
   if (!inc) return res.status(404).json({ error: 'not found' });
-  res.json({ ...inc, events: await repo.incidentEvents(inc.id), nextStates: nextStates(inc.status), stateLabels: LABELS });
-});
-api.get('/incidents/:id', async (req, res) => {
-  const inc = await repo.incident(req.params.id);
-  if (!inc) return res.status(404).json({ error: 'not found' });
-  res.json({ ...inc, events: await repo.incidentEvents(inc.id), nextStates: nextStates(inc.status), stateLabels: LABELS });
+  // OMS-05: name the tripped equipment when the incident is linked to one;
+  // the field is absent when there is no link.
+  const tripped = inc.tripped_equipment_id != null ? await repo.trippedEquipment(inc.tripped_equipment_id) : null;
+  res.json({ ...inc, ...(tripped ? { tripped_equipment: tripped } : {}), events: await repo.incidentEvents(inc.id), nextStates: nextStates(inc.status), stateLabels: LABELS });
 });
 
 // List messages for an incident

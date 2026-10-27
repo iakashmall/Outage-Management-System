@@ -65,10 +65,64 @@ function isOutageCondition(condition) {
   return sev === 'critical' || sev === 'high';
 }
 
+// Where a SCADA event happened, most precise first (OMS-05):
+//   1. The event names the tripped equipment by mRID (evt.cim_mrid): that
+//      equipment's own position and its feeder/substation from network.* are
+//      authoritative -- an exact reference, not an inference -- and win over
+//      the event's lat/lon and its tag. If the equipment has no position, the
+//      event's reported lat/lon (or none) is kept: never an invented point.
+//   2. / 3. Otherwise locateFromEvent below, unchanged.
+// The honest limit: without cim_mrid there is still NO precise equipment
+// link, exactly as before. Nothing here guesses a tag -> mRID mapping; that
+// needs a tag dictionary (the SDP's UNS dictionary), which does not exist yet.
+// An mRID that is not in network.* is reported, and the event located as if
+// it had none.
+async function locate(evt) {
+  const base = locateFromEvent(evt);
+  if (!evt.cim_mrid) return { ...base, equipment: null };
+  const eq = await repo.equipmentByMrid(evt.cim_mrid).catch(() => null);
+  if (!eq) return { ...base, equipment: null, unresolvedMrid: evt.cim_mrid };
+  const positioned = eq.lat != null && eq.lon != null;
+  return {
+    ...base,
+    feeder: eq.feeder || base.feeder,
+    substation: eq.substation || base.substation,
+    lat: positioned ? eq.lat : base.lat,
+    lon: positioned ? eq.lon : base.lon,
+    equipment: { id: eq.id, cim_mrid: eq.cim_mrid, cim_class: eq.cim_class, name: eq.name, positioned },
+  };
+}
+
+const equipmentLabel = (e) => `${e.cim_class} ${e.name || e.cim_mrid} (${e.cim_mrid})`;
+
+// Timeline note for how the incident was located (only when an mRID was given).
+function locationNote(loc) {
+  if (loc.equipment) {
+    return `Tripped equipment: ${equipmentLabel(loc.equipment)} - ${loc.equipment.positioned
+      ? 'location from the network model' : 'it has no position in the network model; location as reported by the event'}`;
+  }
+  if (loc.unresolvedMrid) return `Equipment ${loc.unresolvedMrid} is not in the network model - located from the tag/event only, no equipment link`;
+  return null;
+}
+
+// A deduplicated event that names its equipment links the incident it joins,
+// if that incident has no link yet: the equipment's point then replaces a
+// merely reported position (equipment > reported > none). An incident
+// already linked keeps its first equipment.
+async function linkEquipment(incidentId, loc) {
+  if (!loc.equipment) return;
+  const inc = await repo.incident(incidentId);
+  if (!inc || inc.tripped_equipment_id) return;
+  const patch = { tripped_equipment_id: loc.equipment.id };
+  if (loc.equipment.positioned) Object.assign(patch, { lat: loc.lat, lon: loc.lon });
+  await repo.updateIncident(incidentId, patch);
+  await repo.addIncidentEvent(incidentId, 'SCADA', 'field', locationNote(loc));
+}
+
 // Pull lat/lon out of a SCADA event if it carries them; otherwise fall back to
 // resolving from the tag's asset. Real SCADA points are geo-tagged; the
 // simulator's tags aren't, so we tolerate both.
-function locate(evt) {
+function locateFromEvent(evt) {
   if (typeof evt.lat === 'number' && typeof evt.lon === 'number') {
     return { ...resolveAsset(evt.lat, evt.lon), lat: evt.lat, lon: evt.lon };
   }
@@ -221,7 +275,7 @@ export async function handleScadaEvent(evt) {
 
     if (!isOutageCondition(evt.condition)) return null; // recorded, not an outage
 
-    const loc = locate(evt);
+    const loc = await locate(evt);
     const key = assetKey(loc);
     const now = Date.now();
 
@@ -240,6 +294,7 @@ export async function handleScadaEvent(evt) {
       }
       if (evt.id) await repo.updateAlarm(evt.id, { incident_id: recent.incidentId }).catch(() => {});
       await recordTrip(recent.incidentId, evt, loc);
+      await linkEquipment(recent.incidentId, loc);
       recentByAsset.set(key, { incidentId: recent.incidentId, ts: now });
       return { deduplicated: true, incidentId: recent.incidentId };
     }
@@ -257,6 +312,7 @@ export async function handleScadaEvent(evt) {
         }
         if (evt.id) await repo.updateAlarm(evt.id, { incident_id: inc.id }).catch(() => {});
         await recordTrip(inc.id, evt, loc);
+        await linkEquipment(inc.id, loc);
         recentByAsset.set(key, { incidentId: inc.id, ts: now });
         return { deduplicated: true, incidentId: inc.id };
       }
@@ -294,9 +350,12 @@ export async function handleScadaEvent(evt) {
       ert: null,
       sla_due_at: slaDueAt(severity, openedAt),
       source: 'SCADA',
+      tripped_equipment_id: loc.equipment?.id ?? null,
     });
     await repo.addIncidentEvent(id, 'SCADA', 'created',
       `Auto-detected from SCADA ${evt.condition} on ${evt.tag || key} - ${severity} severity, ~${incCustomers} customers`);
+    const where = locationNote(loc);
+    if (where) await repo.addIncidentEvent(id, 'SCADA', 'field', where);
     await repo.audit('SCADA', 'incident.autodetect', id);
     if (evt.id) await repo.updateAlarm(evt.id, { incident_id: id }).catch(() => {});
     if (evt.tag) await repo.addTripTag(id, evt.tag);

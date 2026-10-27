@@ -56,7 +56,11 @@ function needActor(req, res, next) {
 // publish it once with its final status (notifier "restored" message, etc.).
 function publish(out) {
   const o = out.outage;
-  if (!o) return;
+  // A fault incident's own plan (OMS-05) returns `incidentPlan` instead of `outage`.
+  if (!o) {
+    if (out.incidentPlan?.incident && out.transitions?.length) bus.publish(TOPICS.INCIDENT_UPDATED, out.incidentPlan.incident);
+    return;
+  }
   if (out.transitions?.length) bus.publish(TOPICS.INCIDENT_UPDATED, o.incident);
   bus.publish(TOPICS.PLANNED_OUTAGE_UPDATED, {
     id: o.id, incidentId: o.incident_id, status: o.incident.status, planState: o.plan.state, transitions: out.transitions || [],
@@ -214,6 +218,53 @@ r.post('/planned-outages/:id/switching-plan/approve', operator, needActor, async
 
 r.post('/planned-outages/:id/switching-plan/unapprove', operator, needActor, async (req, res) =>
   reply(res, await repo.unapprovePlan(req.params.id, actor(req))));
+
+// ---------- OMS-05: a fault incident's own switching plan ----------
+// Mirrors the four planned-outage plan routes above: same roles, same
+// rules, same safety log (owned by the incident). Step confirmation needs no
+// route of its own: /switching-steps/:id/confirm and its /mobile twin find
+// the step's owner (repo.confirmSwitchingStep). For a fault plan there is no
+// permit gate, and only the last restore step moves the incident -- toward
+// Pending Verification, never to resolved (domain/plannedOutage.js).
+
+r.get('/incidents/:id/switching-plan', controlRoom, async (req, res) => {
+  const view = await repo.incidentSwitchingPlan(req.params.id);
+  if (!view) return res.status(404).json({ code: 'NOT_FOUND', message: 'incident not found' });
+  res.json(view); // plan: null until the first draft
+});
+
+r.get('/incidents/:id/safety-log', controlRoom, async (req, res) => res.json(await repo.incidentSafetyLog(req.params.id)));
+
+// Draft from the network trace around a device on the faulted section. The
+// default crew is the incident's assigned crew (as the planned route uses its
+// outage's incident.crew_id).
+r.post('/incidents/:id/switching-plan/draft', operator, needActor, async (req, res) => {
+  const incident = await repo.incident(req.params.id);
+  if (!incident) return res.status(404).json({ code: 'NOT_FOUND', message: 'incident not found' });
+  const workMrid = req.body?.workMrid;
+  const crewId = req.body?.crewId || incident.crew_id;
+  if (!workMrid) return res.status(400).json({ code: 'BAD_INPUT', message: 'workMrid is required (a device on the faulted section)' });
+  if (!crewId) return res.status(400).json({ code: 'BAD_INPUT', message: 'crewId is required (no crew is assigned to this incident)' });
+  let trace;
+  try {
+    trace = await traceSection(workMrid);
+  } catch (e) {
+    return res.status(409).json({ code: 'NETWORK_UNAVAILABLE', message: `network model not available (${e.message}); build the plan manually` });
+  }
+  if (!trace.found) return res.status(404).json({ code: 'EQUIPMENT_NOT_FOUND', message: trace.reason });
+  // The first save creates the plan, in the same transaction (repo.withPlan).
+  const steps = draftFromTrace(trace, { crewId, workLabel: req.body?.workLabel });
+  reply(res, await repo.replaceIncidentDraftSteps(incident.id, steps, actor(req), { source: 'trace', traceCaveat: trace.caveat }));
+});
+
+r.put('/incidents/:id/switching-plan/steps', operator, needActor, async (req, res) =>
+  reply(res, await repo.replaceIncidentDraftSteps(req.params.id, req.body?.steps, actor(req))));
+
+r.post('/incidents/:id/switching-plan/approve', operator, needActor, async (req, res) =>
+  reply(res, await repo.approveIncidentPlan(req.params.id, actor(req))));
+
+r.post('/incidents/:id/switching-plan/unapprove', operator, needActor, async (req, res) =>
+  reply(res, await repo.unapproveIncidentPlan(req.params.id, actor(req))));
 
 r.post('/planned-outages/:id/notify', operator, needActor, async (req, res) => {
   const skip = req.body?.skip === true;

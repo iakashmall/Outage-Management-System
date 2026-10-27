@@ -50,58 +50,171 @@ function requireActor(actor) {
   if (!actor?.username || !Array.isArray(actor.roles)) throw new Error('planned-outage changes need a verified actor { username, roles, crewId }');
 }
 
-async function logSafety(t, plannedOutageId, actor, { entity, entityId, action, from = null, to = null, details = {}, occurredAt = null }) {
+// owner: a planned-outage id (string), or { incidentId } for a fault
+// incident's own plan (OMS-05) -- exactly one is stored (safety_log_one_owner_check).
+async function logSafety(t, owner, actor, { entity, entityId, action, from = null, to = null, details = {}, occurredAt = null }) {
+  const { plannedOutageId = null, incidentId = null } = typeof owner === 'string' ? { plannedOutageId: owner } : owner;
   await t.none(
-    `INSERT INTO safety_log (id, occurred_at, actor, actor_role, actor_crew_id, planned_outage_id, entity, entity_id, action, from_state, to_state, details)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)`,
+    `INSERT INTO safety_log (id, occurred_at, actor, actor_role, actor_crew_id, planned_outage_id, incident_id, entity, entity_id, action, from_state, to_state, details)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb)`,
     ['SL' + nanoid(10), occurredAt, actor.username, rules.primaryRole(actor), actor.crewId || null,
-      plannedOutageId, entity, entityId, action, from, to, JSON.stringify(details)]
+      plannedOutageId, incidentId, entity, entityId, action, from, to, JSON.stringify(details)]
   );
   // One line in the general audit trail too, so the Admin audit view shows it.
   await t.none('INSERT INTO audit_log (id,ts,actor,action,target) VALUES ($1,$2,$3,$4,$5)',
-    ['AU' + nanoid(8), new Date().toISOString(), actor.username, `oms01.${action}`, `${plannedOutageId}:${entityId}`]);
+    ['AU' + nanoid(8), new Date().toISOString(), actor.username, `oms01.${action}`, `${plannedOutageId || incidentId}:${entityId}`]);
 }
 
-// The only way a planned outage's incident changes status: checked against
-// lifecycle.js, recorded as an incident event and in the safety log.
+// The only way a plan moves its incident's status: checked against
+// lifecycle.js (the planned or the fault table, by the plan's owner),
+// recorded as an incident event and in the safety log.
 async function moveIncident(t, ctx, to, actor, note) {
   const from = ctx.incident.status;
-  if (!canTransition(from, to, true)) throw new Error(`illegal planned-outage transition ${from} -> ${to}`);
+  const planned = !!ctx.po;
+  if (!canTransition(from, to, planned)) throw new Error(`illegal ${planned ? 'planned-outage' : 'incident'} transition ${from} -> ${to}`);
   const patch = { status: to };
   if (to === 'resolved') Object.assign(patch, { resolved_at: new Date().toISOString(), restored_by: 'SWITCHING_PLAN', ert: null });
   await t.none(`UPDATE incidents SET ${setClause(patch)} WHERE id=$/id/`, { ...patch, id: ctx.incident.id });
   await t.none(`INSERT INTO incident_events (id,incident_id,ts,actor,kind,note) VALUES ($1,$2,$3,$4,'status',$5)`,
     ['EV' + nanoid(8), ctx.incident.id, new Date().toISOString(), actor.username, `${LABELS[from]} - ${LABELS[to]}${note ? ' - ' + note : ''}`]);
-  await logSafety(t, ctx.po.id, actor, { entity: 'outage', entityId: ctx.po.id, action: 'outage.transition', from, to, details: { note: note || null } });
+  await logSafety(t, planned ? ctx.po.id : { incidentId: ctx.incident.id }, actor, planned
+    ? { entity: 'outage', entityId: ctx.po.id, action: 'outage.transition', from, to, details: { note: note || null } }
+    : { entity: 'incident', entityId: ctx.incident.id, action: 'incident.transition', from, to, details: { note: note || null } });
   ctx.incident = { ...ctx.incident, ...patch };
   return { from, to };
 }
 
-// Runs one change to a planned outage. `fn(t, ctx)` returns either
+// A fault incident's own switching plan (OMS-05): the same shape of context
+// as loadOutage, minus everything planned-only (no permits on a fault).
+// plan is null until its first successful save creates it (withPlan `create`).
+async function loadIncidentPlan(t, incidentId, { lock = false } = {}) {
+  const incident = await t.oneOrNone('SELECT * FROM incidents WHERE id=$1', [incidentId]);
+  if (!incident) return null;
+  const plan = await t.oneOrNone(`SELECT * FROM switching_plans WHERE incident_id=$1${lock ? ' FOR UPDATE' : ''}`, [incidentId]);
+  const steps = plan ? await t.any(`SELECT * FROM switching_steps WHERE plan_id=$1 ${STEP_ORDER}`, [plan.id]) : [];
+  return { incident, plan, steps, permits: [], owner: 'incident' };
+}
+const incidentPlanView = ({ incident, plan, steps }) => ({ incident, plan, steps });
+
+// Who owns a switching plan, and what that changes: which loader, which
+// safety-log owner, and whether the planned-outage automatic transitions run.
+const PLAN_OWNERS = {
+  planned: { load: loadOutage, logOwner: (ctx) => ctx.po.id, view: (ctx) => ({ outage: outageView(ctx) }), what: 'planned outage', automatic: true },
+  incident: { load: loadIncidentPlan, logOwner: (ctx) => ({ incidentId: ctx.incident.id }), view: (ctx) => ({ incidentPlan: incidentPlanView(ctx) }), what: 'incident', automatic: false },
+};
+
+// Runs one change to a switching plan's owner. `fn(t, ctx)` returns either
 // { reject, entity, entityId, action } (logged as `${action}.rejected`, nothing
-// else changes) or { result }. Afterwards the automatic transitions the plan
-// and permits now imply are applied (notified -> isolating -> in_progress ...).
-async function withOutage(plannedOutageId, actor, fn) {
+// else changes) or { result }. For a planned outage the automatic transitions
+// the plan and permits now imply are then applied (notified -> isolating ->
+// in_progress ...); a fault incident's plan moves its incident only where
+// fn says so (see confirmSwitchingStep). `create` (fault incidents only):
+// { precheck() } -- create the plan if it doesn't exist yet, see below.
+async function withPlan(kind, ownerId, actor, fn, { create = null } = {}) {
   requireActor(actor);
+  const O = PLAN_OWNERS[kind];
   return db.tx(async (t) => {
-    const ctx = await loadOutage(t, plannedOutageId, { lock: true });
-    if (!ctx) return notFound('planned outage');
+    let ctx = await O.load(t, ownerId, { lock: true });
+    if (!ctx) return notFound(O.what);
+    if (!ctx.plan) {
+      if (!create) return { error: { code: 'NO_PLAN', message: 'this incident has no switching plan yet; draft one first', status: 404 } };
+      // A fault incident's plan is created by its first successful save, in
+      // this same transaction, after `create.precheck` has passed: a refused
+      // first save logs its refusal and leaves no plan behind.
+      const refusal = await incidentPlanRefusal(t, ctx);
+      if (refusal) return { error: refusal };
+      const reject = create.precheck();
+      if (reject) {
+        await logSafety(t, O.logOwner(ctx), actor, { entity: 'plan', entityId: ctx.incident.id, action: 'plan.edit.rejected', details: { code: reject.code, message: reject.message } });
+        return { error: { code: reject.code, message: reject.message, status: reject.status } };
+      }
+      const planId = 'SP' + nanoid(8);
+      await t.none('INSERT INTO switching_plans (id, incident_id) VALUES ($1,$2)', [planId, ctx.incident.id]);
+      await logSafety(t, O.logOwner(ctx), actor, { entity: 'plan', entityId: planId, action: 'plan.create', to: 'draft' });
+      ctx = await O.load(t, ownerId, { lock: true });
+    }
     const out = await fn(t, ctx);
     if (out.reject) {
       const { code, message, status } = out.reject;
-      await logSafety(t, ctx.po.id, actor, { entity: out.entity, entityId: out.entityId, action: `${out.action}.rejected`, details: { code, message, ...(out.details || {}) } });
+      await logSafety(t, O.logOwner(ctx), actor, { entity: out.entity, entityId: out.entityId, action: `${out.action}.rejected`, details: { code, message, ...(out.details || {}) } });
       return { error: { code, message, status } };
     }
     const transitions = [...(out.transitions || [])];
-    for (let i = 0; i < 6; i++) {
-      const fresh = await loadOutage(t, plannedOutageId);
+    for (let i = 0; O.automatic && i < 6; i++) {
+      const fresh = await O.load(t, ownerId);
       const to = rules.nextAutomaticStatus(fresh);
       if (!to) break;
       transitions.push(await moveIncident(t, fresh, to, actor, 'automatic'));
     }
-    return { ...out.result, transitions, outage: outageView(await loadOutage(t, plannedOutageId)) };
+    return { ...out.result, transitions, ...O.view(await O.load(t, ownerId)) };
   });
 }
+const withOutage = (plannedOutageId, actor, fn) => withPlan('planned', plannedOutageId, actor, fn);
+
+// Why a fault incident cannot get a switching plan, or null: a planned
+// outage's own incident has its plan on the outage, and a restored, closed
+// or cancelled incident is past switching.
+async function incidentPlanRefusal(t, ctx) {
+  if (await t.oneOrNone('SELECT 1 FROM planned_outages WHERE incident_id=$1', [ctx.incident.id])) {
+    return { code: 'USE_PLANNED_OUTAGE_PLAN', message: 'this incident is a planned outage; use its plan under /planned-outages', status: 409 };
+  }
+  if (['resolved', 'closed', 'cancelled'].includes(ctx.incident.status)) {
+    return { code: 'INCIDENT_NOT_ACTIVE', message: `a switching plan cannot be started on a ${ctx.incident.status} incident`, status: 409 };
+  }
+  return null;
+}
+
+// Draft, approve, unapprove: identical for both owners -- same rules, same
+// safety-log entries, only the owner differs.
+function planOps(kind) {
+  const logOwner = PLAN_OWNERS[kind].logOwner;
+  return {
+    // Replace every step of a draft plan. opts.source/traceCaveat when the
+    // steps were drafted from sectionalize.js (Phase 3).
+    // A fault incident's first save also creates its plan (withPlan `create`),
+    // checked with the same rules first.
+    replaceDraftSteps: (ownerId, steps, actor, { source = 'manual', traceCaveat = null } = {}) =>
+      withPlan(kind, ownerId, actor, async (t, ctx) => {
+        const reject = rules.checkEditPlan({ plan: ctx.plan, actor }) || rules.checkDraftSteps(steps);
+        if (reject) return { reject, entity: 'plan', entityId: ctx.plan.id, action: 'plan.edit' };
+        await t.none('DELETE FROM switching_steps WHERE plan_id=$1', [ctx.plan.id]);
+        for (const s of steps) {
+          await t.none(`INSERT INTO switching_steps (id,plan_id,phase,seq,action,device_mrid,device_label,location,assignee,assignee_crew_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+            ['SS' + nanoid(8), ctx.plan.id, s.phase, s.seq, s.action, s.device_mrid || null, s.device_label, s.location, s.assignee,
+              s.assignee === 'crew' ? s.assignee_crew_id : null]);
+        }
+        await t.none('UPDATE switching_plans SET source=$2, trace_caveat=$3 WHERE id=$1', [ctx.plan.id, source, traceCaveat]);
+        await logSafety(t, logOwner(ctx), actor, { entity: 'plan', entityId: ctx.plan.id, action: 'plan.edit', details: { source, steps } });
+        return { result: {} };
+      }, kind === 'incident'
+        ? { create: { precheck: () => rules.checkEditPlan({ plan: { state: 'draft' }, actor }) || rules.checkDraftSteps(steps) } }
+        : {}),
+
+    // Approval is a named, logged act: the approver takes responsibility for
+    // the order and content of the plan (the trace can't know switch states).
+    approvePlan: (ownerId, actor) =>
+      withPlan(kind, ownerId, actor, async (t, ctx) => {
+        const reject = rules.checkApprovePlan({ plan: ctx.plan, steps: ctx.steps, actor });
+        if (reject) return { reject, entity: 'plan', entityId: ctx.plan.id, action: 'plan.approve' };
+        await t.none("UPDATE switching_plans SET state='approved', approved_by=$2, approved_at=now() WHERE id=$1", [ctx.plan.id, actor.username]);
+        await logSafety(t, logOwner(ctx), actor, { entity: 'plan', entityId: ctx.plan.id, action: 'plan.approve', from: 'draft', to: 'approved',
+          details: { steps: ctx.steps.map(({ phase, seq, action, device_label, location, assignee, assignee_crew_id }) => ({ phase, seq, action, device_label, location, assignee, assignee_crew_id })), traceCaveat: ctx.plan.trace_caveat } });
+        return { result: {} };
+      }),
+
+    unapprovePlan: (ownerId, actor) =>
+      withPlan(kind, ownerId, actor, async (t, ctx) => {
+        const reject = rules.checkUnapprovePlan({ plan: ctx.plan, steps: ctx.steps, actor });
+        if (reject) return { reject, entity: 'plan', entityId: ctx.plan.id, action: 'plan.unapprove' };
+        await t.none("UPDATE switching_plans SET state='draft', approved_by=NULL, approved_at=NULL WHERE id=$1", [ctx.plan.id]);
+        await logSafety(t, logOwner(ctx), actor, { entity: 'plan', entityId: ctx.plan.id, action: 'plan.unapprove', from: 'approved', to: 'draft' });
+        return { result: {} };
+      }),
+  };
+}
+const plannedPlan = planOps('planned');
+const incidentPlan = planOps('incident');
 
 // A client-generated id must not already belong to a different record (a
 // bug or a replay against the wrong item); checked before the UNIQUE
@@ -190,13 +303,37 @@ export const repo = {
       lat = ZONE_COORDS[i.zone][0];
       lon = ZONE_COORDS[i.zone][1];
     }
-    const row = { substation: null, ...i, lat, lon };
+    // tripped_equipment_id: the network.* equipment a SCADA event named by
+    // mRID (OMS-05); geog follows lat/lon through trg_incidents_geog.
+    const row = { substation: null, tripped_equipment_id: null, ...i, lat, lon };
     await db.none(`INSERT INTO incidents
-      (id,type,severity,status,zone,feeder,customers,cause,lat,lon,crew_id,opened_at,ert,sla_due_at,source,substation)
-      VALUES ($/id/,$/type/,$/severity/,$/status/,$/zone/,$/feeder/,$/customers/,$/cause/,$/lat/,$/lon/,$/crew_id/,$/opened_at/,$/ert/,$/sla_due_at/,$/source/,$/substation/)`,
+      (id,type,severity,status,zone,feeder,customers,cause,lat,lon,crew_id,opened_at,ert,sla_due_at,source,substation,tripped_equipment_id)
+      VALUES ($/id/,$/type/,$/severity/,$/status/,$/zone/,$/feeder/,$/customers/,$/cause/,$/lat/,$/lon/,$/crew_id/,$/opened_at/,$/ert/,$/sla_due_at/,$/source/,$/substation/,$/tripped_equipment_id/)`,
       row);
     return repo.incident(i.id);
   },
+  // One network.* equipment row by mRID, with its position and hierarchy
+  // (OMS-05): { id, cim_mrid, cim_class, name, lat, lon, feeder, substation }
+  // or null. feeder is network.feeders.code, substation network.substations.name
+  // -- the same strings incidents.feeder/.substation use. null when network.*
+  // is not installed (a separate migration).
+  equipmentByMrid: async (mrid) => {
+    const ready = await db.one("SELECT to_regclass('network.conducting_equipment') IS NOT NULL AS ok");
+    if (!ready.ok) return null;
+    return db.oneOrNone(
+      `SELECT ce.id, ce.cim_mrid, ce.cim_class, ce.name,
+              public.ST_Y(ce.geog::public.geometry) AS lat, public.ST_X(ce.geog::public.geometry) AS lon,
+              f.code AS feeder, s.name AS substation
+       FROM network.conducting_equipment ce
+       LEFT JOIN network.feeders f ON f.id = ce.feeder_id
+       LEFT JOIN network.substations s ON s.id = f.substation_id
+       WHERE ce.cim_mrid = $1`, [mrid]);
+  },
+  // The equipment a linked incident tripped on (OMS-05), for display:
+  // { name, cim_mrid }. A non-null tripped_equipment_id means network.*
+  // exists (its foreign key), so no to_regclass check is needed here.
+  trippedEquipment: (equipmentId) =>
+    db.oneOrNone('SELECT name, cim_mrid FROM network.conducting_equipment WHERE id = $1', [equipmentId]),
   updateIncident: async (id, patch) => {
     await db.none(`UPDATE incidents SET ${setClause(patch)} WHERE id=$/id/`, { ...patch, id });
     return repo.incident(id);
@@ -420,9 +557,12 @@ export const repo = {
     [incidentId]
   ),
   job: (id) => db.oneOrNone('SELECT * FROM jobs WHERE id=$1', [id]),
+  // The job takes its incident's geog (OMS-05) -- the tripped equipment's own
+  // point, or the position actually reported -- and none when that is unknown.
   createJob: async (j) => {
-    await db.none(`INSERT INTO jobs (id,incident_id,crew_id,priority,status,address,updated_at,estimated_duration_min,required_skill)
-      VALUES ($/id/,$/incident_id/,$/crew_id/,$/priority/,$/status/,$/address/,$/updated_at/,$/estimated_duration_min/,$/required_skill/)`,
+    await db.none(`INSERT INTO jobs (id,incident_id,crew_id,priority,status,address,updated_at,estimated_duration_min,required_skill,geog)
+      VALUES ($/id/,$/incident_id/,$/crew_id/,$/priority/,$/status/,$/address/,$/updated_at/,$/estimated_duration_min/,$/required_skill/,
+        (SELECT geog FROM incidents WHERE id = $/incident_id/))`,
       { estimated_duration_min: null, required_skill: null, ...j });
     return repo.job(j.id);
   },
@@ -852,44 +992,22 @@ export const repo = {
      ORDER BY po.window_start`),
   safetyLog: (plannedOutageId) => db.any('SELECT * FROM safety_log WHERE planned_outage_id=$1 ORDER BY ts, id', [plannedOutageId]),
 
-  // Replace every step of a draft plan. opts.source/traceCaveat when the
-  // steps were drafted from sectionalize.js (Phase 3).
-  replaceDraftSteps: (plannedOutageId, steps, actor, { source = 'manual', traceCaveat = null } = {}) =>
-    withOutage(plannedOutageId, actor, async (t, ctx) => {
-      const reject = rules.checkEditPlan({ plan: ctx.plan, actor }) || rules.checkDraftSteps(steps);
-      if (reject) return { reject, entity: 'plan', entityId: ctx.plan.id, action: 'plan.edit' };
-      await t.none('DELETE FROM switching_steps WHERE plan_id=$1', [ctx.plan.id]);
-      for (const s of steps) {
-        await t.none(`INSERT INTO switching_steps (id,plan_id,phase,seq,action,device_mrid,device_label,location,assignee,assignee_crew_id)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-          ['SS' + nanoid(8), ctx.plan.id, s.phase, s.seq, s.action, s.device_mrid || null, s.device_label, s.location, s.assignee,
-            s.assignee === 'crew' ? s.assignee_crew_id : null]);
-      }
-      await t.none('UPDATE switching_plans SET source=$2, trace_caveat=$3 WHERE id=$1', [ctx.plan.id, source, traceCaveat]);
-      await logSafety(t, ctx.po.id, actor, { entity: 'plan', entityId: ctx.plan.id, action: 'plan.edit', details: { source, steps } });
-      return { result: {} };
-    }),
+  // Draft, approve and unapprove a planned outage's plan (planOps above).
+  replaceDraftSteps: plannedPlan.replaceDraftSteps,
+  approvePlan: plannedPlan.approvePlan,
+  unapprovePlan: plannedPlan.unapprovePlan,
 
-  // Approval is a named, logged act: the approver takes responsibility for
-  // the order and content of the plan (the trace can't know switch states).
-  approvePlan: (plannedOutageId, actor) =>
-    withOutage(plannedOutageId, actor, async (t, ctx) => {
-      const reject = rules.checkApprovePlan({ plan: ctx.plan, steps: ctx.steps, actor });
-      if (reject) return { reject, entity: 'plan', entityId: ctx.plan.id, action: 'plan.approve' };
-      await t.none("UPDATE switching_plans SET state='approved', approved_by=$2, approved_at=now() WHERE id=$1", [ctx.plan.id, actor.username]);
-      await logSafety(t, ctx.po.id, actor, { entity: 'plan', entityId: ctx.plan.id, action: 'plan.approve', from: 'draft', to: 'approved',
-        details: { steps: ctx.steps.map(({ phase, seq, action, device_label, location, assignee, assignee_crew_id }) => ({ phase, seq, action, device_label, location, assignee, assignee_crew_id })), traceCaveat: ctx.plan.trace_caveat } });
-      return { result: {} };
-    }),
+  // ---- OMS-05: a fault incident's own switching plan ----
+  // Same operations, same rules, same safety log (owned by the incident).
+  replaceIncidentDraftSteps: incidentPlan.replaceDraftSteps,
+  approveIncidentPlan: incidentPlan.approvePlan,
+  unapproveIncidentPlan: incidentPlan.unapprovePlan,
 
-  unapprovePlan: (plannedOutageId, actor) =>
-    withOutage(plannedOutageId, actor, async (t, ctx) => {
-      const reject = rules.checkUnapprovePlan({ plan: ctx.plan, steps: ctx.steps, actor });
-      if (reject) return { reject, entity: 'plan', entityId: ctx.plan.id, action: 'plan.unapprove' };
-      await t.none("UPDATE switching_plans SET state='draft', approved_by=NULL, approved_at=NULL WHERE id=$1", [ctx.plan.id]);
-      await logSafety(t, ctx.po.id, actor, { entity: 'plan', entityId: ctx.plan.id, action: 'plan.unapprove', from: 'approved', to: 'draft' });
-      return { result: {} };
-    }),
+  incidentSwitchingPlan: async (incidentId) => {
+    const ctx = await loadIncidentPlan(db, incidentId);
+    return ctx ? incidentPlanView(ctx) : null;
+  },
+  incidentSafetyLog: (incidentId) => db.any('SELECT * FROM safety_log WHERE incident_id=$1 ORDER BY ts, id', [incidentId]),
 
   // scheduled -> notified: notice sent (by the notifier / scheduler) or
   // skipped by an operator with a reason.
@@ -957,12 +1075,14 @@ export const repo = {
   // in the safety log next to the corrected time and the server receive time.
   confirmSwitchingStep: async (stepId, actor, { clientConfirmationId, performedAt = null, onBehalfNote = null, lat = null, lon = null,
     clientPerformedAt = null, clientSentAt = null }) => {
-    const row = await db.oneOrNone('SELECT sp.planned_outage_id FROM switching_steps s JOIN switching_plans sp ON sp.id = s.plan_id WHERE s.id=$1', [stepId]);
+    // A plan has exactly one owner (switching_plans_one_owner_check).
+    const row = await db.oneOrNone('SELECT sp.planned_outage_id, sp.incident_id FROM switching_steps s JOIN switching_plans sp ON sp.id = s.plan_id WHERE s.id=$1', [stepId]);
     if (!row) return notFound('switching step');
-    return withOutage(row.planned_outage_id, actor, async (t, ctx) => {
+    const kind = row.planned_outage_id ? 'planned' : 'incident';
+    return withPlan(kind, row.planned_outage_id || row.incident_id, actor, async (t, ctx) => {
       const step = ctx.steps.find((s) => s.id === stepId);
       const base = { entity: 'step', entityId: stepId, action: 'step.confirm', details: { phase: step.phase, seq: step.seq, clientConfirmationId } };
-      let reject = rules.checkConfirmStep({ ...ctx, step, actor, clientConfirmationId, onBehalfNote });
+      let reject = rules.checkConfirmStep({ ...ctx, step, actor, clientConfirmationId, onBehalfNote, owner: kind });
       if (reject?.replay) return { result: { step, replay: true } };
       if (!reject && await clientIdTaken(t, 'switching_steps', 'client_confirmation_id', clientConfirmationId, stepId)) {
         reject = { code: 'CLIENT_ID_REUSED', message: 'clientConfirmationId already belongs to another step', status: 409 };
@@ -973,11 +1093,25 @@ export const repo = {
       await t.none(`UPDATE switching_steps SET state='confirmed', confirmed_by=$2, performed_at=$3, received_at=$8,
           client_confirmation_id=$4, on_behalf_note=$5, lat=$6, lon=$7 WHERE id=$1`,
         [stepId, actor.username, when, clientConfirmationId, onBehalfNote, lat, lon, receivedAt]);
-      await logSafety(t, ctx.po.id, actor, { entity: 'step', entityId: stepId, action: 'step.confirm', from: 'pending', to: 'confirmed', occurredAt: when,
+      await logSafety(t, PLAN_OWNERS[kind].logOwner(ctx), actor, { entity: 'step', entityId: stepId, action: 'step.confirm', from: 'pending', to: 'confirmed', occurredAt: when,
         details: { phase: step.phase, seq: step.seq, action: step.action, device: step.device_label, location: step.location,
           assignee: step.assignee, assigneeCrewId: step.assignee_crew_id, clientConfirmationId, onBehalfNote, lat, lon,
           performedAt: when, receivedAt, clientPerformedAt: clientPerformedAt ?? null, clientSentAt: clientSentAt ?? null } });
-      return { result: { step: await t.one('SELECT * FROM switching_steps WHERE id=$1', [stepId]) } };
+      const result = { step: await t.one('SELECT * FROM switching_steps WHERE id=$1', [stepId]) };
+      if (kind === 'planned') return { result };
+
+      // A fault incident's plan (rules.incidentStatusAfterStep): every step goes
+      // on the incident's timeline; only the last restore step can move the
+      // incident, and only toward Pending Verification.
+      await addEvent(t, ctx.incident.id, actor.username, 'switching',
+        `Switching ${step.phase} step ${step.seq} confirmed: ${step.action} ${step.device_label} (${step.location})`);
+      const to = rules.incidentStatusAfterStep({ incident: ctx.incident, steps: ctx.steps, step });
+      if (to) return { result, transitions: [await moveIncident(t, ctx, to, actor, 'supply restored by switching plan - awaiting verification')] };
+      if (rules.isLastRestoreStep({ steps: ctx.steps, step })) {
+        await addEvent(t, ctx.incident.id, actor.username, 'switching',
+          `Supply restored by switching plan; incident left ${LABELS[ctx.incident.status] || ctx.incident.status} (Pending Verification follows a crew's work on site)`);
+      }
+      return { result };
     });
   },
 

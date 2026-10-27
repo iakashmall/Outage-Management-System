@@ -3,6 +3,8 @@ import { api, socket } from '../lib/api.js';
 import { Icon, SevBadge, StatusBadge, timeAgo, hhmm, useLiveRefresh, toast, useDialog, crewBusyText } from '../lib/ui.jsx';
 import { Drawer, DrawerContent } from '../components/ui/drawer.jsx';
 import { currentUser } from '../lib/auth.js';
+import { incidentPlanApi } from '../lib/plannedApi.js';
+import { fail, PlanApprovalButtons, PlanEditor, StepList, SafetyLog } from '../components/SwitchingPlan.jsx';
 
 // Creating an incident and returning one for correction are control-room
 // actions (the API refuses other roles, OMS-03).
@@ -183,6 +185,9 @@ function IncidentDrawer({ inc, onClose, onChange, showOnMap }) {
         <div className="drawer-b">
           <div className="kv-row"><span className="k">Zone</span><span className="v">{inc.zone}</span></div>
           <div className="kv-row"><span className="k">Feeder</span><span className="v mono">{inc.feeder || '-'}</span></div>
+          {inc.tripped_equipment && (
+            <div className="kv-row"><span className="k">Tripped equipment</span><span className="v">{inc.tripped_equipment.name || 'unnamed'} <span className="mono">({inc.tripped_equipment.cim_mrid})</span></span></div>
+          )}
           <div className="kv-row"><span className="k">Customers affected</span><span className="v mono">{(inc.customers || 0).toLocaleString()}</span></div>
           <div className="kv-row"><span className="k">Cause</span><span className="v">{inc.cause}</span></div>
           <div className="kv-row"><span className="k">Source</span><span className="v mono">{inc.source}</span></div>
@@ -242,6 +247,7 @@ function IncidentDrawer({ inc, onClose, onChange, showOnMap }) {
           <ReassignRequestPanel requests={requests} nearest={nearest} busy={busy} onAssign={doAssign} onDismiss={doDismissRequest} />
           <CrewJobsPanel report={report} />
           <FieldReportPanel report={report} />
+          {!isPlanned && isControlRoom() && <IncidentSwitchingPlan inc={inc} onChange={onChange} />}
 
           {!inc.crew_id && ['open', 'dispatched'].includes(inc.status) && (
             <>
@@ -295,6 +301,79 @@ function IncidentDrawer({ inc, onClose, onChange, showOnMap }) {
         </div>
       </DrawerContent>
     </Drawer>
+  );
+}
+
+// OMS-05: the fault incident's own switching plan -- the same editor, step
+// list, approval buttons and safety log as a planned outage's
+// (components/SwitchingPlan.jsx). The server decides what a step does to
+// the incident: no permits, and the last restore step moves it to Pending
+// Verification at most; resolving stays with the crew's completion.
+const PLAN_TOPICS = ['oms.switching.confirmed', 'oms.switching.rejected', 'oms.incident.updated'];
+function IncidentSwitchingPlan({ inc, onChange }) {
+  const [view, setView] = useState(null);
+  const [log, setLog] = useState([]);
+  const [crews, setCrews] = useState([]);
+  const [tab, setTab] = useState('plan');
+  const [starting, setStarting] = useState(false);
+  const load = () => Promise.all([incidentPlanApi.get(inc.id), incidentPlanApi.safetyLog(inc.id)])
+    .then(([v, l]) => { setView(v); setLog(l); }).catch(fail);
+  useEffect(() => { load(); api.crews().then(setCrews).catch(() => {}); }, [inc.id]); // eslint-disable-line
+  useLiveRefresh(PLAN_TOPICS, load);
+  if (!view) return null;
+  const { plan, steps } = view;
+  // No plan to show, and none can be started on a finished incident.
+  if (!plan && ['resolved', 'closed', 'cancelled'].includes(inc.status)) return null;
+
+  // Every action reloads from the server afterwards, as on Planned outages.
+  const act = async (fn, ok) => {
+    try { await fn(); if (ok) toast(ok); } catch (e) { fail(e); }
+    load(); onChange();
+  };
+  const ask = (q) => { const v = window.prompt(q); return v && v.trim() ? v.trim() : null; };
+
+  return (
+    <>
+      <div style={{ margin: '18px 0 8px' }} className="eyebrow">Switching plan</div>
+      {!plan && !starting ? (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>No switching plan for this incident.</span>
+          <button className="btn sm" onClick={() => setStarting(true)}>Start switching plan</button>
+        </div>
+      ) : (
+        <>
+          {plan && (
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+              <PlanApprovalButtons plan={plan} steps={steps} act={act}
+                onApprove={() => incidentPlanApi.approve(inc.id)} onUnapprove={() => incidentPlanApi.unapprove(inc.id)} />
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 6, borderBottom: '1px solid var(--line)', marginBottom: 12 }}>
+            {[['plan', 'Switching plan'], ['log', `Safety log (${log.length})`]].map(([k, label]) => (
+              <button key={k} className="btn sm" style={{ borderBottom: tab === k ? '2px solid var(--navy)' : undefined, borderRadius: '6px 6px 0 0' }} onClick={() => setTab(k)}>{label}</button>
+            ))}
+          </div>
+          {tab === 'plan' && (plan?.state === 'approved'
+            ? <StepList plan={plan} steps={steps} act={act} ask={ask} />
+            : (
+              // The editor's columns are wider than the drawer: scroll, don't
+              // squeeze (without the min width its device/location fields
+              // collapse to ~20 px).
+              <div style={{ overflowX: 'auto' }}>
+                <div style={{ minWidth: 660 }}>
+                  <PlanEditor plan={plan} steps={steps} crews={crews} defaultCrew={inc.crew_id || ''}
+                    onDraft={(body) => incidentPlanApi.draftFromTrace(inc.id, body)} onSave={(s) => incidentPlanApi.saveSteps(inc.id, s)}
+                    onSaved={() => { setStarting(false); load(); onChange(); }} />
+                </div>
+              </div>
+            ))}
+          {tab === 'log' && <SafetyLog log={log} />}
+          <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>
+            No work permits on a fault. Confirming the last restore step moves the incident to Pending Verification at most; the crew's completion still resolves it.
+          </div>
+        </>
+      )}
+    </>
   );
 }
 
