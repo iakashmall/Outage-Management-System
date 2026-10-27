@@ -835,6 +835,19 @@ function NativeAppScreen() {
     }
   }, [refresh, addNotice, reloadPending, syncPending, applyServerJob]);
 
+  // "Mark On Site" on the map when the crew reaches the site: the same fresh
+  // GPS site check as the job screen (the server checks it too), then the
+  // job opens so the crew carries on with the photo and Work Started.
+  // Returns null when done, else the message for the map to show.
+  const markOnSiteFromMap = useCallback(async (job) => {
+    const here = await getLocation({ allowCached: false }).catch(() => ({}));
+    const blocked = siteBlock(job, 'On Site', here);
+    if (blocked) return blocked;
+    await handleAdvance(job, 'On Site');
+    openPage({ tab: 'Jobs', jobId: job.id });
+    return null;
+  }, [handleAdvance, openPage]);
+
   // OMS-03: start or end the crew's day. Sent at once when there is signal
   // and nothing older is waiting; otherwise queued behind the waiting items
   // (so the day ends after the job updates it reports on). Returns true when
@@ -1027,7 +1040,7 @@ function NativeAppScreen() {
         // The map fills the screen between the header and the bottom bar.
         <View style={{ flex: 1, paddingBottom: 46 + insets.bottom }}>
           {notice ? <View style={styles.mapNotice}><NoticeBanner notice={notice} onDismiss={() => setNotice('')} /></View> : null}
-          <CrewMap jobs={liveJobs} crew={crew} navRequest={mapNav} focus={mapFocus} />
+          <CrewMap jobs={liveJobs} crew={crew} navRequest={mapNav} focus={mapFocus} onMarkOnSite={markOnSiteFromMap} />
         </View>
       ) : (
       <ScrollView contentContainerStyle={[styles.content, { paddingBottom: 100 + insets.bottom }]}>
@@ -2104,7 +2117,10 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
           </View>
         )}
 
-        {checklistDone && (
+        {/* Only once the crew has marked En Route, so the control room knows
+            they left before they navigate. (A blocked On Site check has its
+            own Navigate button below.) */}
+        {checklistDone && job.status === 'En Route' && (
         <Pressable style={styles.secondaryBtn} onPress={() => {
           onNavigate(job);
         }}>
