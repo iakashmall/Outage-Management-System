@@ -44,6 +44,9 @@ const DONE_INCIDENT = ['resolved', 'closed', 'cancelled'];
 const OFF_ROUTE_M = 50; // further than this from the route: ask for a new one
 const REROUTE_GAP_MS = 10000;
 const ARRIVED_M = 30;
+// Below this zoom (wider than about a city) the job / crew names pile up on
+// each other, so only the dots show; the selected one keeps its name.
+const LABEL_MIN_ZOOM = 10;
 
 const finite = (n) => typeof n === 'number' && Number.isFinite(n);
 const hasPoint = (p) => finite(p?.lat) && finite(p?.lon);
@@ -136,6 +139,7 @@ export default function CrewMap({ jobs = [], crew = null, navRequest = null, foc
   // What is selected: { kind: 'job' | 'incident' | 'crew', id }
   const [selected, setSelected] = useState(initialJobId ? { kind: 'job', id: initialJobId } : null);
   const [navigating, setNavigating] = useState(Boolean(initialJobId));
+  const [showLabels, setShowLabels] = useState(true);
   const [follow, setFollow] = useState(Boolean(initialJobId));
   const [route, setRoute] = useState(null);
   const [routingAll, setRoutingAll] = useState(false);
@@ -545,6 +549,10 @@ export default function CrewMap({ jobs = [], crew = null, navRequest = null, foc
             onDidFinishLoadingMap={() => setMapState('loaded')}
             onDidFailLoadingMap={() => setMapState('FAILED (check backend log for 401 / map server)')}
             onDidFinishRenderingFrame={() => { frames.current += 1; }}
+            onRegionDidChange={(event) => {
+              const zoom = event.nativeEvent?.zoom;
+              if (finite(zoom)) setShowLabels(zoom >= LABEL_MIN_ZOOM);
+            }}
           >
             <Camera
               ref={cameraRef}
@@ -592,14 +600,17 @@ export default function CrewMap({ jobs = [], crew = null, navRequest = null, foc
             ) : null}
 
             {/* Other crews: name badges coloured by status. */}
-            {show.crews && !navigating ? otherCrews.map((c) => (
-              <Marker key={c.id} id={`crew-${c.id}`} lngLat={[c.lon, c.lat]} anchor="center" onPress={() => select({ kind: 'crew', id: c.id })}>
-                <View style={[styles.crewBadge, selected?.kind === 'crew' && selected.id === c.id && styles.crewBadgeSelected]}>
-                  <View style={[styles.crewDot, { backgroundColor: CREW_STATUS_COLORS[c.status] || '#7c8da3' }]} />
-                  <Text style={styles.crewText}>{shortCrew(c.name)}</Text>
-                </View>
-              </Marker>
-            )) : null}
+            {show.crews && !navigating ? otherCrews.map((c) => {
+              const isSel = selected?.kind === 'crew' && selected.id === c.id;
+              return (
+                <Marker key={c.id} id={`crew-${c.id}`} lngLat={[c.lon, c.lat]} anchor="center" onPress={() => select({ kind: 'crew', id: c.id })}>
+                  <View style={[styles.crewBadge, isSel && styles.crewBadgeSelected]}>
+                    <View style={[styles.crewDot, { backgroundColor: CREW_STATUS_COLORS[c.status] || '#7c8da3' }]} />
+                    {showLabels || isSel ? <Text style={styles.crewText}>{shortCrew(c.name)}</Text> : null}
+                  </View>
+                </Marker>
+              );
+            }) : null}
 
             {/* This crew's jobs: labelled pins (only the target while navigating). */}
             {(show.jobs || navigating ? myJobs : [])
@@ -610,9 +621,11 @@ export default function CrewMap({ jobs = [], crew = null, navRequest = null, foc
                 return (
                   <Marker key={job.id} id={`job-${job.id}`} lngLat={[job.coordinates.lon, job.coordinates.lat]} anchor="bottom" onPress={() => select({ kind: 'job', id: job.id })}>
                     <View style={styles.pinWrap}>
-                      <View style={[styles.pinLabel, isSel && { backgroundColor: color }]}>
-                        <Text style={[styles.pinText, isSel && { color: '#fff' }]}>{job.id}</Text>
-                      </View>
+                      {showLabels || isSel ? (
+                        <View style={[styles.pinLabel, isSel && { backgroundColor: color }]}>
+                          <Text style={[styles.pinText, isSel && { color: '#fff' }]}>{job.id}</Text>
+                        </View>
+                      ) : null}
                       <View style={[styles.pin, { backgroundColor: color }, isSel && styles.pinSelected]} />
                     </View>
                   </Marker>
@@ -795,7 +808,9 @@ const styles = StyleSheet.create({
   chipText: { fontSize: 12, fontWeight: '600', color: '#173355' },
   chipTextOn: { color: '#fff' },
   chipNote: { fontSize: 11, color: '#7c8da3' },
-  mapWrap: { flex: 1 },
+  // Clip: the crew/job name badges are native views on the map and would
+  // otherwise draw over the header and the job card when zoomed out.
+  mapWrap: { flex: 1, overflow: 'hidden' },
   map: { flex: 1 },
   center: { alignItems: 'center', justifyContent: 'center' },
   badge: { fontSize: 12, fontWeight: '700', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 10, overflow: 'hidden' },
