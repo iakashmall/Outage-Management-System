@@ -12,5 +12,5 @@ services:
       KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9094"
 
   kafka-ui:
-    environment:  
+    environment:
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9093

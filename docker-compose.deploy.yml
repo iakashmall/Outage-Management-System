@@ -13,9 +13,7 @@ services:
       POSTGRES_USER: oms
       POSTGRES_PASSWORD: ${OMS_DB_PASSWORD:?set a strong password in the environment}
     volumes:
-      # timescaledb-ha's real data dir; /var/lib/postgresql/data would leave the
-      # database in the container layer (lost on recreate).
-      - pgdata:/home/postgres/pgdata/data
+      - pgdata:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U oms"]
