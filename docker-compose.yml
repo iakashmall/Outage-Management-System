@@ -16,7 +16,10 @@ services:
       POSTGRES_PASSWORD: oms
     ports: ["127.0.0.1:15432:5432"]
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # timescaledb-ha keeps its data in /home/postgres/pgdata/data, NOT the usual
+      # /var/lib/postgresql/data: mounting the volume there left the whole database
+      # in the container layer, lost on every container recreate.
+      - pgdata:/home/postgres/pgdata/data
       - ./db/init:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U oms"]
@@ -43,23 +46,28 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # set -e: a failed clone must stop the container, not fall through to the
+    # image entrypoint (which would initdb an empty, unrelated database and
+    # "resume" from it forever). Only data with standby.signal counts as a replica.
     entrypoint: >
       bash -c "
-      if [ ! -s /home/postgres/pgdata/data/PG_VERSION ]; then
-        echo 'No existing data -- cloning primary via pg_basebackup...';
+      set -e;
+      if [ ! -f /home/postgres/pgdata/data/standby.signal ]; then
+        echo 'No standby data -- cloning primary via pg_basebackup...';
         rm -rf /home/postgres/pgdata/data/*;
         pg_basebackup -h postgres -U replicator -D /home/postgres/pgdata/data -Fp -Xs -P -R;
         chmod 700 /home/postgres/pgdata/data;
       else
-        echo 'Existing replica data found -- skipping clone, resuming streaming.';
+        echo 'Standby data found -- resuming streaming.';
       fi;
       exec docker-entrypoint.sh postgres
       "
+    # Healthy only while actually streaming from the primary.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U oms"]
-      interval: 5s
+      test: ["CMD-SHELL", "psql -U oms -d oms -tAc \"SELECT pg_is_in_recovery() AND EXISTS (SELECT 1 FROM pg_stat_wal_receiver WHERE status = 'streaming')\" | grep -q t"]
+      interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 6
 
   redis:
     image: redis:7-alpine
@@ -76,13 +84,13 @@ services:
   kafka:
     image: apache/kafka:3.7.1
     container_name: oms-kafka
-    ports: ["127.0.0.1:19092:19092"]
+    ports: ["19092:19092"]
     environment:
       KAFKA_NODE_ID: "1"
       KAFKA_PROCESS_ROLES: "broker,controller"
       KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
       KAFKA_LISTENERS: "PLAINTEXT://:19092,CONTROLLER://:9093"
-      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://localhost:19092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://192.168.29.202:19092"
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
       KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
       KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"

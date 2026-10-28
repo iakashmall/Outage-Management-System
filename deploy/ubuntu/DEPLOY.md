@@ -91,8 +91,9 @@ devices do (the `map-tunnel` container). One-time setup on the server, from the 
 ```bash
 mkdir -p deploy/map-tunnel/keys
 ssh-keygen -t ed25519 -N "" -C "oms-container-tunnel" -f deploy/map-tunnel/keys/id_ed25519
-# allow that key to log in as mapdev (needs sudo; keep any restrictions mapdev already has)
-sudo sh -c 'cat deploy/map-tunnel/keys/id_ed25519.pub >> ~mapdev/.ssh/authorized_keys'
+# allow that key to log in as mapdev, for the map tunnel only (needs sudo)
+echo "restrict,port-forwarding,permitopen=\"127.0.0.1:8095\" $(cat deploy/map-tunnel/keys/id_ed25519.pub)" | sudo tee -a ~mapdev/.ssh/authorized_keys
+sudo chown mapdev: ~mapdev/.ssh/authorized_keys && sudo chmod 600 ~mapdev/.ssh/authorized_keys
 ```
 Put the map API key (the `MAP_API_KEY` from the working `backend/.env`) in `backend/.env.deploy` on the server:
 ```

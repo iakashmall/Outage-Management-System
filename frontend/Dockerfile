@@ -48,6 +48,9 @@ FROM nginx:1.27-alpine AS runtime
 COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
 
 COPY --from=builder /app/frontend/dist /usr/share/nginx/html
+# nginx runs as an unprivileged user: files that arrive owner-only (e.g. unzipped with a strict umask) would
+# be served as 403, as the logos once were on the server.
+RUN chmod -R a+rX /usr/share/nginx/html
 
 EXPOSE 80
 

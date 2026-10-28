@@ -15,6 +15,10 @@ echo "==> Using address: $OMS_HOST  (open https://$OMS_HOST:8443 ; plain http://
 # Allow the login redirect back to this address (the shipped realm only knows localhost:15173).
 python3 deploy/ubuntu/patch-realm.py "$OMS_HOST"
 
+# The map tunnel's key goes here (DEPLOY.md, "Map server"). Create it as this user now: if Docker creates the
+# mount point it is owned by root and ssh-keygen cannot write into it.
+mkdir -p deploy/map-tunnel/keys
+
 echo "==> Stopping the old OMS web/backend (frees port 8080). Old data volumes are kept."
 docker rm -f oms-app-web oms-app-backend 2>/dev/null || true
 
