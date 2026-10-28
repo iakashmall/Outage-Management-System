@@ -4,10 +4,19 @@
 #   docker compose -f docker-compose.deploy.yml up -d --build
 #   docker compose -f docker-compose.deploy.yml run --rm oms-backend node src/infra/seed.js   # first time only
 name: oms
+
+# Every service keeps at most 3 x 10 MB of container logs (Docker's default json-file driver never rotates).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   postgres:
     image: timescale/timescaledb-ha:pg16
     restart: unless-stopped
+    logging: *logging
     environment:
       POSTGRES_DB: oms
       POSTGRES_USER: oms
@@ -24,6 +33,11 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    logging: *logging
+    # The image's own command was a bare "redis-server" (no flags), so only the memory cap is added. volatile-lru
+    # evicts only keys with a TTL (the cache:* entries); tag:* keys have none, so a full Redis rejects tag writes,
+    # and setTag (backend/src/infra/redis.js) logs that and carries on.
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "volatile-lru"]
     volumes:
       - redisdata:/data
 
@@ -33,6 +47,7 @@ services:
   keycloak:
     image: quay.io/keycloak/keycloak:24.0
     restart: unless-stopped
+    logging: *logging
     command: ["start-dev", "--http-port=8080", "--import-realm"]
     environment:
       KEYCLOAK_ADMIN: admin
@@ -57,6 +72,7 @@ services:
   map-tunnel:
     build: ./deploy/map-tunnel
     restart: unless-stopped
+    logging: *logging
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -67,6 +83,7 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     restart: unless-stopped
+    logging: *logging
     depends_on:
       postgres: { condition: service_healthy }
       keycloak: { condition: service_started }
@@ -100,6 +117,7 @@ services:
         VITE_BASEMAP_FALLBACK: osm
         VITE_KEYCLOAK_URL: https://${OMS_HOST:-localhost}:8443
     restart: unless-stopped
+    logging: *logging
     depends_on:
       - oms-backend
     ports:
@@ -109,6 +127,7 @@ services:
   oms-caddy:
     image: caddy:2-alpine
     restart: unless-stopped
+    logging: *logging
     environment:
       OMS_HOST: ${OMS_HOST:-localhost}
     ports:
