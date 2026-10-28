@@ -99,6 +99,11 @@ services:
       SIMULATOR: "off"   # the simulator mixes fake crew GPS, alarms and calls into real data
       MAP_SERVER_URL: http://map-tunnel:8095
       OMS_PUBLIC_URL: https://${OMS_HOST:-localhost}:8443
+      # Database pool (backend/src/infra/db.js): a request that can't get a connection in 5 s gets a JSON 503
+      # instead of hanging; no query or open transaction may hold a connection longer than 60 s.
+      PG_CONNECT_TIMEOUT_MS: "5000"
+      PG_STATEMENT_TIMEOUT_MS: "60000"
+      PG_IDLE_TX_TIMEOUT_MS: "60000"
     ports:
       # Crew app API: http://<server>:4000/api (job status, photos, QR scans). The web app goes through Caddy instead.
       # Limit it in the firewall to the crew devices' network if you can; traffic is not encrypted.

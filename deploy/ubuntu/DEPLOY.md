@@ -42,6 +42,12 @@ export OMS_KC_ADMIN_PASSWORD='<strong password>'  # Keycloak "admin" user
   Postgres, and the admin password in Keycloak). Otherwise the backend and Keycloak can no longer log in to the database.
 - The backend runs with `SIMULATOR=off`: no fake crew GPS, alarms or calls are mixed into real data.
 - Keep `backend/.env.deploy` and `infra/keycloak-realm.deploy.json` on the server only (both are in `.gitignore`).
+- **Seed and importer runs need `-e PG_STATEMENT_TIMEOUT_MS=`** (blank = no limit). The backend service applies a
+  60 s statement timeout to everything run in its container, so a long seed or network import would be cancelled:
+  ```bash
+  docker compose -f docker-compose.deploy.yml run --rm -e PG_STATEMENT_TIMEOUT_MS= oms-backend node src/infra/seed.js
+  docker compose -f docker-compose.deploy.yml run --rm -e PG_STATEMENT_TIMEOUT_MS= oms-backend node src/infra/importHaridwarInferred.js ...
+  ```
 - **Redis has no append-only file, by design.** It holds only live tag values and short-lived caches, capped at
   128 MB; Postgres is the system of record. A restart can lose the last few minutes of tag values, which the next
   SCADA readings replace.
