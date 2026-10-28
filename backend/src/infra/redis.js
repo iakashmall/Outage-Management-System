@@ -50,12 +50,31 @@ export function isRedisConnected() { return connected; }
 // from here instead of round-tripping to TimescaleDB for the live value.
 const tagKey = (path) => `tag:${path}`;
 
+// Writes never throw: a rejected write (Redis full under maxmemory, connection
+// lost) must not stop handleScadaEvent or a route from finishing its work.
+// Each kind of write warns once per run of failures, so a full Redis doesn't
+// flood the log, and resolves null.
+const failing = new Set();
+async function nonFatal(kind, write) {
+  try {
+    const result = await write();
+    failing.delete(kind);
+    return result;
+  } catch (err) {
+    if (!failing.has(kind)) console.warn(`[redis] ${kind} failed (${err.message}) — continuing without it`);
+    failing.add(kind);
+    return null;
+  }
+}
+
 export async function setTag(path, value, quality = 'GOOD') {
   if (!connected) return null;
   const record = { value, quality, ts: new Date().toISOString() };
-  await redis.set(tagKey(path), JSON.stringify(record));
-  await redis.publish('tags.updates', JSON.stringify({ path, ...record }));
-  return record;
+  return nonFatal('tag write', async () => {
+    await redis.set(tagKey(path), JSON.stringify(record));
+    await redis.publish('tags.updates', JSON.stringify({ path, ...record }));
+    return record;
+  });
 }
 
 export async function getTag(path) {
@@ -87,12 +106,12 @@ export async function cacheGet(key) {
 
 export async function cacheSet(key, value, ttlSeconds = 15) {
   if (!connected) return;
-  await redis.set(`cache:${key}`, JSON.stringify(value), { EX: ttlSeconds });
+  return nonFatal('cache write', async () => { await redis.set(`cache:${key}`, JSON.stringify(value), { EX: ttlSeconds }); });
 }
 
 export async function cacheDel(key) {
   if (!connected) return;
-  await redis.del(`cache:${key}`);
+  return nonFatal('cache delete', async () => { await redis.del(`cache:${key}`); });
 }
 
 export async function disconnectRedis() {

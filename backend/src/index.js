@@ -1,3 +1,4 @@
+import 'express-async-errors'; // first: lets async route errors reach errorHandler (Express 4 drops them otherwise)
 import 'dotenv/config'; // loads .env into process.env
 // Log which database we use, but never the password inside the URL.
 function redactUrl(raw) {
@@ -22,6 +23,7 @@ import { seed } from './infra/seed.js';
 import { api } from './routes/api.js';
 import { repo } from './infra/repo.js';
 import { requireAuth } from './routes/auth.js';
+import { errorHandler } from './routes/errors.js';
 import { bus, initBus, NOT_BROADCAST } from './domain/bus.js';
 import { connectRedis } from './infra/redis.js';
 import { startPlannedNotices } from './realtime/plannedNotices.js';
@@ -97,15 +99,9 @@ app.get('/api/public/outage-status', async (req, res) => {
 });
 app.use('/api', requireAuth, api);
 
-// Global safety net: any request that reaches here already failed to get a
-// response from its own route (an unhandled/forwarded error). Without this,
-// such requests hang until the client times out instead of getting a clean
-// JSON error - see docs/P8_6_CROSS_SOURCE_CORRELATION_RESULTS.md.
-app.use((err, req, res, next) => {
-  console.error('[unhandled route error]', err?.stack || err);
-  if (res.headersSent) return next(err);
-  res.status(500).json({ error: 'internal server error' });
-});
+// Global safety net: JSON 503 when the database pool is exhausted, JSON 500
+// for anything else (routes/errors.js).
+app.use(errorHandler);
 
 const http = createServer(app);
 const io = new Server(http, { cors: { origin: '*' } });

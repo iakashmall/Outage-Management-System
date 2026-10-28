@@ -103,6 +103,14 @@ jobs:
         working-directory: backend
         run: node --test src/domain/rebalance.test.js
 
+      # Async route errors reach the error middleware as JSON 500 / 503 (no
+      # services needed); Redis tag and cache writes never throw (needs Redis).
+      - name: Run error handling and Redis write tests
+        working-directory: backend
+        env:
+          REDIS_URL: redis://localhost:6379
+        run: node --test src/routes/errors.test.js src/infra/redisTag.test.js
+
       - name: Run OMS-03 self-test
         working-directory: backend
         env:
