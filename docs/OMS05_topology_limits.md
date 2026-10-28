@@ -12,13 +12,36 @@ Endpoints: `GET /api/network/section/:mrid`, `GET /api/network/upstream/:mrid`,
 The Haridwar graph is **inferred from GIS geometry**
 (`infra/importHaridwarInferred.js`), not exported from a network model:
 
-- Lines join where their ends lie within a few metres of each other. Devices
-  snap to the nearest line by their own position.
+- Lines join where their ends lie within 10 m of another line (see the join
+  rules below). Devices snap to the nearest line by their own position.
 - Every mRID is synthetic (`LINE:`, `SW:`, `FUSE:`, `DT:`, `PT:`). Substation
   bus nodes are `CN:SS:<substation>`. The original GIS record is kept
   verbatim in `raw_attrs.original`, including `kva`.
-- The result has 608 connected components. Only 10 contain a substation bus
-  node. The other 598 are orphaned fragments with no path to any substation.
+- The result has 611 connected components. Only 10 contain a substation bus
+  node. The other 601 are orphaned fragments with no path to any substation.
+
+### Join rules (2026-10-27)
+
+- **Node diameter cap (`NODE_MAX_SPAN_M` = 10 m).** Joins used to chain: A
+  joined B and B joined C, so one node could span about 20 m (135 nodes were
+  wider than 10 m). Now a line end joins a node only if it is within 10 m of
+  every join point already in that node, so no node spans more than 10 m.
+  Candidate joins are applied closest first, ties broken by mRID. The result
+  does not depend on the order of the GIS file; shuffled input gives the same
+  nodes.
+- **Cross-feeder bare joins (`CROSS_FEEDER_BARE_JOIN_M` = 3 m).** A join
+  between lines of different feeders with no device (switch, fuse, RMU, DT or
+  PT) within 10 m is made only at 3 m or less. Beyond that it is not joined;
+  it is recorded in `raw_attrs.join_candidates` with the reason, like the
+  10–30 m candidates. Two feeders meeting with nothing at the junction are
+  more often two lines drawn close together than a real tie point. This halved
+  the bare cross-feeder nodes (342 to 141) with no component split and no
+  switch changing behaviour.
+- A re-import deletes this importer's own stale rows (for example, line pieces
+  renamed because a line is now cut in fewer places) in the same transaction.
+  It never touches other sources' rows. It refuses the whole run, naming the
+  rows, if a stale row is still referenced by an incident, a switching step, a
+  planned outage, the safety log, an asset scan or a protection asset.
 - Every API response built on this data has `inferred: true` and an
   `inferredNote`, and the map shows it.
 
@@ -39,15 +62,28 @@ data" there, and a what-if needs an explicit `sourceMrid`.
   graph, and opening them cuts nothing off. What-if reports these explicitly
   (`effective: false` with the reason) rather than returning an empty result
   that looks like a finding.
-- Even the in-line ones rarely separate anything (measured with what-if on
-  every one of the 332):
+- Even the in-line ones rarely separate anything. Measured with what-if on
+  every one of the 332, before the join rules above:
   - 179 are in orphaned fragments, so there is no default source (422);
   - 148 have another path around them: 33 are bridged in parallel by another
     device across the same cut, and 115 are bypassed through loops in the
     inferred graph. Each loop closes at one junction node; in 15 of them that
     node joins lines of different feeders, and in 71 it spans more than 3 m
-    (line-end joins chain, so one node can span up to about 20 m);
+    (line-end joins chained, so one node could span up to about 20 m);
   - only **5** actually cut devices off when opened.
+- **After the join rules,** the same **5 of 332** are effective and lose
+  exactly what they did before. 179 still have no source, 31 are parallel
+  bypasses and 117 are loop bypasses. The cap removed the cross-feeder part of
+  5 of the 15 cross-feeder loops (they now close at a same-feeder junction),
+  but every one of those devices still has a bypass.
+- **Why the remaining bypasses are not a join-rule error:** each remaining
+  cross-feeder junction is about 0.2–2.2 m from the bypassed switch or fuse
+  itself. A switch or fuse sitting where two feeders meet may well be a real
+  tie point. The cross-feeder rule deliberately keeps joins that have a device
+  next to them, so these stay joined. What-if reports them honestly as
+  "another path exists in this data", not as a fault in the join rule. Only a
+  vendor CIM export (real terminals and normally-open points) can settle
+  which of them are real ties.
 - Sections are often small because connectivity is missing. The map adds a
   note when a section has fewer than 10 members.
 
