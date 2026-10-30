@@ -79,14 +79,34 @@ let demoJobs = [
    LOW-LEVEL REQUEST HELPERS
 ========================================================= */
 
-async function req(path, method = "GET", body) {
+// How long a request may take before the app stops waiting. A request that
+// times out has no status, so callers treat it as "no signal" (status
+// changes and photos go to Pending Sync) instead of the crew staring at a
+// spinner on a weak connection. Photos get longer: they are the big uploads.
+const REQUEST_TIMEOUT_MS = 10000;
+const PHOTO_TIMEOUT_MS = 30000;
+
+async function timedFetch(url, options, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (controller.signal.aborted) throw new Error(`No answer from the server within ${Math.round(timeoutMs / 1000)} s`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function req(path, method = "GET", body, timeoutMs) {
   const { freshAuthHeader } = await session();
   if (!IS_WEB) await loadServer();
-  const response = await fetch((IS_WEB ? WEB_API_URL : apiBase()) + path, {
+  const response = await timedFetch((IS_WEB ? WEB_API_URL : apiBase()) + path, {
     method,
     headers: { "Content-Type": "application/json", ...(await freshAuthHeader()) },
     body: body ? JSON.stringify(body) : undefined,
-  });
+  }, timeoutMs);
   if (!response.ok) {
     // Keep the HTTP status and the server's rule code (e.g. NOT_YOUR_JOB) so
     // callers can tell a refusal (4xx: don't retry) from a network failure.
@@ -226,7 +246,7 @@ export async function uploadJobPhoto(id, dataUrl, location = {}, note, metadata 
     note: note ?? null,
     ...metadata,
     sentAt: new Date().toISOString(),
-  });
+  }, PHOTO_TIMEOUT_MS);
 }
 
 // POST /api/mobile/crews/:crewId/tracking  { state: "on" | "off", reason }
@@ -363,7 +383,7 @@ export async function logout() {
 async function plannedReq(path, method = "GET", body) {
   const { freshAuthHeader } = await session();
   if (!IS_WEB) await loadServer();
-  const response = await fetch((IS_WEB ? WEB_API_URL : apiBase()) + path, {
+  const response = await timedFetch((IS_WEB ? WEB_API_URL : apiBase()) + path, {
     method,
     headers: { "Content-Type": "application/json", ...(await freshAuthHeader()) },
     body: body ? JSON.stringify(body) : undefined,
