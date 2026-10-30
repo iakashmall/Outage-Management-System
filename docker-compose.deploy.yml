@@ -1,5 +1,5 @@
 # Full OMS stack for a server: database, cache, backend and web app, all in Docker.
-# Web app on http://<server>:8080  (set OMS_WEB_PORT to change).
+# Web app on https://<server>:8443 (Caddy). Crew app: http://<server>:4000 (API) and :18080 (sign-in, via Caddy).
 # Required in the environment (no defaults): OMS_DB_PASSWORD, OMS_KC_ADMIN_PASSWORD. See deploy/ubuntu/DEPLOY.md.
 #   docker compose -f docker-compose.deploy.yml up -d --build
 #   docker compose -f docker-compose.deploy.yml run --rm oms-backend node src/infra/seed.js   # first time only
@@ -13,7 +13,9 @@ services:
       POSTGRES_USER: oms
       POSTGRES_PASSWORD: ${OMS_DB_PASSWORD:?set a strong password in the environment}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # timescaledb-ha's real data dir; /var/lib/postgresql/data would leave the
+      # database in the container layer (lost on recreate).
+      - pgdata:/home/postgres/pgdata/data
       - ./db/init:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U oms"]
@@ -27,9 +29,8 @@ services:
     volumes:
       - redisdata:/data
 
-  # Login server. Browsers reach its login pages through Caddy (https://${OMS_HOST}:8443). 18080 is published on the
-  # network because the crew app signs in there; limit it in the firewall to the crew devices' network if you can
-  # (it also serves the admin console).
+  # Login server. Browsers reach its login pages through Caddy on https :8443, and the crew app through Caddy on
+  # http :18080; both pass only the oms-upcl realm. The admin console is on this server only (127.0.0.1:18081).
   keycloak:
     image: quay.io/keycloak/keycloak:24.0
     restart: unless-stopped
@@ -45,7 +46,7 @@ services:
       KC_HTTP_ENABLED: "true"
       KC_PROXY_HEADERS: xforwarded   # login pages are reached through Caddy (https)
     ports:
-      - "18080:8080"   # crew app sign-in: http://<server>:18080
+      - "127.0.0.1:18081:8080"   # admin console, this server only: ssh -L 18081:127.0.0.1:18081 <user>@<server>
     volumes:
       - ./infra/keycloak-realm.deploy.json:/opt/keycloak/data/import/realm.json:ro
       - ./infra/keycloak-theme/gridq:/opt/keycloak/themes/gridq:ro
@@ -103,7 +104,7 @@ services:
     depends_on:
       - oms-backend
     ports:
-      - "${OMS_WEB_PORT:-8080}:80"
+      - "127.0.0.1:${OMS_WEB_PORT:-8080}:80"   # this server only (health checks); users come in through Caddy :8443
 
   # HTTPS on :8443 (self-signed). Needed because browsers only allow the login library on https or localhost.
   oms-caddy:
@@ -113,6 +114,7 @@ services:
       OMS_HOST: ${OMS_HOST:-localhost}
     ports:
       - "8443:8443"
+      - "18080:18080"   # crew app sign-in (oms-upcl realm only)
     volumes:
       - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddydata:/data

@@ -6,7 +6,7 @@ import '@maplibre/maplibre-gl-leaflet'; // adds L.maplibreGL (vector basemap ins
 import { api, socket } from '../lib/api.js';
 import { authHeader } from '../lib/auth.js';
 
-import { TRAIL_WINDOWS, DEFAULT_WINDOW, MAX_POINTS, windowMs, normalizeTrack, splitTrail, summarize, thinDots, fmtClock, fmtDur, fmtAgo } from '../lib/trail.js';
+import { TRAIL_WINDOWS, DEFAULT_WINDOW, MAX_POINTS, windowMs, normalizeTrack, dropGpsNoise, splitTrail, summarize, thinDots, fmtClock, fmtDur, fmtAgo } from '../lib/trail.js';
 import { Icon, SevBadge, StatusBadge, useLiveRefresh } from '../lib/ui.jsx';
 import { useT, t as tt, tOr } from '../lib/i18n.js';
 
@@ -546,7 +546,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
   async function fetchTrail(id) {
     const now = Date.now();
     const rows = await api.crewTrack(id, new Date(now - windowMs(trailWinRef.current)).toISOString(), new Date(now + 60000).toISOString(), MAX_POINTS);
-    return normalizeTrack(rows);
+    return dropGpsNoise(normalizeTrack(rows));
   }
   const trailIds = () => (trailCrewRef.current ? [trailCrewRef.current] : crewIdsKey.split(',').filter(Boolean));
 

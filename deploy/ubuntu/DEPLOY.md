@@ -13,7 +13,7 @@ Other apps on the server (HRMS, Caddy on ports 80/443, tile server) are not touc
    ```
    It removes only `oms-app-web` and `oms-app-backend`, builds the new images, starts the stack, loads the demo
    data and checks health. The first build takes several minutes.
-3. Open `http://<server-ip>:8080`.
+3. Open `https://<server-ip>:8443` (self-signed certificate: Advanced > Proceed). Port 8080 answers on the server only.
 
 | Task | Command (from the project folder) |
 |---|---|
@@ -43,20 +43,64 @@ export OMS_KC_ADMIN_PASSWORD='<strong password>'  # Keycloak "admin" user
 - The backend runs with `SIMULATOR=off`: no fake crew GPS, alarms or calls are mixed into real data.
 - Keep `backend/.env.deploy` and `infra/keycloak-realm.deploy.json` on the server only (both are in `.gitignore`).
 
+## Load the network topology
+**Required after the first deploy, and again after any change to `backend/src/infra/importHaridwarInferred.js`.**
+`replace-old-oms.sh` does not do it. Without it the `network.*` tables are missing or empty: trace to source,
+sectionalising, simulate opening and switching plans have no graph, and the map has no topology layer. The backend
+says so at startup (`docker compose -f docker-compose.deploy.yml logs oms-backend | grep topology`):
+`[topology] network.* schema MISSING`, `... is EMPTY`, or `network.conducting_equipment: <n> rows`.
+
+From the project folder, first without `--write`:
+```bash
+bash deploy/ubuntu/load-topology.sh            # backup, schema, importer --dry-run (no topology rows written)
+bash deploy/ubuntu/load-topology.sh --write    # the same, then the import (one transaction)
+docker compose -f docker-compose.deploy.yml restart oms-backend
+```
+What it runs (no passwords needed; containers are found by their compose labels, like `backup-db.sh`):
+1. `deploy/ubuntu/backup-db.sh`.
+2. `db/migrations/network_topology_schema.sql` with `psql` in the postgres container (idempotent: `IF NOT EXISTS` only).
+   Stops first if PostGIS is not enabled.
+3. `node src/infra/importHaridwarInferred.js --dry-run` in the backend container (WORKDIR `/app/backend`). The importer
+   reads `/app/backend/src/infra/network.json`, the copy baked into the image, so a new `network.json` needs an image
+   rebuild (`docker compose -f docker-compose.deploy.yml up -d --build`) before re-running this.
+4. With `--write`: `node src/infra/importHaridwarInferred.js --write`, then the row counts.
+
+**Expected counts** (Haridwar, importer from PR #49, current `network.json`):
+
+| Table | Rows |
+|---|---|
+| `network.substations` | 15 |
+| `network.feeders` | 257 |
+| `network.conducting_equipment` | 10,168 (ACLineSegment 5,997 · PowerTransformer 1,549 · Disconnector 1,220 · Fuse 1,080 · Switch 322) |
+| `network.connectivity_nodes` | 4,623 |
+| `network.terminals` | 16,168 |
+
+These are the importer's own rows. If the Dehradun CIM model has also been imported (`importCimNetwork.js`), the
+tables hold those rows on top.
+
+**PR #49 check, before `--write`:** the dry-run output must show the capped importer, otherwise the image is older than
+PR #49 and must not write over a capped graph:
+- `line joins:` includes `refusedByNodeSpanCap` and `refusedCrossFeederBare`;
+- `Connected components`: `total: 611`, `substationAnchored: { components: 10 ... }`, `orphanedFragments: { components: 601 ... }`;
+- the last line says `--write would proceed`, not `--write WOULD BE REFUSED`.
+
 ## Crew app (phones)
 The crew app talks to the server over **plain HTTP** on two ports:
 - **4000**: the OMS backend API.
-- **18080**: Keycloak, for sign-in.
+- **18080**: Keycloak sign-in, through Caddy. Only the `oms-upcl` login pages are served there; the master realm and
+  the admin console answer 404.
 
 `docker-compose.deploy.yml` publishes both on the network. The web app does not use them: it goes through Caddy on 8443.
-- Limit both in the firewall to the crew devices' network if you can. Traffic on these ports is not encrypted, and
-  18080 also serves Keycloak's admin console.
+Traffic on these ports is not encrypted. Published Docker ports bypass `ufw`, so a `ufw` rule alone does not limit them.
+- Keycloak's admin console is on this server only, at `127.0.0.1:18081`. From a laptop:
+  `ssh -L 18081:127.0.0.1:18081 <user>@<server>`, then open `http://localhost:18081/admin/`.
+- Admin scripts (below) use `KEYCLOAK_URL=http://127.0.0.1:18081`; through `:18080` they get 404.
 - Build the APK with `EXPO_PUBLIC_OMS_SERVER=<server-ip>`, or type the server IP on the app's sign-in screen.
 - One crew login works on one phone at a time: signing in on a second phone signs the first one out (within 5
   minutes). Set it up once (and again only if the realm is re-imported):
   ```bash
   docker run --rm --network host -v "$PWD/backend:/app" -w /app \
-    -e KEYCLOAK_URL=http://127.0.0.1:18080 -e KEYCLOAK_ADMIN_PASSWORD="$OMS_KC_ADMIN_PASSWORD" \
+    -e KEYCLOAK_URL=http://127.0.0.1:18081 -e KEYCLOAK_ADMIN_PASSWORD="$OMS_KC_ADMIN_PASSWORD" \
     node:20-alpine node scripts/setup-crew-session-limit.mjs
   ```
   It only changes the sign-in flow for `field_crew` users; operators and passwords are not touched.

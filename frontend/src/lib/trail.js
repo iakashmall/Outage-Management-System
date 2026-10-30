@@ -41,6 +41,35 @@ export function distanceM(a, b) {
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
+// GPS noise. A phone standing still indoors gets rough Wi-Fi/cell fixes 50-200 m off, which drawn as a line look
+// like spikes out and back. Dropped from the trail: fixes with a reported accuracy worse than TRAIL_MAX_ACCURACY_M,
+// and "out and back" spikes, a fix far from both neighbours while those two neighbours are close to each other.
+export const TRAIL_MAX_ACCURACY_M = 50;
+export const SPIKE_MIN_M = 40;
+export const STILL_M = 15; // a phone lying still wanders 10-30 m; a new point only once the crew really moved
+export function dropGpsNoise(points) {
+  let pts = points.filter((p) => p.accuracy == null || p.accuracy <= TRAIL_MAX_ACCURACY_M);
+  for (let changed = true; changed;) { // repeat: removing one spike can expose the next
+    changed = false;
+    pts = pts.filter((p, i) => {
+      const a = pts[i - 1], c = pts[i + 1];
+      if (!a || !c) return true;
+      const out = distanceM(a, p), back = distanceM(p, c);
+      const spike = out > SPIKE_MIN_M && back > SPIKE_MIN_M && distanceM(a, c) < Math.min(out, back) / 2;
+      if (spike) changed = true;
+      return !spike;
+    });
+  }
+  // Jitter while standing still: keep a fix only when it is further from the last kept one than STILL_M or than
+  // its own accuracy (so a 25 m fix needs a 25 m move). The newest fix is always kept: it is where the crew is now.
+  const kept = [];
+  pts.forEach((p, i) => {
+    const last = kept[kept.length - 1];
+    if (!last || i === pts.length - 1 || distanceM(last, p) > Math.max(STILL_M, p.accuracy ?? 0)) kept.push(p);
+  });
+  return kept;
+}
+
 // Split into continuous legs; two fixes more than gapMs apart start a new leg and
 // the hop between them is returned as a gap (drawn dashed: we do NOT know the route).
 export function splitTrail(points, gapMs = GAP_MS) {
