@@ -39,7 +39,7 @@ import { uploadCapturedPhoto } from './lib/photos';
 import { siteBlock, SITE_STATUSES } from './lib/siteCheck';
 import { setupAlerts, findNewJobs, findNewMessages, alertNewJobs, alertNewMessages, reportDelivered, isOwnMessage } from './lib/alerts';
 import { watchMessages } from './lib/liveMessages';
-import { queueUpdate, queueScan, queueCompletion, queueChecklist, queueWorkOrder, keepUndeliveredCompletion, getUndeliveredCompletion, clearUndeliveredCompletion, isRetryable, isRefusal, flushQueue, getQueueLength, getQueueItems } from './lib/offlineQueue';
+import { queueUpdate, queueScan, queueCompletion, queueChecklist, queueWorkOrder, keepUndeliveredCompletion, getUndeliveredCompletion, clearUndeliveredCompletion, isRetryable, isRefusal, flushQueue, getQueueLength, getQueueItems, pendingPhotoRoom, MAX_PENDING_PHOTOS, PHOTO_FILE_MISSING } from './lib/offlineQueue';
 import { localDate, workOrderId, viewWorkOrder, dayJobs, summarize, startPayload, closePayload, cleanMembers } from './lib/workOrder';
 import { getCachedWorkOrder, cacheWorkOrder, getPendingWorkOrder, setPendingWorkOrder, getLastMembers, saveLastMembers, clearWorkOrderCache } from './lib/workOrderStore';
 import DailyWorkOrder from './components/DailyWorkOrder';
@@ -138,6 +138,7 @@ const itemLabel = (item) => (item.type === 'photo' ? `${item.id} photo` : item.t
 
 function droppedUpdateNotice(item) {
   const what = itemLabel(item);
+  if (item.code === PHOTO_FILE_MISSING) return `${what} was lost on the phone and was NOT sent. Take it again.`;
   return isNotYourJob(item)
     ? `${what} was not sent: this job was reassigned to another crew.`
     : `${what} was refused by the server: ${item.message || 'unknown reason'}`;
@@ -1868,9 +1869,15 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
     }
   };
 
-  const takePhoto = () => {
+  const takePhoto = async () => {
     if (photoCount >= MAX_JOB_PHOTOS) {
       setMessage(`Photo limit reached: ${MAX_JOB_PHOTOS} photos for this job.`);
+      return;
+    }
+    // Checked before the camera opens, so no photo is taken and then lost.
+    const room = await pendingPhotoRoom().catch(() => null);
+    if (room?.full) {
+      setMessage(`Phone storage for unsent photos is full (${room.count} waiting). Get signal so they upload, then take more.`);
       return;
     }
     setMessage('');
@@ -1892,7 +1899,11 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
       setPhotoCount((count) => count + 1);
       if (result?.queued) {
         onQueued?.();
-        setMessage(`No signal: photo ${photoCount + 1} of ${MAX_JOB_PHOTOS} saved on the phone (${tagged}). It uploads by itself once there is signal (see Pending sync).`);
+        const room = await pendingPhotoRoom().catch(() => null);
+        const warning = room?.nearlyFull
+          ? ` Unsent photos on the phone: ${room.count} of ${MAX_PENDING_PHOTOS} (${Math.round(room.bytes / 1024 / 1024)} MB). Get signal soon: new photos are blocked when it is full.`
+          : '';
+        setMessage(`No signal: photo ${photoCount + 1} of ${MAX_JOB_PHOTOS} saved on the phone (${tagged}). It uploads by itself once there is signal (see Pending sync).${warning}`);
       } else {
         setMessage(`Photo ${photoCount + 1} of ${MAX_JOB_PHOTOS} stored (${tagged}).`);
       }

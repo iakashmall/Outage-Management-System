@@ -104,6 +104,22 @@ async function exchangeCode(code, codeVerifier) {
 }
 
 let refreshTimer = null;
+// The one refresh in flight: concurrent callers (timer, API requests, GPS
+// uploads, the map header) all wait on it instead of each sending their own.
+let refreshPromise = null;
+// When Keycloak last could not be reached. Callers within REFRESH_RETRY_MS
+// get "unreachable" at once instead of each waiting on another timeout; the
+// retry timer keeps trying meanwhile.
+let lastUnreachableAt = 0;
+// Bumped on login and logout, so a refresh that finishes after the crew
+// signed out (or in as someone else) does not bring the old session back.
+let sessionGeneration = 0;
+
+const REFRESH_TIMEOUT_MS = 10000;
+const REFRESH_RETRY_MS = 30000;
+const EXPIRY_MARGIN_MS = 30000;
+// restoreSession must answer before NativeApp's 4 s startup limit.
+const RESTORE_REFRESH_WAIT_MS = 3000;
 
 // Keycloak access tokens are short-lived (typically ~5 min). Without this,
 // a session left open for more than a few minutes — exactly what happens
@@ -116,41 +132,85 @@ function scheduleTokenRefresh() {
   const msUntilExpiry = tokenParsed.exp * 1000 - Date.now();
   const delay = Math.max(msUntilExpiry - 60000, 5000); // refresh 60s before expiry
   refreshTimer = setTimeout(() => {
-    refreshAccessToken().catch(() => {});
+    refreshOnce({ force: true }).catch(() => {});
   }, delay);
 }
 
-export async function refreshAccessToken() {
-  if (!refreshToken) return false;
+// No signal: try again every 30 s while the crew is still signed in.
+function scheduleRetry() {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(() => {
+    refreshOnce({ force: true }).catch(() => {});
+  }, REFRESH_RETRY_MS);
+}
+
+// One token request. "ok" | "rejected" (Keycloak said no: the refresh token
+// expired or was revoked, or there is none) | "unreachable" (no signal,
+// timeout, server error). Reads the refresh token from storage first: it is
+// shared with a headless background instance, which may have refreshed.
+async function requestRefresh() {
+  await loadServer(); // may be a fresh headless JS instance
+  const token = (await SafeStore.getItemAsync("oms_refresh_token")) ?? refreshToken;
+  if (!token) return "rejected";
+  const generation = sessionGeneration;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS);
+  let response, data;
   try {
-    const body = new URLSearchParams({
-      grant_type: "refresh_token",
-      client_id: CLIENT_ID,
-      refresh_token: refreshToken,
-    });
-    const response = await fetch(getDiscovery().tokenEndpoint, {
+    response = await fetch(getDiscovery().tokenEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: body.toString(),
+      body: new URLSearchParams({ grant_type: "refresh_token", client_id: CLIENT_ID, refresh_token: token }).toString(),
+      signal: controller.signal,
     });
-    const data = await response.json();
-    if (!data.access_token) throw new Error("refresh failed");
-
-    accessToken = data.access_token;
-    refreshToken = data.refresh_token ?? refreshToken;
-    tokenParsed = parseJwt(accessToken);
-
-    await SafeStore.setItemAsync("oms_token", accessToken);
-    if (data.refresh_token) await SafeStore.setItemAsync("oms_refresh_token", refreshToken);
-
-    scheduleTokenRefresh();
-    return true;
+    data = await response.json().catch(() => ({}));
   } catch {
-    // Refresh token itself expired/revoked — the crew will need to sign in
-    // again; don't clear the session here so an in-flight request can still
-    // try with the stale token rather than being force-logged-out mid-task.
-    return false;
+    return "unreachable";
+  } finally {
+    clearTimeout(timer);
   }
+  if (!response.ok || !data.access_token) {
+    return response.status >= 400 && response.status < 500 ? "rejected" : "unreachable";
+  }
+  if (generation !== sessionGeneration) return "rejected"; // signed out meanwhile
+
+  accessToken = data.access_token;
+  refreshToken = data.refresh_token ?? token;
+  tokenParsed = parseJwt(accessToken);
+
+  await SafeStore.setItemAsync("oms_token", accessToken);
+  if (data.refresh_token) await SafeStore.setItemAsync("oms_refresh_token", refreshToken);
+
+  scheduleTokenRefresh();
+  return "ok";
+}
+
+// Single-flight wrapper around requestRefresh. force: run even though
+// Keycloak was unreachable moments ago (the timers use it).
+function refreshOnce({ force = false } = {}) {
+  if (!force && lastUnreachableAt && Date.now() - lastUnreachableAt < REFRESH_RETRY_MS) {
+    return Promise.resolve("unreachable");
+  }
+  if (!refreshPromise) {
+    refreshPromise = requestRefresh()
+      .catch(() => "unreachable")
+      .then((outcome) => {
+        lastUnreachableAt = outcome === "unreachable" ? Date.now() : 0;
+        if (outcome === "unreachable" && accessToken) scheduleRetry();
+        return outcome;
+      })
+      .finally(() => {
+        refreshPromise = null;
+      });
+  }
+  return refreshPromise;
+}
+
+// True when a new access token was obtained. A failure does not clear the
+// session, so an in-flight request can still try with the stale token
+// rather than the crew being force-logged-out mid-task.
+export async function refreshAccessToken() {
+  return (await refreshOnce()) === "ok";
 }
 
 // Call from a login screen with the `promptAsync`/`request` pair returned by
@@ -165,6 +225,8 @@ export async function login(promptAsync, request) {
   const data = await exchangeCode(result.params.code, request.codeVerifier);
   if (!data.access_token) return { success: false, countFailure: true };
 
+  sessionGeneration += 1;
+  lastUnreachableAt = 0;
   accessToken = data.access_token;
   refreshToken = data.refresh_token ?? null;
   tokenParsed = parseJwt(accessToken);
@@ -178,22 +240,34 @@ export async function login(promptAsync, request) {
 // Attempt to restore a session from SecureStore (e.g. on app relaunch).
 // Never throws — always resolves to false on any failure so callers
 // (e.g. a startup spinner) can't hang waiting on this.
+// An expired access token (they live ~5 min, so this is most relaunches) is
+// refreshed with the stored refresh token. Only a refresh Keycloak rejects
+// signs the crew out: with no signal the session is kept, so the crew can
+// keep working into Pending Sync, and the refresh is retried every 30 s.
 export async function restoreSession() {
   try {
     await loadServer();
     const stored = await SafeStore.getItemAsync("oms_token");
     if (!stored) return false;
     const parsed = parseJwt(stored);
-    const expiresAtMs = (parsed?.exp ?? 0) * 1000;
-    if (expiresAtMs && expiresAtMs < Date.now()) {
-      await logout();
-      return false;
-    }
     accessToken = stored;
     tokenParsed = parsed;
     refreshToken = (await SafeStore.getItemAsync("oms_refresh_token")) ?? null;
-    scheduleTokenRefresh();
-    return true;
+    const expiresAtMs = (parsed?.exp ?? 0) * 1000;
+    if (!expiresAtMs || expiresAtMs > Date.now()) {
+      scheduleTokenRefresh();
+      return true;
+    }
+    const outcome = await Promise.race([
+      refreshOnce({ force: true }),
+      new Promise((resolve) => setTimeout(() => resolve("unreachable"), RESTORE_REFRESH_WAIT_MS)),
+    ]);
+    if (outcome === "rejected") {
+      refreshToken = null; // dead: no point ending it on Keycloak
+      await logout();
+      return false;
+    }
+    return true; // "ok", or no signal: refreshOnce retries by itself
   } catch {
     return false;
   }
@@ -208,42 +282,23 @@ export function authHeader() {
 // task in a fresh JS instance after the app process was killed, where the
 // `accessToken`/`refreshToken` module variables above are simply unset.
 // Reads straight from SecureStore, refreshing first if the stored token is
-// expired or about to be, and persists any refreshed pair back to storage.
+// expired or about to be, and persists any refreshed pair back to storage
+// (refreshAccessToken reads the refresh token from storage too, and keeps
+// the in-memory singleton in sync for when this runs in the live app).
+// Also used before every API request (session.js freshAuthHeader), so a
+// token still good in memory is returned without touching storage.
 export async function getFreshAccessToken() {
   try {
+    if (accessToken && (tokenParsed?.exp ?? 0) * 1000 - Date.now() > EXPIRY_MARGIN_MS) return accessToken;
     await loadServer(); // may be a fresh headless JS instance
     const stored = await SafeStore.getItemAsync("oms_token");
     if (!stored) return null;
     const parsed = parseJwt(stored);
     const expiresAtMs = (parsed?.exp ?? 0) * 1000;
-    if (expiresAtMs && expiresAtMs - Date.now() > 30000) return stored;
+    if (expiresAtMs && expiresAtMs - Date.now() > EXPIRY_MARGIN_MS) return stored;
 
-    const storedRefresh = await SafeStore.getItemAsync("oms_refresh_token");
-    if (!storedRefresh) return expiresAtMs > Date.now() ? stored : null;
-
-    const body = new URLSearchParams({
-      grant_type: "refresh_token",
-      client_id: CLIENT_ID,
-      refresh_token: storedRefresh,
-    });
-    const response = await fetch(getDiscovery().tokenEndpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: body.toString(),
-    });
-    const data = await response.json();
-    if (!data.access_token) return expiresAtMs > Date.now() ? stored : null;
-
-    await SafeStore.setItemAsync("oms_token", data.access_token);
-    if (data.refresh_token) await SafeStore.setItemAsync("oms_refresh_token", data.refresh_token);
-
-    // Keep the in-memory singleton in sync too, in case this ran in the
-    // same JS instance as the live app (the common case).
-    accessToken = data.access_token;
-    refreshToken = data.refresh_token ?? refreshToken;
-    tokenParsed = parseJwt(accessToken);
-
-    return data.access_token;
+    if (await refreshAccessToken()) return accessToken;
+    return expiresAtMs > Date.now() ? stored : null;
   } catch {
     return null;
   }
@@ -269,6 +324,8 @@ export function currentUsername() {
 export async function logout() {
   if (refreshTimer) clearTimeout(refreshTimer);
   refreshTimer = null;
+  sessionGeneration += 1;
+  lastUnreachableAt = 0;
   // End the Keycloak session too. Clearing only our tokens leaves Keycloak's
   // SSO cookie in the browser, and the next sign-in on this phone would
   // silently come back as the previous crew. Best effort: offline, the

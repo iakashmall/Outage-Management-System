@@ -64,7 +64,46 @@ export async function queueUpdate(update) {
   await push({ type: "status", ...update });
 }
 
+// Unsent photos (all jobs together) the phone keeps, so a crew offline for
+// days cannot fill the phone. 150 is six jobs at the 25-photo job limit;
+// a resized photo is ~0.3-0.4 MB, the byte cap catches large ones. The app
+// warns from 80% and blocks the camera when full (pendingPhotoRoom).
+export const MAX_PENDING_PHOTOS = 150;
+export const MAX_PENDING_PHOTO_BYTES = 100 * 1024 * 1024;
+const NEARLY_FULL = 0.8;
+export const PHOTO_QUEUE_FULL = "PHOTO_QUEUE_FULL";
+// A queued photo whose file is gone (e.g. app data cleared): reported in
+// flushQueue's `dropped`, never as sent.
+export const PHOTO_FILE_MISSING = "PHOTO_FILE_MISSING";
+
+// { count, bytes, full, nearlyFull } for the unsent photos.
+export async function pendingPhotoRoom() {
+  const photos = (await readQueue()).filter((item) => item.type === "photo");
+  let bytes = 0;
+  for (const item of photos) {
+    try {
+      const file = new File(item.file);
+      if (file.exists) bytes += file.size ?? 0;
+    } catch { /* unreadable: counted by number only */ }
+  }
+  const count = photos.length;
+  return {
+    count,
+    bytes,
+    full: count >= MAX_PENDING_PHOTOS || bytes >= MAX_PENDING_PHOTO_BYTES,
+    nearlyFull: count >= MAX_PENDING_PHOTOS * NEARLY_FULL || bytes >= MAX_PENDING_PHOTO_BYTES * NEARLY_FULL,
+  };
+}
+
+// Throws PHOTO_QUEUE_FULL (nothing written) when the photo would not fit.
 export async function queuePhoto(jobId, dataUrl, location, note, extra) {
+  const room = await pendingPhotoRoom();
+  if (room.count >= MAX_PENDING_PHOTOS || room.bytes + dataUrl.length > MAX_PENDING_PHOTO_BYTES) {
+    throw Object.assign(
+      new Error(`Phone storage for unsent photos is full (${MAX_PENDING_PHOTOS} photos / ${MAX_PENDING_PHOTO_BYTES / 1024 / 1024} MB). This photo was not saved. Get signal so the waiting photos upload, then take it again.`),
+      { code: PHOTO_QUEUE_FULL },
+    );
+  }
   const dir = photoDir();
   dir.create({ intermediates: true, idempotent: true });
   const file = new File(dir, `${jobId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.txt`);
@@ -147,7 +186,10 @@ async function send(item) {
   const ts = new Date(item.queuedAt).toISOString();
   if (item.type === "photo") {
     const file = new File(item.file);
-    if (!file.exists) return; // lost (e.g. app data cleared): nothing to send
+    if (!file.exists) {
+      // Lost (e.g. app data cleared): the crew must be told it never went.
+      throw Object.assign(new Error("the photo file is no longer on the phone"), { code: PHOTO_FILE_MISSING });
+    }
     const dataUrl = await file.text();
     const res = await uploadJobPhoto(item.id, dataUrl, item.location || {}, item.note, { ...item.extra, capturedAt: ts });
     deletePhotoFile(item);
@@ -180,7 +222,8 @@ let flushing = null;
 // be reached for (the rest would fail too, and order matters: "On Site" must
 // not arrive before "En Route"). One the server refuses is dropped and
 // returned in `dropped` ({ ...item, code, message }) so the app can say
-// which updates were not applied and why. A refused completion form is kept
+// which updates were not applied and why; so is a photo whose file is gone
+// (code PHOTO_FILE_MISSING), which can never be sent. A refused completion form is kept
 // as "not delivered" instead, unless the job is no longer the crew's (409
 // NOT_YOUR_JOB, 404). Only one flush runs at a time; a
 // call made meanwhile gets the running one.
@@ -208,7 +251,7 @@ export function flushQueue() {
           await settleWorkOrder(item);
           done.add(itemKey(item));
         } catch (err) {
-          if (!isRefusal(err)) break;
+          if (!isRefusal(err) && err?.code !== PHOTO_FILE_MISSING) break;
           await settleWorkOrder(item);
           if (item.type === "completion" && !isNotYourJob(err) && err.status !== 404) {
             await keepUndeliveredCompletion(item.id, item.form, err.message);

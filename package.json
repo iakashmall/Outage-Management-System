@@ -24,6 +24,7 @@
     "dev:web": "npm --workspace frontend run dev",
     "dev:mobile": "expo start --web --port 5174",
     "test": "npm --workspace backend run test",
+    "test:app": "node --import ./src/lib/__tests__/register.mjs --test src/lib/__tests__/auth.test.mjs src/lib/__tests__/offlineQueue.test.mjs",
     "start": "concurrently -n backend,web,mobile -c cyan,green,magenta \"npm:dev:backend\" \"npm:dev:web\" \"npm:dev:mobile\"",
     "map:check": "node scripts/map-connect.mjs check",
     "map:tunnel": "node scripts/map-connect.mjs tunnel",
