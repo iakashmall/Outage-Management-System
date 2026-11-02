@@ -174,11 +174,11 @@ const server = app.listen(4100, async () => {
   check('GET /calls stays readable without those roles', await j2('GET', '/calls') === 200);
   check('POST /scada/fault is 403 for a crew role (OMS-02)', await j2('POST', '/scada/fault', { tag: 'X.Y.CB1.TRIP' }) === 403);
   server2.close();
-  const savedSimFlag = process.env.ENABLE_SCADA_SIMULATION;
-  delete process.env.ENABLE_SCADA_SIMULATION;
+  const savedSimFlag = process.env.ENABLE_SIMULATORS;
+  delete process.env.ENABLE_SIMULATORS;
   const simOff = await j('POST', '/scada/simulate', { tag: 'X.Y.CB1.TRIP', event: 'trip' });
-  check('POST /scada/simulate is 403 without ENABLE_SCADA_SIMULATION, even for system_admin', simOff.status === 403 && /ENABLE_SCADA_SIMULATION/.test(simOff.body.error));
-  if (savedSimFlag !== undefined) process.env.ENABLE_SCADA_SIMULATION = savedSimFlag;
+  check('POST /scada/simulate is 404 without ENABLE_SIMULATORS, even for system_admin', simOff.status === 404);
+  if (savedSimFlag !== undefined) process.env.ENABLE_SIMULATORS = savedSimFlag;
 
   // Phase 1 tail — Redis read-through cache on /indicators
   const first = await j('GET', '/indicators');
@@ -478,7 +478,7 @@ const server = app.listen(4100, async () => {
     `${lpBefore.customers} -> ${lpAfter.customers}`);
 
   // 8) the FAT hook end to end: /scada/simulate -> bus -> same handler
-  process.env.ENABLE_SCADA_SIMULATION = 'true';
+  process.env.ENABLE_SIMULATORS = 'true';
   _resetDedupState();
   const simTrip = await j('POST', '/scada/simulate', { tag: 'BHEL2.FDRB.CB1.TRIP', event: 'trip', feeder: 'UPCL-BS-B' });
   await new Promise((r) => setTimeout(r, 400));
@@ -491,7 +491,7 @@ const server = app.listen(4100, async () => {
   check('POST /scada/simulate reclose → momentary auto-close', simRe.status === 202 && simAfter?.status === 'closed' && simAfter?.momentary === true, simAfter?.status);
   check('POST /scada/simulate rejects an unknown event (400)', (await j('POST', '/scada/simulate', { tag: 'X.Y', event: 'blink' })).status === 400);
   check('POST /scada/fault still ingests for system_admin (202)', (await j('POST', '/scada/fault', { tag: 'ZZ.FDR1.CB1.MINOR', condition: 'MINOR' })).status === 202);
-  if (savedSimFlag === undefined) delete process.env.ENABLE_SCADA_SIMULATION; else process.env.ENABLE_SCADA_SIMULATION = savedSimFlag;
+  if (savedSimFlag === undefined) delete process.env.ENABLE_SIMULATORS; else process.env.ENABLE_SIMULATORS = savedSimFlag;
 
   // ---- OMS-05: a SCADA event naming its tripped equipment by mRID ----
   // Needs PostGIS and network.* (a separate migration, applied here when

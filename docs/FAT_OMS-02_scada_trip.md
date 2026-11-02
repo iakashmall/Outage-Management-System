@@ -19,7 +19,7 @@ Prediction (feeder-level): every distribution transformer on the tripped feeder 
 
 ## Setup (once)
 
-1. Backend `.env`: add `ENABLE_SCADA_SIMULATION=true` (test/FAT only, never in production) and `SIMULATOR=off`
+1. Backend `.env`: add `ENABLE_SIMULATORS=true` (test/FAT only, never in production) and `SIMULATOR=off`
    (the background simulator raises random trips at random substations, which would merge into the demo tickets),
    then restart the backend. Without the flag, the trigger below returns 403 "SCADA simulation is disabled...".
 2. Optional fresh demo data: `cd backend; node -e "import('./src/infra/seed.js').then(m=>m.seed({force:true})).then(r=>{console.log(r);process.exit(0)})"`
@@ -83,6 +83,6 @@ Optional: with two devices on one feeder, e.g. `Sim "LALJ.FDRA.CB1.TRIP" trip "U
 
 ## Notes for the FAT record
 
-- `/api/scada/simulate` is the test hook (system_admin + `ENABLE_SCADA_SIMULATION=true`). The real ingestion route `/api/scada/fault` takes the same `event: trip|reclose` field and is limited to `scada_operator` / `system_admin`; the DNP3 adapter now emits a reclose when a monitored point returns to closed.
+- `/api/scada/simulate` is the test hook (system_admin + `ENABLE_SIMULATORS=true`; without the flag it answers 404). The real ingestion route `/api/scada/fault` takes the same `event: trip|reclose` field and is limited to `scada_operator` / `system_admin`; the DNP3 adapter now emits a reclose when a monitored point returns to closed.
 - Callbacks are console-logged SMS (no SMS gateway yet) recorded in the `notifications` table with masked numbers.
 - Automated evidence: `cd backend; npm test` (scratch database) — trip/prediction, dedup, momentary vs sustained, two-device restore, merge into a customer ticket, callbacks/opt-out/idempotency, DMS skip, IEEE 1366 hand-worked MAIFI example, route guards.

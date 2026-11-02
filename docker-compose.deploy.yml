@@ -96,7 +96,7 @@ services:
       EVENT_BUS_DRIVER: memory
       CORS_ORIGIN: "*"
       CUSTOMERS_SERVED: "18500"
-      ENABLE_SCADA_SIMULATION: "false"
+      ENABLE_SIMULATORS: "false"   # keep off: /complaints/simulate and /scada/simulate answer 404
       SIMULATOR: "off"   # the simulator mixes fake crew GPS, alarms and calls into real data
       MAP_SERVER_URL: http://map-tunnel:8095
       OMS_PUBLIC_URL: https://${OMS_HOST:-localhost}:8443

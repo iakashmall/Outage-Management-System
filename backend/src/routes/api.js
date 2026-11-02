@@ -36,6 +36,7 @@ import { dispatchRoutes } from './dispatch.js';
 import { PRIORITY_CLASSES, isActive, isMovable, priorityInfo } from '../domain/rebalance.js';
 import { isOperator } from '../domain/plannedOutage.js';
 import { normalizeStatus, isCrewStatus, decideStatus, undoOpenUntil, isLocked, RESTORED } from '../domain/jobWorkflow.js';
+import { validate, validateComplaint, validateScadaEvent, validateCall, requireSimulators, intakeRateLimit, scadaRateLimit } from './intake.js';
 import { sendSmsVia, maskPhone, smsDriverName } from '../realtime/sms.js';
 import { listEscalations } from '../realtime/escalation.js';
 import { slaDueAt } from '../domain/sla.js';
@@ -577,16 +578,13 @@ async function ingestScadaEvent(req, res, auditAction) {
 
 // Ingestion route (stand-in for a live SCADA feed). Behaviour change: was open
 // to any signed-in user, now SCADA operators and admins only.
-api.post('/scada/fault', requireRole('scada_operator', 'system_admin'), (req, res) => ingestScadaEvent(req, res, 'scada.fault.inject'));
+api.post('/scada/fault', requireRole('scada_operator', 'system_admin'), scadaRateLimit, validate(validateScadaEvent), (req, res) => ingestScadaEvent(req, res, 'scada.fault.inject'));
 
 // FAT/test hook: trip or reclose a device without a real RTU. Admin only, and
-// only when ENABLE_SCADA_SIMULATION=true (off by default; never set it in production).
-api.post('/scada/simulate', requireRole('system_admin'), (req, res) => {
-  if (process.env.ENABLE_SCADA_SIMULATION !== 'true') {
-    return res.status(403).json({ error: 'SCADA simulation is disabled. Set ENABLE_SCADA_SIMULATION=true on the backend to enable it (test/FAT environments only).' });
-  }
-  return ingestScadaEvent(req, res, 'scada.simulate');
-});
+// only when ENABLE_SIMULATORS=true (off by default; never set it in production):
+// otherwise 404, as if the route did not exist.
+api.post('/scada/simulate', requireSimulators, requireRole('system_admin'), scadaRateLimit, validate(validateScadaEvent),
+  (req, res) => ingestScadaEvent(req, res, 'scada.simulate'));
 
 api.post('/alarms/ack-all', async (req, res) => {
   // NOTE: was `.forEach(async ...)` - that pattern doesn't await, so it's a
@@ -618,7 +616,7 @@ api.get('/calls', async (req, res) => {
   }));
 });
 
-api.post('/calls', requireRole(...CALL_ROLES), async (req, res) => {
+api.post('/calls', requireRole(...CALL_ROLES), intakeRateLimit, validate(validateCall), async (req, res) => {
   const b = req.body || {};
   const str = (v) => (typeof v === 'string' ? v.trim() : '');
   const customer = str(b.customer), phone = str(b.phone), address = str(b.address), category = str(b.category);
@@ -754,8 +752,9 @@ async function ingestComplaint(body, who) {
 
 api.get('/complaints', async (req, res) => res.json(await repo.complaints()));
 
-// REST intake used by the external complaint service
-api.post('/complaints', async (req, res) => {
+// REST intake used by the external complaint service. Call-centre, operator
+// or admin role (an external service needs a service account with one of them).
+api.post('/complaints', requireRole(...CALL_ROLES), intakeRateLimit, validate(validateComplaint), async (req, res) => {
   const r = await ingestComplaint(req.body || {}, req.user);
   res.status(201).json({
     queryId: r.complaint.qid, externalId: r.complaint.external_id, action: r.action,
@@ -781,8 +780,9 @@ api.get('/complaints/:qid/trace', async (req, res) => {
   });
 });
 
-// Demo helper: generate a realistic incoming complaint near a random substation
-api.post('/complaints/simulate', async (req, res) => {
+// Demo helper: generate a realistic incoming complaint near a random substation.
+// 404 unless ENABLE_SIMULATORS=true.
+api.post('/complaints/simulate', requireSimulators, async (req, res) => {
   const cats = ['No Supply', 'No Supply', 'Partial Supply', 'Voltage', 'Wire Down', 'Meter'];
   const names = ['Rakesh Verma', 'Sunita Devi', 'Imran Khan', 'Pooja Sharma', 'Deepak Rana', 'Anjali Bisht', 'Mohit Saini', 'Kavita Joshi'];
   const s = netSubstations[Math.floor(Math.random() * netSubstations.length)] || { lat: 29.95, lon: 78.13 };

@@ -111,7 +111,8 @@ at rest (`ENCRYPTION_KEY`), sequence-based ID generation, network topology schem
 
 **Environment variables read by the backend:** `PORT`, `DATABASE_URL`, `REDIS_URL`, `EVENT_BUS_DRIVER`, `KAFKA_BROKERS`,
 `KEYCLOAK_JWKS_URI`, `DMS_RESTORATION_URL`, `DMS_API_TOKEN`, `BREVO_SMTP_HOST/PORT/USER/KEY`, `NOTIFY_FROM`,
-`NOTIFY_TEST_TO`, `OMS_PUBLIC_URL`, `REPORT_CRON`, `REPORT_RECIPIENTS`, `SIMULATOR`, `ENABLE_SCADA_SIMULATION`,
+`NOTIFY_TEST_TO`, `OMS_PUBLIC_URL`, `REPORT_CRON`, `REPORT_RECIPIENTS`, `SIMULATOR`, `ENABLE_SIMULATORS`,
+`INTAKE_RATE_LIMIT_PER_MIN`, `SCADA_RATE_LIMIT_PER_MIN`,
 `MOMENTARY_MAX_MIN`, `CUSTOMERS_SERVED`, `ENCRYPTION_KEY`, `TILES_DIR`, `MAP_SERVER_URL`, `MAP_API_KEY`. The
 backend reads `backend/.env` (git-ignored). The seed script does not load it: run it with `node --env-file=.env`.
 
