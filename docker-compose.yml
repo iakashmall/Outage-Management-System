@@ -16,7 +16,11 @@ services:
       POSTGRES_PASSWORD: oms
     ports: ["127.0.0.1:15432:5432"]
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # timescaledb-ha's real data dir (as for the replica below); /var/lib/postgresql/data
+      # left the database in the container layer, lost whenever the container is recreated.
+      # A database created before this change is still in that layer: pg_dump it before the
+      # next `docker compose up` recreates the container, then restore into the new volume.
+      - pgdata:/home/postgres/pgdata/data
       - ./db/init:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U oms"]

@@ -264,6 +264,13 @@ const server = app.listen(PORT, async () => {
     const byPub = (await through('GET', '/style.json', evilHost)).upstream[0]?.headers || {};
     check('OMS_PUBLIC_URL set: x-forwarded-host/proto/prefix come from it, not the client',
       byPub['x-forwarded-host'] === 'oms.example.org' && byPub['x-forwarded-proto'] === 'https' && byPub['x-forwarded-prefix'] === '/oms/api/map', JSON.stringify(byPub));
+    // a request straight to the backend port (the crew app on :4000) keeps its own Host and protocol
+    process.env.OMS_PUBLIC_URL = 'https://1.2.3.4:8443';
+    const byDirect = (await through('GET', '/style.json', { headers: { host: '1.2.3.4:4000', 'x-forwarded-host': 'evil2.example', 'x-forwarded-proto': 'https' } })).upstream[0]?.headers || {};
+    check("OMS_PUBLIC_URL set, Host on another port: x-forwarded-host/proto are the request's own",
+      byDirect['x-forwarded-host'] === '1.2.3.4:4000' && byDirect['x-forwarded-proto'] === 'http' && byDirect['x-forwarded-prefix'] === '/api/map', JSON.stringify(byDirect));
+    const bySamePort = (await through('GET', '/style.json', { headers: { host: '1.2.3.4:8443' } })).upstream[0]?.headers || {};
+    check('OMS_PUBLIC_URL set, Host on its own port: still OMS_PUBLIC_URL', bySamePort['x-forwarded-host'] === '1.2.3.4:8443' && bySamePort['x-forwarded-proto'] === 'https');
     process.env.OMS_PUBLIC_URL = 'ftp://not-http';
     const byBad = (await through('GET', '/style.json', evilHost)).upstream[0]?.headers || {};
     check('OMS_PUBLIC_URL not http(s): falls back to the request Host', byBad['x-forwarded-host'] === 'evil.example');

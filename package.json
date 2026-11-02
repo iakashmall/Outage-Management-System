@@ -13,8 +13,6 @@
   "scripts": {
     "dev": "expo start --web --port 5174",
     "build": "expo export --platform web",
-    "server": "node server/index.js",
-    "photo-server": "node server/index.js",
     "native": "expo start",
     "android": "expo start --android",
     "ios": "expo start --ios",
@@ -42,6 +40,7 @@
     "expo-crypto": "~57.0.3",
     "expo-file-system": "~57.0.7",
     "expo-font": "~57.0.4",
+    "expo-image-manipulator": "~57.0.21",
     "expo-local-authentication": "~57.0.3",
     "expo-location": "~57.0.19",
     "expo-network": "~57.0.2",

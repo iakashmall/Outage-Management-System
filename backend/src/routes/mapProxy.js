@@ -136,12 +136,18 @@ async function mapInfo() {
 
 // x-forwarded-host/proto/prefix for the map server. With OMS_PUBLIC_URL set (e.g. https://oms.example.org) they come
 // from it; otherwise from this connection's Host header and protocol (fine when nothing in front rewrites Host).
+// OMS_PUBLIC_URL only describes the web entrance (Caddy -> nginx -> here; nginx sends Host without a port). A request
+// made straight to the backend port (the crew app on :4000) has a Host with a port other than OMS_PUBLIC_URL's: its
+// links must point back at that same address, not at the HTTPS entrance, whose self-signed certificate phones refuse.
 function forwardedFor(req) {
   const pub = process.env.OMS_PUBLIC_URL;
   if (pub) {
     try {
       const u = new URL(pub);
       if (u.protocol === 'http:' || u.protocol === 'https:') {
+        const reqPort = /^(?:\[[^\]]*\]|[^:]*):(\d+)$/.exec(String(req.headers.host || ''))?.[1];
+        const pubPort = u.port || (u.protocol === 'https:' ? '443' : '80');
+        if (reqPort && reqPort !== pubPort) return { host: String(req.headers.host), proto: req.protocol || 'http', prefix: req.baseUrl };
         return { host: u.host, proto: u.protocol.slice(0, -1), prefix: u.pathname.replace(/\/+$/, '') + req.baseUrl };
       }
     } catch { /* ignored: fall back to the connection */ }

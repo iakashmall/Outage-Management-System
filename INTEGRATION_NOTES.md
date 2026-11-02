@@ -84,6 +84,11 @@ npm run dev          # Vite web build at http://localhost:5173
 
 ## PostgreSQL photo storage
 
+> Removed on 2026-10-27: `server/` and its `npm run server` script no longer
+> exist; the steps below are historical. It is not in tag
+> `archive/adeeb-mobile-native-2026-09-02`; the last version is in master
+> commit `1bdf489`. Crew photos now go through the backend (`backend/`).
+
 Photo uploads are handled by `server/index.js`. The service accepts the
 existing `{ dataUrl, lat, lon, note }` payload, compresses the source image
 to WebP with a maximum 1920px edge and quality 72, then stores the compressed

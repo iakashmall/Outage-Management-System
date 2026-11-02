@@ -10,6 +10,12 @@
 https://{$OMS_HOST}:8443 {
 	tls internal
 
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
 	# Keycloak's master realm (its own admin login) and admin console are not served here.
 	@kcmaster path /realms/master /realms/master/*
 	respond @kcmaster 404
@@ -17,7 +23,26 @@ https://{$OMS_HOST}:8443 {
 	# What the oms-upcl login pages need. An allowlist, not /realms/*: a path such as /realms/master;x=1/ (a ';'
 	# path parameter) slips past the 404 above but Keycloak still serves it as the master realm.
 	@keycloak path /realms/oms-upcl /realms/oms-upcl/* /resources/* /js/* /robots.txt
-	reverse_proxy @keycloak keycloak:8080
+	reverse_proxy @keycloak keycloak:8080 {
+		header_down -Server
+	}
 
-	reverse_proxy oms-web:80
+	reverse_proxy oms-web:80 {
+		header_down -Server   # hides the nginx version
+	}
+}
+
+# Crew app sign-in, plain HTTP on :18080 (the phones use http://<server>:18080). Keycloak itself is no longer
+# published: only the oms-upcl login pages pass, so the master realm and the admin console are not reachable here.
+# Admins reach the console on 127.0.0.1:18081 through an SSH tunnel (deploy/ubuntu/DEPLOY.md).
+http://:18080 {
+	@keycloak path /realms/oms-upcl /realms/oms-upcl/* /resources/* /js/* /robots.txt
+	handle @keycloak {
+		reverse_proxy keycloak:8080 {
+			header_down -Server
+		}
+	}
+	handle {
+		respond 404
+	}
 }

@@ -91,7 +91,10 @@ const isJobDone = (job) => DONE_STATUSES.includes(String(job.status).toLowerCase
 const DISMISSED_CANCELLED_KEY = 'oms-dismissed-cancelled';
 // When the crew last opened the Messages screen (for the unread count).
 const MESSAGES_READ_KEY = 'oms-messages-read-at';
-const MESSAGE_POLL_MS = 5000;
+// Fallback message poll: every 15 s while the live socket is down, at most
+// once a minute while it is up (the socket already delivers each message).
+const MESSAGE_POLL_MS = 15000;
+const MESSAGE_POLL_LIVE_MS = 60000;
 const GLIMPSE_MS = 8000;
 
 // Which watermark a photo gets: before work starts it is the "work started"
@@ -640,7 +643,10 @@ function NativeAppScreen() {
       return undefined;
     }
     let cancelled = false;
+    let live = false;
+    let lastLoad = 0;
     const loadMessages = () => {
+      lastLoad = Date.now();
       getCrewMessages(crew.id)
         .then(async (items) => {
           if (cancelled || !Array.isArray(items)) return;
@@ -659,8 +665,10 @@ function NativeAppScreen() {
         .catch(() => {});
     };
     loadMessages();
-    const interval = setInterval(loadMessages, MESSAGE_POLL_MS);
-    const unwatch = watchMessages(loadMessages);
+    const interval = setInterval(() => {
+      if (!live || Date.now() - lastLoad >= MESSAGE_POLL_LIVE_MS) loadMessages();
+    }, MESSAGE_POLL_MS);
+    const unwatch = watchMessages(loadMessages, (up) => { live = up; });
     return () => {
       cancelled = true;
       clearInterval(interval);
@@ -777,13 +785,16 @@ function NativeAppScreen() {
     if (notice) addNotice(`${jobId} ${notice}`);
   }, [addNotice]);
 
+  // opts.location: a position the caller already took (the site check), so
+  // the crew does not wait for a second GPS fix.
   const handleAdvance = useCallback(async (job, nextStatus, opts = {}) => {
-    const location = await getLocation();
+    const hasFix = Number.isFinite(opts.location?.lat) && Number.isFinite(opts.location?.lon);
     // OMS-01: a gated planned-outage status change (Work Started / Work
     // Finished) goes to the server first and the screen moves only once it
     // was accepted. Never queued: the server would refuse a stale one, and it
     // would sit in Pending Sync forever. Throws so the job screen can say so.
     if (opts.onlineOnly) {
+      const location = hasFix ? opts.location : await getLocation();
       try {
         await updatePlannedJobStatus(job.id, nextStatus, location);
       } catch (err) {
@@ -794,8 +805,11 @@ function NativeAppScreen() {
       setActiveJob((current) => current?.id === job.id ? { ...current, status: nextStatus } : current);
       return;
     }
+    // The screen moves at once; the position is taken after, so the crew
+    // never waits on GPS to see the tap land.
     setJobs((current) => current.map((j) => (j.id === job.id ? { ...j, status: nextStatus } : j)));
     setActiveJob((current) => current?.id === job.id ? { ...current, status: nextStatus } : current);
+    const location = hasFix ? opts.location : await getLocation();
 
     // Demo mode has no real backend to sync with — queue immediately so
     // the pending-sync section actually shows something, instead of the
@@ -840,10 +854,10 @@ function NativeAppScreen() {
   // job opens so the crew carries on with the photo and Work Started.
   // Returns null when done, else the message for the map to show.
   const markOnSiteFromMap = useCallback(async (job) => {
-    const here = await getLocation({ allowCached: false }).catch(() => ({}));
+    const here = await getLocation({ allowCached: false, fresh: true }).catch(() => ({}));
     const blocked = siteBlock(job, 'On Site', here);
     if (blocked) return blocked;
-    await handleAdvance(job, 'On Site');
+    await handleAdvance(job, 'On Site', { location: here });
     openPage({ tab: 'Jobs', jobId: job.id });
     return null;
   }, [handleAdvance, openPage]);
@@ -1595,7 +1609,9 @@ function PhotoCamera({ tag, onCapture, onClose }) {
     setBusy(true);
     setError('');
     try {
-      const photo = await cameraRef.current.takePictureAsync({ base64: true, quality: 0.5 });
+      // No base64 here: lib/photos.js shrinks the file first and encodes only
+      // the small copy for upload.
+      const photo = await cameraRef.current.takePictureAsync({ quality: 0.7 });
       await onCapture(photo);
     } catch (err) {
       setError(err?.message || 'Could not capture the photo.');
@@ -1722,17 +1738,19 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
   // permit returned. Read live from the server (offline = stays closed), then
   // the usual safety checklist / completion flow runs. Fault jobs: unchanged.
   const plannedGated = !!job.planned && (next === 'Work Started' || next === 'Work Finished');
-  const advance = () => {
-    const sent = Promise.resolve(onAdvance(job, next, plannedGated ? { onlineOnly: true } : undefined));
+  // location: the site check's fix, reused so the crew waits for GPS once.
+  const advance = (location) => {
+    const sent = Promise.resolve(onAdvance(job, next, { onlineOnly: plannedGated, location }));
     return plannedGated ? sent.catch((err) => setPlannedMessage(`Status NOT changed: ${err.message}`)) : sent;
   };
 
   const requestAdvance = async () => {
     if (!next || !checklistDone) return;
+    let here;
     // On Site / Work Started only at the site (the server checks it too).
     if (SITE_STATUSES.includes(next) && !job.planned && job.coordinates) {
       setAdvancing(true);
-      const here = await getLocation({ allowCached: false }).catch(() => ({}));
+      here = await getLocation({ allowCached: false, fresh: true }).catch(() => ({}));
       setAdvancing(false);
       const blocked = siteBlock(job, next, here);
       setSiteMessage(blocked || '');
@@ -1762,7 +1780,7 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
     }
     setAdvancing(true);
     try {
-      await advance();
+      await advance(here);
     } finally {
       setAdvancing(false);
     }

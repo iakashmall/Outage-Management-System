@@ -55,7 +55,23 @@ export async function syncIdSequences() {
   `);
 }
 
+// On a fresh server the database container passes its health check, then restarts once after its
+// first-boot setup. A backend that connects in that gap used to crash at startup, so wait for it.
+// DB_WAIT_S (default 120) caps the wait; after that the original error is thrown.
+async function waitForDb() {
+  const deadline = Date.now() + (Number(process.env.DB_WAIT_S) || 120) * 1000;
+  for (let n = 1; ; n++) {
+    try { await db.one('SELECT 1'); return; }
+    catch (e) {
+      if (Date.now() > deadline) throw e;
+      console.warn(`[db] not reachable yet (${e.code || e.message}), retry ${n} in 3 s`);
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+  }
+}
+
 export async function migrate() {
+  await waitForDb();
   await db.none(`
     CREATE TABLE IF NOT EXISTS incidents (
       id            TEXT PRIMARY KEY,
@@ -228,6 +244,8 @@ export async function migrate() {
   `);
   await db.none(`
     ALTER TABLE alarms    ADD COLUMN IF NOT EXISTS incident_id TEXT REFERENCES incidents(id);
+    -- The role of the login in incident_events.actor (field_crew, oms_operator, ...); null for service names and old rows.
+    ALTER TABLE incident_events ADD COLUMN IF NOT EXISTS actor_role TEXT;
     ALTER TABLE trouble_calls ADD COLUMN IF NOT EXISTS area TEXT;
     ALTER TABLE trouble_calls ADD COLUMN IF NOT EXISTS reject_reason TEXT;
     ALTER TABLE trouble_calls ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMPTZ;
