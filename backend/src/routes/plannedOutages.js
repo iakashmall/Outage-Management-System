@@ -119,7 +119,7 @@ r.patch('/mobile/jobs/:id/status', async (req, res, next) => {
   // A finished job: re-point the crew at its next active job, if any.
   if (status === 'Work Complete') await repo.syncCrew(updated.crew_id);
   if (CREW_STATUS[status]) bus.publish(TOPICS.CREW_UPDATED, await repo.crew(updated.crew_id));
-  await repo.addIncidentEvent(job.incident_id, who.username || 'Crew', 'field', `Crew job ${job.id}: ${status}`);
+  await repo.addIncidentEvent(job.incident_id, who, 'field', `Crew job ${job.id}: ${status}`);
   bus.publish(TOPICS.JOB_UPDATED, updated);
   res.json(updated);
 });

@@ -65,7 +65,10 @@ api.use(feederKpiRoutes);
 // OMS-03 workload balancing (/dispatch/*, POST /crews, PATCH /crews/:id).
 api.use(dispatchRoutes);
 
-const actor = (req) => req.header('x-user') || 'operator';
+// Who did it, for audit_log and the other "by" columns: the verified token's
+// username (requireAuth), never a client header -- x-user is ignored.
+// incident_events take req.user itself, so the role is recorded next to the login.
+const actor = (req) => req.user?.username || 'unknown';
 
 // ---------- crew ownership (OMS-03) ----------
 // A token with a crew_id may only read or write its own crew and that crew's
@@ -128,7 +131,7 @@ async function notApplied(res, job, { kind, status = '', clientTs, rawTs, reason
   const key = Number.isFinite(Date.parse(rawTs)) ? new Date(rawTs).toISOString() : at;
   if ((await repo.recordLateUpdate(job.id, kind, status, key, reason)) && job.incident_id) {
     const what = detail || `${kind}${status ? ' ' + status : ''}`;
-    await repo.addIncidentEvent(job.incident_id, 'Crew', 'field', `late update from crew not applied: ${reason} (job ${job.id}, ${what}, made ${at})`);
+    await repo.addIncidentEvent(job.incident_id, res.req.user, 'field', `late update from crew not applied: ${reason} (job ${job.id}, ${what}, made ${at})`);
     bus.publish(TOPICS.INCIDENT_UPDATED, await repo.incident(job.incident_id));
   }
   const current = await repo.job(job.id);
@@ -236,13 +239,13 @@ api.post('/mobile/jobs/:id/messages', async (req, res) => {
   if (info.locked) {
     return notApplied(res, job, { kind: 'message', reason: lockReason(info), detail: `message "${String(body).trim().slice(0, 200)}"` });
   }
-  const sender = req.user?.username || 'crew';
+  const sender = actor(req);
   // sender_role 'field_crew' marks a message from the crew app (the dashboard
   // shows it as from the crew; the phone knows it is its own).
   const msg = await repo.addMessage(job.incident_id, sender, 'field_crew', String(body).trim());
   const crewId = job.crew_id;
   bus.publish(TOPICS.MESSAGE_POSTED, { ...msg, job_id: job.id, crew_id: crewId });
-  if (job.incident_id) await repo.addIncidentEvent(job.incident_id, sender, 'message', `Message from crew ${crewId || ''}: ${String(body).trim().slice(0, 120)}`);
+  if (job.incident_id) await repo.addIncidentEvent(job.incident_id, req.user, 'message', `Message from crew ${crewId || ''}: ${String(body).trim().slice(0, 120)}`);
   res.status(201).json({ ...msg, job_id: job.id });
 });
 
@@ -274,11 +277,11 @@ api.post('/mobile/jobs/:id/reassign-request', async (req, res) => {
   if (!isActive(job)) return res.status(409).json({ code: 'JOB_NOT_ACTIVE', message: `job is ${job.status}` });
   const open = await repo.openReassignRequestForJob(job.id);
   if (open) return res.json({ request: open, duplicate: true });
-  const who = req.user?.username || 'crew';
+  const who = actor(req);
   const request = await repo.addReassignRequest({ job_id: job.id, incident_id: job.incident_id, crew_id: job.crew_id, reason: reason.slice(0, 500) });
   await repo.addJobUpdate(job.id, job.status, null, null, `Crew asked for reassignment: ${reason.slice(0, 200)}`, null, 'crew');
   if (job.incident_id) {
-    await repo.addIncidentEvent(job.incident_id, who, 'reassign_request', `Crew ${job.crew_id} asked to be taken off job ${job.id}: ${reason.slice(0, 200)}`);
+    await repo.addIncidentEvent(job.incident_id, req.user, 'reassign_request', `Crew ${job.crew_id} asked to be taken off job ${job.id}: ${reason.slice(0, 200)}`);
     bus.publish(TOPICS.INCIDENT_UPDATED, await repo.incident(job.incident_id));
   }
   bus.publish(TOPICS.JOB_UPDATED, { ...job, reassignRequest: request });
@@ -296,12 +299,12 @@ api.get('/reassign-requests', requireRole('oms_operator', 'system_admin', 'field
 });
 
 api.post('/reassign-requests/:id/dismiss', requireRole('oms_operator', 'system_admin'), async (req, res) => {
-  const who = req.user?.username || 'Control room';
+  const who = actor(req);
   const note = String(req.body?.note || '').trim().slice(0, 300) || null;
   const request = await repo.resolveReassignRequest(req.params.id, 'dismissed', who, note);
   if (!request) return res.status(404).json({ error: 'no open request with that id' });
   if (request.incident_id) {
-    await repo.addIncidentEvent(request.incident_id, who, 'reassign_request', `Reassignment request for job ${request.job_id} declined${note ? ': ' + note : ''}`);
+    await repo.addIncidentEvent(request.incident_id, req.user, 'reassign_request', `Reassignment request for job ${request.job_id} declined${note ? ': ' + note : ''}`);
     bus.publish(TOPICS.INCIDENT_UPDATED, await repo.incident(request.incident_id));
   }
   // The crew reads the answer from its job thread.
@@ -327,8 +330,8 @@ api.post('/mobile/jobs/:id/seen', async (req, res) => {
   if (opened && !job.opened_at) patch.opened_at = at;
   if (!Object.keys(patch).length) return res.json({ job, changed: false });
   const updated = await repo.updateJob(job.id, patch);
-  if (job.incident_id && patch.opened_at) await repo.addIncidentEvent(job.incident_id, 'Crew', 'field', `Crew ${job.crew_id} opened job ${job.id}`, at);
-  else if (job.incident_id) await repo.addIncidentEvent(job.incident_id, 'Crew', 'field', `Job ${job.id} received on crew ${job.crew_id}'s phone`, at);
+  if (job.incident_id && patch.opened_at) await repo.addIncidentEvent(job.incident_id, req.user, 'field', `Crew ${job.crew_id} opened job ${job.id}`, at);
+  else if (job.incident_id) await repo.addIncidentEvent(job.incident_id, req.user, 'field', `Job ${job.id} received on crew ${job.crew_id}'s phone`, at);
   bus.publish(TOPICS.JOB_UPDATED, updated);
   if (job.incident_id) bus.publish(TOPICS.INCIDENT_UPDATED, await repo.incident(job.incident_id));
   res.json({ job: updated, changed: true });
@@ -345,7 +348,7 @@ api.post('/incidents', requireRole('oms_operator', 'system_admin'), async (req, 
     lat: b.lat ?? null, lon: b.lon ?? null, crew_id: null, opened_at: opened,
     ert: null, sla_due_at: slaDueAt(b.severity, opened), source: b.source || 'MANUAL',
   });
-  await repo.addIncidentEvent(id, actor(req), 'created', `Manually created - ${b.cause || 'Unknown'}`);
+  await repo.addIncidentEvent(id, req.user, 'created', `Manually created - ${b.cause || 'Unknown'}`);
   await repo.audit(actor(req), 'incident.create', id);
   bus.publish(TOPICS.INCIDENT_CREATED, inc);
   await cacheDel('indicators');
@@ -361,7 +364,7 @@ api.patch('/incidents/:id/status', requireRole('oms_operator', 'system_admin'), 
   const patch = { status: to };
   if (to === 'resolved') { patch.ert = null; patch.resolved_at = new Date().toISOString(); } // SAIDI uses the real restoration time
   const updated = await repo.updateIncident(inc.id, patch);
-  await repo.addIncidentEvent(inc.id, actor(req), 'status', `${LABELS[inc.status]} - ${LABELS[to]}${req.body?.note ? ' - ' + req.body.note : ''}`);
+  await repo.addIncidentEvent(inc.id, req.user, 'status', `${LABELS[inc.status]} - ${LABELS[to]}${req.body?.note ? ' - ' + req.body.note : ''}`);
   await repo.audit(actor(req), 'incident.status', `${inc.id}:${to}`);
   // Cancelled: the crew's unfinished job is cancelled too (the phone moves it
   // to Pending Sync and stops sending updates for it) and the crew is freed.
@@ -399,7 +402,7 @@ api.patch('/incidents/:id/ert', requireRole('oms_operator', 'system_admin'), asy
       bus.publish(TOPICS.ERT_CHANGED, { ...updated, previousErt: oldErt });
     }
   }
-  await repo.addIncidentEvent(inc.id, actor(req), 'ert', `Estimated restoration updated to ${new Date(newErt).toLocaleString()}`);
+  await repo.addIncidentEvent(inc.id, req.user, 'ert', `Estimated restoration updated to ${new Date(newErt).toLocaleString()}`);
   await repo.audit(actor(req), 'incident.ert', inc.id);
   bus.publish(TOPICS.INCIDENT_UPDATED, updated);
   res.json(updated);
@@ -472,7 +475,7 @@ api.post('/incidents/:id/assign', requireRole('oms_operator', 'system_admin'), a
     ({ job, fromCrew } = await repo.reassignJob(existing.id, crew.id, { ...fields, ...reset }, who));
     if (request && handover) {
       await repo.resolveReassignRequestsForJob(existing.id, 'reassigned', who, `to ${crew.id}`);
-      await repo.addIncidentEvent(inc.id, who, 'reassign_request', `Reassignment request granted: job ${existing.id} moved from ${existing.crew_id} to ${crew.id}`);
+      await repo.addIncidentEvent(inc.id, req.user, 'reassign_request', `Reassignment request granted: job ${existing.id} moved from ${existing.crew_id} to ${crew.id}`);
     }
   } else {
     // An id already taken (an earlier, finished job of this incident, or another
@@ -485,7 +488,7 @@ api.post('/incidents/:id/assign', requireRole('oms_operator', 'system_admin'), a
   await repo.addJobUpdate(job.id, job.status, null, null, existing ? `Assigned to ${crew.id}` : null, null, 'dispatch');
   if (busy) await repo.syncCrew(crew.id);
   if (fromCrew && fromCrew !== crew.id) bus.publish(TOPICS.CREW_UPDATED, await repo.crew(fromCrew));
-  await repo.addIncidentEvent(inc.id, who, 'assigned', `${crew.name} assigned`);
+  await repo.addIncidentEvent(inc.id, req.user, 'assigned', `${crew.name} assigned`);
   await repo.audit(who, 'dispatch.assign', `${inc.id}-${crew.id}`);
   const updated = await repo.incident(inc.id);
   const updatedCrew = await repo.crew(crew.id);
@@ -660,7 +663,7 @@ api.post('/calls/:id/to-incident', requireRole('oms_operator', 'system_admin'), 
     sla_due_at: new Date(Date.now() + 180 * 60000).toISOString(), source: 'TCS', substation: call.area || null,
   });
   await repo.updateCall(call.id, { status: 'incident', linked_id: id });
-  await repo.addIncidentEvent(id, actor(req), 'created', `From trouble call ${call.id} (${call.customer})`);
+  await repo.addIncidentEvent(id, req.user, 'created', `From trouble call ${call.id} (${call.customer})`);
   bus.publish(TOPICS.INCIDENT_CREATED, inc);
   await cacheDel('indicators');
   res.status(201).json(inc);
@@ -753,7 +756,7 @@ api.get('/complaints', async (req, res) => res.json(await repo.complaints()));
 
 // REST intake used by the external complaint service
 api.post('/complaints', async (req, res) => {
-  const r = await ingestComplaint(req.body || {}, actor(req));
+  const r = await ingestComplaint(req.body || {}, req.user);
   res.status(201).json({
     queryId: r.complaint.qid, externalId: r.complaint.external_id, action: r.action,
     incidentId: r.incidentId, feeder: r.resolved.feeder, substation: r.resolved.substation,
@@ -791,7 +794,7 @@ api.post('/complaints/simulate', async (req, res) => {
     address: 'Near ' + (s.name || '').replace(/33\/11 kV/i, '').replace(/S\/s/i, '').trim(),
     lat: s.lat + (Math.random() - 0.5) * 0.006, lon: s.lon + (Math.random() - 0.5) * 0.006,
   };
-  const r = await ingestComplaint(body, 'complaint-api');
+  const r = await ingestComplaint(body, req.user);
   res.status(201).json({ queryId: r.complaint.qid, action: r.action, incidentId: r.incidentId, substation: r.resolved.substation, feeder: r.resolved.feeder, category: body.category, customer: body.customer,
     ...(r.plannedOutage ? { plannedOutage: r.plannedOutage } : {}) });
 });
@@ -883,7 +886,7 @@ api.post('/sms', requireRole('oms_operator', 'system_admin'), async (req, res) =
      VALUES ($/id/, $/incidentId/, 'sms', $/label/, NULL, $/message/, $/status/, $/error/, now(), $/feeder/, 'officer', $/by/)
      RETURNING id, ts, status`,
     { id: 'NOT' + nanoid(8), incidentId, label, message, status: r.status, error: r.error || null, feeder, by: actor(req) });
-  if (incidentId) await repo.addIncidentEvent(incidentId, actor(req), 'sms', `SMS to ${label}: ${message}`);
+  if (incidentId) await repo.addIncidentEvent(incidentId, req.user, 'sms', `SMS to ${label}: ${message}`);
   bus.publish(TOPICS.SMS_LOGGED, { id: row.id, incidentId, kind: 'officer' });
   res.status(201).json({ ...row, recipient: label, driver: smsDriverName() });
 });
@@ -1427,7 +1430,7 @@ api.patch('/mobile/jobs/:id/status', async (req, res) => {
     const inc = job.incident_id ? await repo.incident(job.incident_id) : null;
     const away = siteCheck({ status, site: inc, lat, lon });
     if (away) {
-      if (job.incident_id) await repo.addIncidentEvent(job.incident_id, 'Crew', 'field', `${status} refused for job ${job.id}: ${away.message}`, ts);
+      if (job.incident_id) await repo.addIncidentEvent(job.incident_id, req.user, 'field', `${status} refused for job ${job.id}: ${away.message}`, ts);
       return res.status(409).json(away);
     }
   }
@@ -1456,7 +1459,7 @@ api.patch('/mobile/jobs/:id/status', async (req, res) => {
 
   const skipped = decision.skipped.length ? ` (skipped ${decision.skipped.join(', ')})` : '';
   await repo.addJobUpdate(job.id, status, lat ?? null, lon ?? null, [note, skipped.trim()].filter(Boolean).join(' ') || null, ts, source);
-  if (job.incident_id) await repo.addIncidentEvent(job.incident_id, operator ? (who.username || 'Control room') : 'Crew', 'field', 'Status: ' + status + skipped, ts);
+  if (job.incident_id) await repo.addIncidentEvent(job.incident_id, req.user, 'field', 'Status: ' + status + skipped, ts);
   // reflect crew status + incident progress back to control room (an
   // off-shift crew stays off_shift: availability is the dispatcher's call)
   const map = { 'En Route': 'in_transit', 'On Site': 'in_service', 'Work Started': 'in_service', 'Work Complete': 'available' };
@@ -1471,7 +1474,7 @@ api.patch('/mobile/jobs/:id/status', async (req, res) => {
   }
   if (status === 'Work Complete' && job.incident_id) {
     await repo.updateIncident(job.incident_id, { status: 'pending' });
-    await repo.addIncidentEvent(job.incident_id, 'Crew', 'field', 'Work complete - awaiting verification', ts);
+    await repo.addIncidentEvent(job.incident_id, req.user, 'field', 'Work complete - awaiting verification', ts);
   }
   if (job.incident_id) await cacheDel('indicators');
   const updated = await repo.job(job.id);
@@ -1522,7 +1525,7 @@ api.post('/mobile/jobs/:id/completion', async (req, res) => {
   });
   if (created && job.incident_id) {
     const restored = row.restored ? `, supply restored: ${row.restored}` : '';
-    await repo.addIncidentEvent(job.incident_id, req.user?.username || 'Crew', 'field', `Field completion report submitted for job ${job.id}${restored}`, submittedAt);
+    await repo.addIncidentEvent(job.incident_id, req.user, 'field', `Field completion report submitted for job ${job.id}${restored}`, submittedAt);
     bus.publish(TOPICS.INCIDENT_UPDATED, await repo.incident(job.incident_id));
   }
   bus.publish(TOPICS.JOB_UPDATED, await repo.job(job.id));
@@ -1554,7 +1557,7 @@ api.post('/mobile/jobs/:id/checklist', async (req, res) => {
     event = (await repo.incidentEvents(job.incident_id)).find((e) => e.kind === 'checklist' && e.note === note) || null;
     duplicate = !!event;
     if (!event) {
-      event = await repo.addIncidentEvent(job.incident_id, req.user?.username || 'Crew', 'checklist', note, passedAt);
+      event = await repo.addIncidentEvent(job.incident_id, req.user, 'checklist', note, passedAt);
       bus.publish(TOPICS.INCIDENT_UPDATED, await repo.incident(job.incident_id));
     }
   }
@@ -1574,13 +1577,13 @@ api.post('/mobile/jobs/:id/reopen', async (req, res) => {
   if (!info.undoUntil) return notApplied(res, job, { kind: 'reopen', clientTs: now, reason: 'job locked' });
   const written = await repo.updateJobIf(job.id, job.crew_id, 'Work Complete', { status: 'Work Started', completed_at: null, updated_at: now });
   if (!written) return notApplied(res, job, { kind: 'reopen', clientTs: now, reason: 'job changed meanwhile' });
-  const by = who.username || 'Crew';
+  const by = actor(req);
   await repo.addJobUpdate(job.id, 'Work Started', null, null, `Reopened by ${by} (undo of Work Complete)`, now, isOperator(who) ? 'dispatch' : 'crew');
   if ((await repo.crew(job.crew_id))?.on_shift !== false) await repo.updateCrew(job.crew_id, { status: 'in_service' });
   await repo.syncCrew(job.crew_id);
   if (job.incident_id) {
     await repo.updateIncident(job.incident_id, { status: 'in_progress' });
-    await repo.addIncidentEvent(job.incident_id, by, 'field', `Crew reopened job ${job.id} (undo of Work Complete); back to In Progress`, now);
+    await repo.addIncidentEvent(job.incident_id, req.user, 'field', `Crew reopened job ${job.id} (undo of Work Complete); back to In Progress`, now);
     await cacheDel('indicators');
   }
   await repo.audit(by, 'job.reopen', job.id);
@@ -1603,7 +1606,7 @@ api.post('/incidents/:id/return-for-correction', requireRole('oms_operator', 'sy
   if (inc.status !== 'pending') return res.status(409).json({ code: 'NOT_PENDING', message: 'only a Pending Verification incident can be returned for correction' });
   const job = (await repo.jobsForIncident(inc.id)).find((j) => j.status === 'Work Complete' && j.crew_id);
   if (!job) return res.status(409).json({ code: 'NO_COMPLETED_JOB', message: 'this incident has no completed crew job to return' });
-  const by = req.user?.username || actor(req);
+  const by = actor(req);
   const now = new Date().toISOString();
   const written = await repo.updateJobIf(job.id, job.crew_id, 'Work Complete', { status: 'Requires Revisit', completed_at: null, updated_at: now });
   if (!written) return res.status(409).json({ code: 'JOB_CHANGED', message: 'the job changed meanwhile; reload and try again' });
@@ -1611,7 +1614,7 @@ api.post('/incidents/:id/return-for-correction', requireRole('oms_operator', 'sy
   if ((await repo.crew(job.crew_id))?.on_shift !== false) await repo.updateCrew(job.crew_id, { status: 'in_service' });
   await repo.syncCrew(job.crew_id);
   await repo.updateIncident(inc.id, { status: 'in_progress' });
-  await repo.addIncidentEvent(inc.id, by, 'status', `Returned for correction (job ${job.id}): ${reason}`, now);
+  await repo.addIncidentEvent(inc.id, req.user, 'status', `Returned for correction (job ${job.id}): ${reason}`, now);
   await repo.audit(by, 'incident.return_for_correction', inc.id);
   await cacheDel('indicators');
   const updated = await repo.incident(inc.id);
@@ -1700,7 +1703,7 @@ api.post('/mobile/crews/:id/work-order/start', async (req, res) => {
     if (row?.start_client_id === clientRequestId) return answer(200, { applied: true, duplicate: true });
     return answer(200, { applied: false, reason: row?.status === 'closed' ? 'day already ended' : 'day already started' });
   }
-  await repo.audit(req.user?.username || 'Crew', 'work_order.start', row.id);
+  await repo.audit(actor(req), 'work_order.start', row.id);
   bus.publish(TOPICS.CREW_UPDATED, await repo.crew(crewId));
   answer(201, { applied: true });
 });
@@ -1729,7 +1732,7 @@ api.post('/mobile/crews/:id/work-order/close', async (req, res) => {
     close_sign_off: form.signOff, close_snapshot: wo.closeSnapshot(day, form.carryOver), close_client_id: clientRequestId,
   });
   if (!closed) return answer(200, { applied: false, reason: 'day already ended' });
-  await repo.audit(req.user?.username || 'Crew', 'work_order.close', closed.id);
+  await repo.audit(actor(req), 'work_order.close', closed.id);
   bus.publish(TOPICS.CREW_UPDATED, await repo.crew(crewId));
   answer(200, { applied: true });
 });
