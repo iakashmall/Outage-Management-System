@@ -111,6 +111,11 @@ jobs:
           REDIS_URL: redis://localhost:6379
         run: node --test src/routes/errors.test.js src/infra/redisTag.test.js
 
+      # CUSTOMERS_SERVED setting: indices divide by it, "assumed" until confirmed (no services needed).
+      - name: Run customers-served setting test
+        working-directory: backend
+        run: node --test src/domain/indices.test.js
+
       # Database pool: settings from the environment, and a full pool answers
       # JSON 503 instead of hanging. Only SELECT / SHOW.
       - name: Run database pool self-test

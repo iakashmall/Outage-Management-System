@@ -370,6 +370,9 @@ export default function Analytics() {
             <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700 }}>{t('an.title')}</h2>
             <p style={{ margin: '4px 0 0', color: 'var(--muted)', fontSize: 13 }}>
               {t('an.subtitle', { n: ind?.customersServed?.toLocaleString(locale()) || '-' })}
+              {ind && ind.customersServedAssumed !== false && (
+                <span className="chip chip-soft" title={t('an.servedAssumedTip')} style={{ marginLeft: 8 }}>{t('an.servedAssumed')}</span>
+              )}
             </p>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -639,7 +642,7 @@ export default function Analytics() {
                 <div style={{ textAlign: 'center', padding: '8px 0 16px' }}>
                   <div style={{ fontSize: 36, fontWeight: 800 }}>{(ind?.customersAffected || 0).toLocaleString(locale())}</div>
                   <div style={{ color: 'var(--muted)', fontSize: 13 }}>{t('an.custInterrupted')}</div>
-                  <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>{t('an.ofServed', { n: ind?.customersServed?.toLocaleString(locale()) || '-' })}</div>
+                  <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>{t('an.ofServed', { n: ind?.customersServed?.toLocaleString(locale()) || '-' })}{ind && ind.customersServedAssumed !== false ? ` (${t('an.servedAssumed')})` : ''}</div>
                 </div>
                 <div style={{ height: 8, background: 'var(--faint)', borderRadius: 4, overflow: 'hidden', marginBottom: 10 }}>
                   <div style={{
