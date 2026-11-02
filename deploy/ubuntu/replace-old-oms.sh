@@ -32,7 +32,7 @@ echo -n "==> Waiting for the login server (Keycloak, about a minute)"
 until curl -fs "http://127.0.0.1:18080/realms/oms-upcl" >/dev/null; do echo -n "."; sleep 5; done; echo " ready"
 
 echo "==> Loading the demo data (safe to repeat)"
-$DC run --rm oms-backend node src/infra/seed.js
+$DC run --rm -e PG_STATEMENT_TIMEOUT_MS= oms-backend node src/infra/seed.js
 
 echo "==> Checking"
 sleep 8

@@ -4,7 +4,28 @@ const pgp = pgPromise({
 });
 
 const connectionString = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:15432/oms';
-export const db = pgp(connectionString);
+
+// Pool settings come from the environment only. Unset timeouts are left out, which keeps pg's behaviour:
+// wait for a free connection forever, and no statement or idle-in-transaction limit. The server sets them
+// in docker-compose.deploy.yml.
+function envMs(name) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) throw new Error(`${name} must be a whole number of milliseconds, got "${raw}"`);
+  return n;
+}
+const optional = {
+  connectionTimeoutMillis: envMs('PG_CONNECT_TIMEOUT_MS'),
+  statement_timeout: envMs('PG_STATEMENT_TIMEOUT_MS'),
+  idle_in_transaction_session_timeout: envMs('PG_IDLE_TX_TIMEOUT_MS'),
+};
+export const db = pgp({
+  connectionString,
+  max: envMs('PG_POOL_MAX') ?? 10,
+  idleTimeoutMillis: envMs('PG_IDLE_TIMEOUT_MS') ?? 30000,
+  ...Object.fromEntries(Object.entries(optional).filter(([, v]) => v !== undefined)),
+});
 
 export async function syncIdSequences() {
   // Forward-only: GREATEST() never rewinds a sequence onto live IDs, so calling
