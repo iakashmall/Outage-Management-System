@@ -17,7 +17,7 @@ export function buildCsv(indices, meta) {
     ['CAIDI (min)', indices.caidi, '', 'IEEE 1366'],
     ['MAIFI', indices.maifi, '', 'IEEE 1366'],
     [],
-    ['Customers served', indices.customersServed],
+    ['Customers served', indices.customersServed, indices.customersServedAssumed === false ? '' : 'assumed (CUSTOMERS_SERVED setting, not yet confirmed by the utility)'],
     ['Customers affected', indices.customersAffected],
     ['Incidents counted', indices.incidentCount],
     [],
@@ -76,7 +76,7 @@ export function buildPdf(indices, meta) {
     doc.moveDown(1);
     doc.fontSize(11).font('Helvetica-Bold').fillColor('#0b2033').text('Underlying data');
     doc.fontSize(10).font('Helvetica').fillColor('#0b2033');
-    doc.text(`Customers served (base): ${indices.customersServed}`);
+    doc.text(`Customers served (base): ${indices.customersServed}${indices.customersServedAssumed === false ? '' : ' (assumed; not yet confirmed by the utility)'}`);
     doc.text(`Customers affected: ${indices.customersAffected}`);
     doc.text(`Incidents counted: ${indices.incidentCount}`);
 

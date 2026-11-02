@@ -6,6 +6,7 @@ import FeederRatingsCard from '../components/FeederRatingsCard.jsx';
 import FeederManagersCard from '../components/FeederManagersCard.jsx';
 import UptimeCard from '../components/UptimeCard.jsx';
 
+// Sample data for the demo: NOT read from Keycloak. Labelled as sample in the card below.
 const USERS = [
   { name: 'A. Kulkarni', role: 'Control Room Operator', zone: 'Dehradun', active: true },
   { name: 'R. Bhatt', role: 'Dispatcher', zone: 'Ganga Corridor', active: true },
@@ -54,8 +55,12 @@ export default function Admin() {
 
       <div className="grid" style={{ gridTemplateColumns: '1.3fr 1fr' }}>
         <div className="card">
-          <div className="card-h"><h3>{t('adm.users')}</h3><span className="eyebrow">{t('adm.nActive', { n: USERS.filter((u) => u.active).length })}</span></div>
+          <div className="card-h">
+            <h3>{t('adm.users')} <span className="chip chip-minor" title={t('adm.usersSampleNote')}>{t('adm.usersSample')}</span></h3>
+            <span className="eyebrow">{t('adm.nActive', { n: USERS.filter((u) => u.active).length })}</span>
+          </div>
           <div className="card-b" style={{ padding: 0 }}>
+            <p className="muted" style={{ margin: 0, padding: '8px 14px', fontSize: 12 }}>{t('adm.usersSampleNote')}</p>
             <table className="tbl">
               <thead><tr><th>{t('adm.user')}</th><th>{t('adm.role')}</th><th>{t('col.zone')}</th><th>{t('adm.perms')}</th><th></th></tr></thead>
               <tbody>
