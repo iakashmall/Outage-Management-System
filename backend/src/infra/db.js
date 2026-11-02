@@ -223,6 +223,8 @@ export async function migrate() {
   `);
   await db.none(`
     ALTER TABLE alarms    ADD COLUMN IF NOT EXISTS incident_id TEXT REFERENCES incidents(id);
+    -- The role of the login in incident_events.actor (field_crew, oms_operator, ...); null for service names and old rows.
+    ALTER TABLE incident_events ADD COLUMN IF NOT EXISTS actor_role TEXT;
     ALTER TABLE trouble_calls ADD COLUMN IF NOT EXISTS area TEXT;
     ALTER TABLE trouble_calls ADD COLUMN IF NOT EXISTS reject_reason TEXT;
     ALTER TABLE trouble_calls ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMPTZ;

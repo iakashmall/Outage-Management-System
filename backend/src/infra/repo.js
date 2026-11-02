@@ -41,9 +41,18 @@ async function loadOutage(t, plannedOutageId, { lock = false } = {}) {
 
 const outageView = ({ po, plan, incident, steps, permits, jobs, reports, complaints }) => ({ ...po, incident, plan, steps, permits, jobs, reports, complaints });
 const hhmmIST = (d) => new Date(d).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' });
-async function addEvent(t, incidentId, actor, kind, note) {
-  await t.none(`INSERT INTO incident_events (id,incident_id,ts,actor,kind,note) VALUES ($1,$2,$3,$4,$5,$6)`,
-    ['EV' + nanoid(8), incidentId, new Date().toISOString(), actor, kind, note]);
+// incident_events.actor is the login that did it (or a fixed service name:
+// SCADA, DMS, SYSTEM); actor_role keeps the role apart from the name, so the
+// timeline can still mark crew rows. A person is passed as the verified
+// token user { username, roles }, never a name from a client header.
+function eventActor(actor) {
+  if (actor && typeof actor === 'object') return { actor: actor.username || 'unknown', actor_role: rules.primaryRole(actor) };
+  return { actor, actor_role: null };
+}
+async function addEvent(t, incidentId, actor, kind, note, ts = new Date().toISOString()) {
+  const who = eventActor(actor);
+  await t.none(`INSERT INTO incident_events (id,incident_id,ts,actor,actor_role,kind,note) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    ['EV' + nanoid(8), incidentId, ts, who.actor, who.actor_role, kind, note]);
 }
 
 function requireActor(actor) {
@@ -75,8 +84,7 @@ async function moveIncident(t, ctx, to, actor, note) {
   const patch = { status: to };
   if (to === 'resolved') Object.assign(patch, { resolved_at: new Date().toISOString(), restored_by: 'SWITCHING_PLAN', ert: null });
   await t.none(`UPDATE incidents SET ${setClause(patch)} WHERE id=$/id/`, { ...patch, id: ctx.incident.id });
-  await t.none(`INSERT INTO incident_events (id,incident_id,ts,actor,kind,note) VALUES ($1,$2,$3,$4,'status',$5)`,
-    ['EV' + nanoid(8), ctx.incident.id, new Date().toISOString(), actor.username, `${LABELS[from]} - ${LABELS[to]}${note ? ' - ' + note : ''}`]);
+  await addEvent(t, ctx.incident.id, actor, 'status', `${LABELS[from]} - ${LABELS[to]}${note ? ' - ' + note : ''}`);
   await logSafety(t, planned ? ctx.po.id : { incidentId: ctx.incident.id }, actor, planned
     ? { entity: 'outage', entityId: ctx.po.id, action: 'outage.transition', from, to, details: { note: note || null } }
     : { entity: 'incident', entityId: ctx.incident.id, action: 'incident.transition', from, to, details: { note: note || null } });
@@ -354,10 +362,11 @@ export const repo = {
      WHERE open_trip_tags ? $/tag/ AND status NOT IN ('resolved','closed','cancelled')
      RETURNING *`, { tag }),
   // ts: when it happened, if not now (e.g. a crew update synced late).
+  // actor: the verified token user (req.user) for a person, or a fixed service name.
   addIncidentEvent: async (incidentId, actor, kind, note, ts) => {
-    const ev = { id: 'EV' + nanoid(8), incident_id: incidentId, ts: ts || new Date().toISOString(), actor, kind, note };
-    await db.none(`INSERT INTO incident_events (id,incident_id,ts,actor,kind,note)
-      VALUES ($/id/,$/incident_id/,$/ts/,$/actor/,$/kind/,$/note/)`, ev);
+    const ev = { id: 'EV' + nanoid(8), incident_id: incidentId, ts: ts || new Date().toISOString(), ...eventActor(actor), kind, note };
+    await db.none(`INSERT INTO incident_events (id,incident_id,ts,actor,actor_role,kind,note)
+      VALUES ($/id/,$/incident_id/,$/ts/,$/actor/,$/actor_role/,$/kind/,$/note/)`, ev);
     return ev;
   },
   // ---- complaints (external REST intake, dedup + merge, traceability)
@@ -959,8 +968,7 @@ export const repo = {
           new Date(Date.parse(input.windowStart) - lead * 60000).toISOString(), actor.username, now,
           deenergisation, input.affectedSection || null]);
       await t.none('INSERT INTO switching_plans (id, planned_outage_id) VALUES ($1,$2)', ['SP' + nanoid(8), poId]);
-      await t.none(`INSERT INTO incident_events (id,incident_id,ts,actor,kind,note) VALUES ($1,$2,$3,$4,'created',$5)`,
-        ['EV' + nanoid(8), id, now, actor.username, `Planned outage scheduled - ${input.workDescription}`]);
+      await addEvent(t, id, actor, 'created', `Planned outage scheduled - ${input.workDescription}`, now);
       await logSafety(t, poId, actor, { entity: 'outage', entityId: poId, action: 'outage.create', to: 'scheduled',
         details: { incidentId: id, windowStart: input.windowStart, windowEnd: input.windowEnd, priority: input.severity || 'low',
           deenergisation, affectedSection: input.affectedSection || null } });
@@ -1106,12 +1114,12 @@ export const repo = {
       // A fault incident's plan (rules.incidentStatusAfterStep): every step goes
       // on the incident's timeline; only the last restore step can move the
       // incident, and only toward Pending Verification.
-      await addEvent(t, ctx.incident.id, actor.username, 'switching',
+      await addEvent(t, ctx.incident.id, actor, 'switching',
         `Switching ${step.phase} step ${step.seq} confirmed: ${step.action} ${step.device_label} (${step.location})`);
       const to = rules.incidentStatusAfterStep({ incident: ctx.incident, steps: ctx.steps, step });
       if (to) return { result, transitions: [await moveIncident(t, ctx, to, actor, 'supply restored by switching plan - awaiting verification')] };
       if (rules.isLastRestoreStep({ steps: ctx.steps, step })) {
-        await addEvent(t, ctx.incident.id, actor.username, 'switching',
+        await addEvent(t, ctx.incident.id, actor, 'switching',
           `Supply restored by switching plan; incident left ${LABELS[ctx.incident.status] || ctx.incident.status} (Pending Verification follows a crew's work on site)`);
       }
       return { result };
@@ -1140,7 +1148,7 @@ export const repo = {
         VALUES ($/id/,$/planned_outage_id/,$/job_id/,$/crew_id/,$/kind/,$/note/,$/expected_end/,$/state/,$/client_report_id/,$/reported_by/,now())`, report);
       await logSafety(t, ctx.po.id, actor, { entity: 'report', entityId: report.id, action: kind === 'delay' ? 'crew.delay_report' : 'crew.site_report',
         to: report.state, details: { jobId, note: report.note, expectedEnd: report.expected_end, clientReportId } });
-      await addEvent(t, ctx.incident.id, actor.username, 'field', kind === 'delay'
+      await addEvent(t, ctx.incident.id, actor, 'field', kind === 'delay'
         ? `Crew ${job.crew_id} reports a delay: expects to finish by ${hhmmIST(expectedEnd)} - ${report.note} (awaiting control room)`
         : `Crew ${job.crew_id} site report: ${report.note}`);
       return { result: { report: await t.one('SELECT * FROM planned_crew_reports WHERE id=$1', [report.id]) } };
@@ -1164,7 +1172,7 @@ export const repo = {
       }
       await logSafety(t, ctx.po.id, actor, { entity: 'outage', entityId: ctx.po.id, action: 'outage.delay',
         details: { from: previousWindowEnd, to: newWindowEnd, reason: reason.trim(), reportId } });
-      await addEvent(t, ctx.incident.id, actor.username, 'ert',
+      await addEvent(t, ctx.incident.id, actor, 'ert',
         `Planned window extended to ${hhmmIST(newWindowEnd)} (was ${hhmmIST(previousWindowEnd)})${report ? ` on crew ${report.crew_id}'s report` : ''} - ${reason.trim()}`);
       return { result: { previousWindowEnd, reason: reason.trim() } };
     }),
@@ -1178,7 +1186,7 @@ export const repo = {
       await t.none(`UPDATE planned_crew_reports SET state='dismissed', resolved_by=$2, resolved_at=now(), resolution_note=$3 WHERE id=$1`,
         [reportId, actor.username, reason.trim()]);
       await logSafety(t, ctx.po.id, actor, { entity: 'report', entityId: reportId, action: 'crew.delay_dismiss', from: 'pending', to: 'dismissed', details: { reason: reason.trim() } });
-      await addEvent(t, ctx.incident.id, actor.username, 'field', `Delay report from crew ${report.crew_id} dismissed - ${reason.trim()}`);
+      await addEvent(t, ctx.incident.id, actor, 'field', `Delay report from crew ${report.crew_id} dismissed - ${reason.trim()}`);
       return { result: {} };
     }),
 

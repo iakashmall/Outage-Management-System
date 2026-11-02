@@ -283,7 +283,7 @@ function IncidentDrawer({ inc, onClose, onChange, showOnMap }) {
               const { text, items } = eventChecklist(e, report);
               const isOpen = !!expanded[e.id];
               return (
-                <li key={e.id} className={e.actor === 'SCADA' ? 'scada' : e.actor === 'Crew' ? 'crew' : ''}>
+                <li key={e.id} className={e.actor === 'SCADA' ? 'scada' : e.actor_role === 'field_crew' || e.actor === 'Crew' ? 'crew' : ''}>
                   <span className="node" />
                   <div className="k">{e.actor} - {e.kind}</div>
                   <div className="n">
