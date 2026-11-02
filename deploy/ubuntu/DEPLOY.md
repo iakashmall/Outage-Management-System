@@ -40,6 +40,13 @@ export OMS_KC_ADMIN_PASSWORD='<strong password>'  # Keycloak "admin" user
   and Keycloak creates `admin` only once. On a server that already ran with the old defaults (`oms` / `admin`),
   either set the variables to the current passwords, or change them first (`ALTER USER oms PASSWORD '...'` in
   Postgres, and the admin password in Keycloak). Otherwise the backend and Keycloak can no longer log in to the database.
+- **`OMS_HOST` is required too** for any `docker compose` command run by hand: export it, or add `OMS_HOST=<server-ip>`
+  to that `.env` file. `replace-old-oms.sh` sets it itself, but plain compose falls back to `localhost`: Caddy then
+  serves only `https://localhost:8443` (wrong certificate, no answer on the server's IP), and a rebuilt web app sends
+  sign-in to `https://localhost:8443`.
+- **Load the topology after the schema migration.** The `network.*` tables start empty. Once
+  `db/migrations/network_topology_schema.sql` has been applied, load them with `deploy/ubuntu/load-topology.sh`.
+  Without it, trace to source, switching plans and the map's topology layer have no graph.
 - The backend runs with `SIMULATOR=off`: no fake crew GPS, alarms or calls are mixed into real data.
 - Keep `backend/.env.deploy` and `infra/keycloak-realm.deploy.json` on the server only (both are in `.gitignore`).
 
