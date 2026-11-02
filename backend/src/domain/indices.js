@@ -5,8 +5,30 @@
 // MAIFI = total customer momentary interruptions / customers served
 // Momentary = restored within MOMENTARY_MAX_MIN (incidents.momentary); those
 // count only in MAIFI, never in SAIFI/SAIDI/CAIDI.
-// UPCL Ganga corridor served base; CUSTOMERS_SERVED env overrides (default 18500).
-export const customersServed = () => Number(process.env.CUSTOMERS_SERVED) || 18500;
+// Customers served: the denominator of SAIFI, SAIDI and MAIFI (runbook D4).
+// Set CUSTOMERS_SERVED to a whole number above 0. Until the utility confirms
+// its real customer count, the figure is an assumption, and Analytics and the
+// reports say so; set CUSTOMERS_SERVED_CONFIRMED=true once the number comes
+// from the client. Missing or invalid values fall back to the default (and
+// are logged once), which is always reported as assumed.
+export const DEFAULT_CUSTOMERS_SERVED = 18500;
+let warnedInvalid = null;
+export function customersServedSetting(env = process.env) {
+  const raw = env.CUSTOMERS_SERVED;
+  const unset = raw === undefined || String(raw).trim() === '';
+  const n = unset ? NaN : Number(raw);
+  const valid = Number.isInteger(n) && n > 0;
+  if (!unset && !valid && warnedInvalid !== raw) {
+    warnedInvalid = raw;
+    console.warn(`[indices] CUSTOMERS_SERVED must be a whole number above 0; using the default ${DEFAULT_CUSTOMERS_SERVED}`);
+  }
+  return {
+    value: valid ? n : DEFAULT_CUSTOMERS_SERVED,
+    assumed: !(valid && env.CUSTOMERS_SERVED_CONFIRMED === 'true'),
+    source: valid ? 'setting' : 'default',
+  };
+}
+export const customersServed = () => customersServedSetting().value;
 
 // P7.2 requires filtering "by date, zone and asset type." The incidents
 // table doesn't track a distinct asset-type field (transformer/feeder/
@@ -37,7 +59,8 @@ export function filterIncidents(incidents, filters = {}) {
 }
 
 export function computeIndices(incidents, filters = {}) {
-  const served = customersServed();
+  const servedSetting = customersServedSetting();
+  const served = servedSetting.value;
   // A cancelled incident (false alarm / test entry) interrupted nobody.
   const scoped = filterIncidents(incidents, filters).filter((i) => i.status !== 'cancelled');
   const interrupting = scoped.filter((i) => i.type !== 'Scheduled' && i.severity !== 'low' && !i.momentary);
@@ -73,6 +96,7 @@ export function computeIndices(incidents, filters = {}) {
     saidiTarget: 5.0,
     saifiTarget: 1.2,
     customersServed: served,
+    customersServedAssumed: servedSetting.assumed, // true until CUSTOMERS_SERVED_CONFIRMED=true
     customersAffected: custInterrupted,
     customersMomentary: custMomentary,
     incidentCount: interrupting.length,
