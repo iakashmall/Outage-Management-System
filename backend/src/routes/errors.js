@@ -12,6 +12,13 @@ export function isPoolTimeout(err) {
 }
 
 export function errorHandler(err, req, res, next) {
+  // express.json() rejections are the client's fault: answer them, no stack.
+  if (err?.type === 'entity.too.large' && !res.headersSent) {
+    return res.status(413).json({ error: `request body too large (limit ${Math.round(err.limit / 1024)} KB)` });
+  }
+  if (err?.type === 'entity.parse.failed' && !res.headersSent) {
+    return res.status(400).json({ error: 'request body is not valid JSON' });
+  }
   if (isPoolTimeout(err)) {
     // Expected under load, so one line without the stack.
     console.error(`[db busy] ${req.method} ${req.originalUrl}: ${err.message}`);

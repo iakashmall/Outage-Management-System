@@ -60,3 +60,23 @@ test('a synchronous throw still returns JSON 500', async () => {
   assert.equal(r.status, 500);
   assert.deepEqual(r.body, { error: 'internal server error' });
 });
+
+// Body-parser rejections (runbook WP3): the client's fault, so 413/400 JSON and no stack in the log.
+const parsing = express();
+parsing.use(express.json({ limit: '1kb' }));
+parsing.post('/in', (req, res) => res.json({ ok: true }));
+parsing.use(errorHandler);
+
+test('an oversized JSON body returns JSON 413, not 500', async () => {
+  const srv = parsing.listen(0);
+  await new Promise((r) => srv.once('listening', r));
+  try {
+    const url = `http://127.0.0.1:${srv.address().port}/in`;
+    const big = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ x: 'y'.repeat(2048) }) });
+    assert.equal(big.status, 413);
+    assert.match((await big.json()).error, /too large \(limit 1 KB\)/);
+    const bad = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"x":' });
+    assert.equal(bad.status, 400);
+    assert.deepEqual(await bad.json(), { error: 'request body is not valid JSON' });
+  } finally { srv.close(); }
+});

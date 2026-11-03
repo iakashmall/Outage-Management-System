@@ -109,7 +109,16 @@ jobs:
         working-directory: backend
         env:
           REDIS_URL: redis://localhost:6379
-        run: node --test src/routes/errors.test.js src/infra/redisTag.test.js
+        run: node --test src/routes/errors.test.js src/routes/intake.test.js src/infra/redisTag.test.js
+
+      # Intake hardening (runbook WP3): 413 / 400 / 401 / 403 / 404 / 429 through
+      # the real requireAuth (local JWKS) and routes.
+      - name: Run intake hardening self-test
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://oms:oms@localhost:5432/oms
+          REDIS_URL: redis://localhost:6379
+        run: node src/selftest-intake-hardening.js
 
       # CUSTOMERS_SERVED setting: indices divide by it, "assumed" until confirmed (no services needed).
       - name: Run customers-served setting test
