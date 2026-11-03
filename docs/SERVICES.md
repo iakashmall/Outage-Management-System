@@ -114,8 +114,38 @@ at rest (`ENCRYPTION_KEY`), sequence-based ID generation, network topology schem
 `NOTIFY_TEST_TO`, `OMS_PUBLIC_URL`, `REPORT_CRON`, `REPORT_RECIPIENTS`, `SIMULATOR`, `ENABLE_SIMULATORS`,
 `INTAKE_RATE_LIMIT_PER_MIN`, `SCADA_RATE_LIMIT_PER_MIN`, `ROLE`, `INTAKE_SYNC_WAIT_MS`, `INTAKE_COALESCE`,
 `INTAKE_RETRY_ATTEMPTS`, `INTAKE_RETRY_BASE_MS`, `QUEUE_CONCURRENCY`, `QUEUE_POLL_MS`, `QUEUE_LEASE_MS`, `QUEUE_MAX_ATTEMPTS`,
-`QUEUE_BACKOFF_BASE_MS`, `QUEUE_BACKOFF_MAX_MS`, `JOB_LOCK_RETRY_MS`, `HEALTH_QUEUE_TIMEOUT_MS`,
+`QUEUE_BACKOFF_BASE_MS`, `QUEUE_BACKOFF_MAX_MS`, `JOB_LOCK_RETRY_MS`, `HEALTH_QUEUE_TIMEOUT_MS`, `HEALTH_REFRESH_MS`,
+`QUEUE_PG_POOL_MAX`, `QUEUE_COMPLAINT_CONCURRENCY`, `QUEUE_BATCH_MAX`, `SCADA_BATCH_MAX`, `SCADA_BATCH_WAIT_MS`,
+`REDIS_COMMAND_TIMEOUT_MS`, `REDIS_CONNECT_TIMEOUT_MS`, `PG_POOL_MAX`, `PG_CONNECT_TIMEOUT_MS`, `PG_STATEMENT_TIMEOUT_MS`,
+`PG_IDLE_TX_TIMEOUT_MS`, `PG_IDLE_TIMEOUT_MS`, `DB_WAIT_S`,
 `MOMENTARY_MAX_MIN`, `CUSTOMERS_SERVED`, `CUSTOMERS_SERVED_CONFIRMED`, `ENCRYPTION_KEY`, `TILES_DIR`, `MAP_SERVER_URL`, `MAP_API_KEY`. The backend reads `backend/.env` (git-ignored). The seed script does not load it: run it with `node --env-file=.env`.
+
+**Intake tuning added or changed by the load-test fixes F3 to F6 (3 Nov 2026).** Each must be a positive whole number; anything else falls back to the default. `deploy/ubuntu/DEPLOY.md` (Complaint intake API section) has the same list, the values fixed in the code, and the connection budget.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PG_POOL_MAX` | 10 | *(changed meaning)* main pool: API routes, background jobs, `/api/health`; no longer used by the intake consumer |
+| `QUEUE_PG_POOL_MAX` | 8 | the intake consumer's own pool, only in a process that runs it (`ROLE=worker` or `all`) |
+| `QUEUE_CONCURRENCY` | 4 | *(changed meaning)* SCADA-lane worker loops (every kind except complaints), capped by the consumer pool |
+| `QUEUE_COMPLAINT_CONCURRENCY` | 2 | complaint-lane worker loops; complaints never wait behind SCADA items |
+| `QUEUE_BATCH_MAX` | 200 | items one SCADA-lane loop claims at once; trips of one feeder run in one transaction |
+| `SCADA_BATCH_MAX` | 500 | `POST /scada/fault` requests written in one transaction |
+| `SCADA_BATCH_WAIT_MS` | 5 | how long a write batch waits to fill before it is written |
+| `HEALTH_REFRESH_MS` | 2000 | refresh interval of the cached queue figures `/api/health` answers with |
+| `HEALTH_QUEUE_TIMEOUT_MS` | 1500 | *(changed: was 2000, a wait inside each request)* time limit for each background health read |
+| `REDIS_COMMAND_TIMEOUT_MS` | 250 | longest any cache call waits for Redis; over the limit counts as a miss or a skipped write |
+| `REDIS_CONNECT_TIMEOUT_MS` | 1000 | time limit for opening a Redis connection |
+| `SCADA_TEST_CRASH_AFTER_COMMIT` | unset | test only; ignored when `NODE_ENV=production` |
+
+Fixed in the code, with no variable:
+- stale after 3 × `HEALTH_REFRESH_MS`;
+- the consumer leaves 2 pool connections free and splits the rest between the lanes;
+- the complaint lane claims 1 item at a time;
+- Redis has no offline queue;
+- Redis connect gives up after 5 attempts at boot, then reconnects with back-off capped at 2 s;
+- the HTTP listen backlog is Node's 511.
+
+Since F5, `INTAKE_COALESCE` only affects SCADA events that arrive on the event bus.
 
 ## 6. Map services
 

@@ -83,11 +83,43 @@ Settings (all optional; put them in `backend/.env.deploy`):
 | `INTAKE_SYNC_WAIT_MS` | `15000` | how long `POST /complaints` waits for the queue before answering `202` |
 | `INTAKE_RATE_LIMIT_PER_MIN` / `SCADA_RATE_LIMIT_PER_MIN` | `6000` / `120000` | per-client limits (`0` turns a limit off) |
 | `ENABLE_SIMULATORS` | `false` | keep `false`: otherwise `/complaints/simulate` and `/scada/simulate` are open |
-| `INTAKE_COALESCE` | on | `off` stops repeated queued SCADA events for the same tag and state from being merged |
-| `QUEUE_CONCURRENCY`, `QUEUE_POLL_MS`, `QUEUE_LEASE_MS`, `QUEUE_MAX_ATTEMPTS`, `QUEUE_BACKOFF_BASE_MS`, `QUEUE_BACKOFF_MAX_MS` | 4, 250, 60000, 8, 1000, 300000 | queue worker tuning; after `QUEUE_MAX_ATTEMPTS` an item moves to `intake_dead_letter` |
+| `INTAKE_COALESCE` | on | `off` stops repeated queued SCADA events for the same tag and state from being merged. Applies to SCADA events arriving on the event bus (DNP3 adapter, Kafka); since F5, `POST /scada/fault` writes in batches and does not coalesce |
+| `QUEUE_POLL_MS`, `QUEUE_LEASE_MS`, `QUEUE_MAX_ATTEMPTS`, `QUEUE_BACKOFF_BASE_MS`, `QUEUE_BACKOFF_MAX_MS` | 250, 60000, 8, 1000, 300000 | queue worker tuning; after `QUEUE_MAX_ATTEMPTS` an item moves to `intake_dead_letter`. An item claimed by a worker that dies waits for its lease (`QUEUE_LEASE_MS`) before another worker takes it |
 | `INTAKE_RETRY_ATTEMPTS`, `INTAKE_RETRY_BASE_MS` | 3, 100 | retries of one intake transaction (deadlock, serialization failure) |
 | `JOB_LOCK_RETRY_MS` | `15000` | how often a standby worker tries to take over a background job |
-| `HEALTH_QUEUE_TIMEOUT_MS` | `2000` | `/api/health` reports the queue as unknown if it cannot read the depth in this time |
+
+Intake throughput, read protection and fail-fast settings (load-test fixes F3 to F6, 3 Nov 2026). All optional; each must be a positive whole number, and anything else falls back to the default:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `PG_POOL_MAX` | `10` | *(changed meaning)* size of the process's main pool: API routes, background jobs, `/api/health`. The intake consumer no longer uses it |
+| `QUEUE_PG_POOL_MAX` | `8` | size of the intake consumer's own pool, created only in a process that runs the consumer (`ROLE=worker` or `all`); it also takes `PG_CONNECT_TIMEOUT_MS`, `PG_STATEMENT_TIMEOUT_MS`, `PG_IDLE_TX_TIMEOUT_MS` and `PG_IDLE_TIMEOUT_MS` |
+| `QUEUE_CONCURRENCY` | `4` | *(changed meaning)* worker loops in the SCADA lane (every queued kind except complaints); each loop claims up to `QUEUE_BATCH_MAX` items at a time. Capped by the pool, see below |
+| `QUEUE_COMPLAINT_CONCURRENCY` | `2` | worker loops in the complaint lane, which claims only complaints, one at a time, so a complaint never waits behind a SCADA backlog |
+| `QUEUE_BATCH_MAX` | `200` | queue items one SCADA-lane loop claims at once (only the oldest item of each SCADA tag is ever claimed); claimed trips of the same feeder are processed in one transaction |
+| `SCADA_BATCH_MAX` | `500` | `POST /scada/fault` requests written in one transaction (alarm rows, queue items and audit rows as multi-row inserts) |
+| `SCADA_BATCH_WAIT_MS` | `5` | how long the first request of a write batch waits for others before the batch is written |
+| `HEALTH_REFRESH_MS` | `2000` | how often a background read refreshes the queue figures that `/api/health` answers with; the endpoint itself never waits on Postgres or Redis |
+| `HEALTH_QUEUE_TIMEOUT_MS` | `1500` | *(changed: was `2000`, a wait inside each request)* time limit for each background read; on failure `/api/health` still answers at once, with the last figures marked `stale: true` and the error |
+| `REDIS_COMMAND_TIMEOUT_MS` | `250` | longest any cache call (tag write or read, cache read, write or delete) waits for Redis; a call over the limit is treated as a cache miss or a skipped write, never as an error |
+| `REDIS_CONNECT_TIMEOUT_MS` | `1000` | time limit for opening a connection to Redis |
+| `SCADA_TEST_CRASH_AFTER_COMMIT` | unset | test only (`selftest-loadfixes.js`): kills the process after a SCADA write batch commits. Ignored when `NODE_ENV=production`; never set it on the server |
+
+Fixed in the code (no variable):
+- `/api/health` marks the queue figures stale once they are older than 3 × `HEALTH_REFRESH_MS` (6 s by default) or the last read failed.
+- Consumer loops leave 2 connections of the consumer pool free: the complaint lane gets at most half of the rest, and the SCADA lane at most what is left; each lane gets at least 1 loop. With the defaults (pool 8) that is 2 complaint loops and 4 SCADA loops. A smaller `QUEUE_PG_POOL_MAX` silently lowers both, whatever `QUEUE_CONCURRENCY` and `QUEUE_COMPLAINT_CONCURRENCY` say.
+- The complaint lane claims 1 item per claim.
+- SCADA trips are grouped by the feeder and substation named in the event; reclose events, non-outage conditions and events with an equipment mRID are always processed one at a time. If a group's transaction fails, its items are retried one at a time.
+- Redis has no offline queue: a call made while Redis is disconnected fails at once.
+- Before the first successful connection, Redis is retried 4 times after the first attempt (5 attempts) and then given up until the next restart, so boot never hangs. After it has connected once, the client reconnects for ever, waiting (attempt + 1) × 100 ms between tries, at most 2 s.
+- The HTTP listen backlog is Node's default (511); `index.js` does not set it.
+
+Database connections at most, with the defaults:
+- `ROLE=api`: `PG_POOL_MAX` + 1 notice listener (used by `POST /complaints` to wait for its result), which is 11.
+- `ROLE=worker`: `PG_POOL_MAX` + `QUEUE_PG_POOL_MAX`, which is 18.
+- `ROLE=all`: both, which is 19.
+
+The compose file's `oms-backend` (api) and `oms-worker` (worker) together use at most 29.
 
 ## Load the network topology
 **Required after the first deploy, and again after any change to `backend/src/infra/importHaridwarInferred.js`.**
