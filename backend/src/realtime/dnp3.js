@@ -1,3 +1,4 @@
+import { newAlarmId } from '../infra/ids.js';
 import net from 'node:net';
 import { EventEmitter } from 'node:events';
 import { bus, TOPICS } from '../domain/bus.js';
@@ -180,7 +181,7 @@ export class Dnp3Master extends EventEmitter {
     // assume a single universal meaning for every index).
     if (point.state && point.online) {
       const evt = {
-        id: 'ALM-DNP3-' + Math.random().toString(36).slice(2, 7),
+        id: newAlarmId('ALM-DNP3-'),
         tag: mapping.tag,
         condition: 'CRITICAL',
         limit_val: 'TRIP',
@@ -201,7 +202,7 @@ export class Dnp3Master extends EventEmitter {
       // closed again. scada.js treats event 'reclose' as a restoration of the
       // incident(s) still holding this tag (OMS-02).
       const evt = {
-        id: 'ALM-DNP3-' + Math.random().toString(36).slice(2, 7),
+        id: newAlarmId('ALM-DNP3-'),
         tag: mapping.tag,
         event: 'reclose',
         condition: 'NORMAL',

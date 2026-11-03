@@ -24,7 +24,7 @@
 // Ordering: items with the same order_key (a SCADA tag: its trip before its
 // reclose) are taken strictly in id order; a failing item only holds back
 // later items with its own key, never the rest of the queue.
-import { db } from './db.js';
+import { db, workerDb } from './db.js';
 
 const envInt = (name, dflt) => {
   const n = Number(process.env[name]);
@@ -65,6 +65,11 @@ export async function migrateIntakeQueue() {
       created_at TIMESTAMPTZ NOT NULL,
       failed_at  TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+    -- F2: one alarm row per SCADA event, whatever the sender resends.
+    ALTER TABLE alarms ADD COLUMN IF NOT EXISTS event_key TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS alarms_event_key_uq ON alarms (event_key) WHERE event_key IS NOT NULL;
+    -- F6: the complaint lane claims complaints without scanning a SCADA backlog.
+    CREATE INDEX IF NOT EXISTS idx_intake_queue_complaints ON intake_queue (id) WHERE kind = 'complaint';
   `);
 }
 
@@ -82,6 +87,7 @@ const local = new Set(); // wake-up callbacks of consumers running in this proce
 // processed right now (row locked) the event is simply added.
 const coalescingOn = () => !/^(off|false|0|no)$/i.test(process.env.INTAKE_COALESCE || '');
 export const intakeStats = { enqueued: 0, coalesced: 0 };
+export const wakeConsumers = () => { for (const wake of local) wake(); };
 
 export async function enqueue(kind, payload, { orderKey = null, coalesceKey = null, cx = db } = {}) {
   const body = JSON.stringify(payload);
@@ -185,12 +191,37 @@ export async function closeListener() {
 // ---- consumer ----
 // handlers: { [kind]: async (payload, t) => ({ result, effects }) } -- t is
 // the item's transaction; effects run after it commits.
+// batchHandlers (F5): { [kind]: { canBatch(payload), groupKey(payload),
+// run(payloads, t) => ({ effects }) } } -- items of one group run in ONE
+// transaction together with the DELETE of all their queue rows; if that
+// transaction fails, each item of the group is run on its own (its own
+// attempts, back-off and dead letter), so one bad item never holds up the rest.
+//
+// Two lanes (F6), each with its own worker loops on the consumer's own pool
+// (infra/db.js workerDb):
+//   - complaints: QUEUE_COMPLAINT_CONCURRENCY loops (2) that claim only
+//     complaints, so a complaint never waits behind a SCADA backlog;
+//   - everything else: QUEUE_CONCURRENCY loops (4), each claiming up to
+//     QUEUE_BATCH_MAX (200) queue heads at once.
+// Ordering is unchanged: only the head of each order_key (a SCADA tag) is
+// ever claimed, so at most one item per tag is in flight.
+const stats = { groups: 0, groupedItems: 0 };
+export const consumerStats = () => ({ ...stats });
+
 export function startIntakeConsumer(handlers, opts = {}) {
-  const cfg = { ...queueConfig(), ...opts };
-  // Every worker holds one connection for its item's transaction and the
-  // handlers read on the pool too, so leave the pool some room.
-  const poolMax = db.$pool.options.max || 10;
-  const concurrency = Math.max(1, Math.min(cfg.concurrency, poolMax - 2));
+  const cfg = {
+    ...queueConfig(),
+    complaintConcurrency: envInt('QUEUE_COMPLAINT_CONCURRENCY', 2),
+    batchMax: envInt('QUEUE_BATCH_MAX', 200),
+    ...opts,
+  };
+  const pool = cfg.db || workerDb();
+  const batchHandlers = cfg.batchHandlers || {};
+  // Each loop holds one connection for its transaction; leave the pool room.
+  const poolMax = pool.$pool.options.max || 8;
+  const room = Math.max(2, poolMax - 2);
+  const complaintLoops = Math.max(1, Math.min(cfg.complaintConcurrency, Math.floor(room / 2)));
+  const mainLoops = Math.max(1, Math.min(cfg.concurrency, room - complaintLoops));
   let running = true;
   const sleepers = new Set(); // one per idle worker loop
   const wake = () => { for (const s of [...sleepers]) s(); };
@@ -201,36 +232,64 @@ export function startIntakeConsumer(handlers, opts = {}) {
   });
   local.add(wake);
 
-  const claim = () => db.oneOrNone(`
-    UPDATE intake_queue SET attempts = attempts + 1, available_at = now() + ($1 || ' milliseconds')::interval
-    WHERE id = (
+  const lease = String(cfg.leaseMs);
+  const laneFilter = { complaint: "q.kind = 'complaint'", main: "q.kind <> 'complaint'" };
+  // lane 'complaint': complaints only; lane 'main': everything else.
+  const claim = (lane, limit) => pool.any(`
+    UPDATE intake_queue u SET attempts = u.attempts + 1, available_at = now() + ($1 || ' milliseconds')::interval
+    FROM (
       SELECT q.id FROM intake_queue q
-      WHERE q.available_at <= now()
+      WHERE ${laneFilter[lane]}
+        AND q.available_at <= now()
         AND (q.order_key IS NULL OR NOT EXISTS (
               SELECT 1 FROM intake_queue p WHERE p.order_key = q.order_key AND p.id < q.id))
       ORDER BY q.id
       FOR UPDATE SKIP LOCKED
-      LIMIT 1)
-    RETURNING id, kind, payload, order_key, attempts, last_error`, [String(cfg.leaseMs)]);
+      LIMIT $2) c
+    WHERE u.id = c.id
+    RETURNING u.id, u.kind, u.payload, u.order_key, u.attempts, u.last_error`, [lease, limit]);
 
-  const deadLetter = (id, reason) => db.tx(async (t) => {
+  const deadLetter = (id, reason) => pool.tx(async (t) => {
     await t.none(`INSERT INTO intake_dead_letter (id, kind, payload, order_key, attempts, last_error, created_at)
       SELECT id, kind, payload, order_key, attempts, $2, created_at FROM intake_queue WHERE id = $1
       ON CONFLICT (id) DO NOTHING`, [id, String(reason).slice(0, 2000)]);
     await t.none('DELETE FROM intake_queue WHERE id = $1', [id]);
   });
 
-  async function processOne(item) {
-    if (item.attempts > cfg.maxAttempts) {
-      console.error(`[queue] item ${item.id} (${item.kind}) used up ${cfg.maxAttempts} attempts without finishing -> dead letter`);
-      await deadLetter(item.id, item.last_error || 'attempts exhausted (worker stopped while processing it)');
-      return;
+  // An item that already used up its attempts (e.g. it kept killing the
+  // worker) is dead-lettered when next claimed, without running it again.
+  const exhausted = async (item) => {
+    if (item.attempts <= cfg.maxAttempts) return false;
+    console.error(`[queue] item ${item.id} (${item.kind}) used up ${cfg.maxAttempts} attempts without finishing -> dead letter`);
+    await deadLetter(item.id, item.last_error || 'attempts exhausted (worker stopped while processing it)');
+    return true;
+  };
+
+  const failed = async (item, msg) => {
+    if (item.attempts >= cfg.maxAttempts) {
+      console.error(`[queue] item ${item.id} (${item.kind}) failed ${item.attempts} time(s), moved to dead letter: ${msg}`);
+      await deadLetter(item.id, msg);
+    } else {
+      const wait = Math.min(cfg.backoffMaxMs, cfg.backoffBaseMs * 2 ** (item.attempts - 1));
+      console.warn(`[queue] item ${item.id} (${item.kind}) attempt ${item.attempts}/${cfg.maxAttempts} failed, retry in ${wait} ms: ${msg}`);
+      await pool.none(`UPDATE intake_queue SET last_error = $2, available_at = now() + ($3 || ' milliseconds')::interval WHERE id = $1`,
+        [item.id, msg.slice(0, 2000), String(wait)]);
     }
+  };
+
+  const runEffects = async (label, effects) => {
+    for (const fx of effects || []) {
+      try { await fx(); } catch (err) { console.error(`[queue] ${label}: post-commit effect failed:`, err.message); }
+    }
+  };
+
+  async function processOne(item) {
+    if (await exhausted(item)) return;
     const handler = handlers[item.kind];
     let effects = [];
     try {
       if (!handler) throw new Error(`no handler for intake kind "${item.kind}"`);
-      await db.tx('intake-item', async (t) => {
+      await pool.tx('intake-item', async (t) => {
         const still = await t.oneOrNone('SELECT id FROM intake_queue WHERE id = $1 FOR UPDATE', [item.id]);
         if (!still) return; // finished by another worker after our lease ran out
         const out = await handler(item.payload, t);
@@ -238,41 +297,76 @@ export function startIntakeConsumer(handlers, opts = {}) {
         await t.none('DELETE FROM intake_queue WHERE id = $1', [item.id]);
       });
     } catch (err) {
-      const msg = err?.message || String(err);
-      if (item.attempts >= cfg.maxAttempts) {
-        console.error(`[queue] item ${item.id} (${item.kind}) failed ${item.attempts} time(s), moved to dead letter: ${msg}`);
-        await deadLetter(item.id, msg);
-      } else {
-        const wait = Math.min(cfg.backoffMaxMs, cfg.backoffBaseMs * 2 ** (item.attempts - 1));
-        console.warn(`[queue] item ${item.id} (${item.kind}) attempt ${item.attempts}/${cfg.maxAttempts} failed, retry in ${wait} ms: ${msg}`);
-        await db.none(`UPDATE intake_queue SET last_error = $2, available_at = now() + ($3 || ' milliseconds')::interval WHERE id = $1`,
-          [item.id, msg.slice(0, 2000), String(wait)]);
-      }
+      await failed(item, err?.message || String(err));
       return;
     }
-    for (const fx of effects) {
-      try { await fx(); } catch (err) { console.error(`[queue] item ${item.id}: post-commit effect failed:`, err.message); }
-    }
+    await runEffects(`item ${item.id}`, effects);
   }
 
-  async function loop(n) {
+  // F5: one transaction for a group of items of the same kind and group key.
+  async function processGroup(kind, items) {
+    let effects = [];
+    try {
+      await pool.tx('intake-group', async (t) => {
+        const ids = items.map((i) => i.id).sort((a, b) => Number(a) - Number(b));
+        const still = new Set((await t.any('SELECT id FROM intake_queue WHERE id IN ($1:csv) ORDER BY id FOR UPDATE', [ids])).map((r) => String(r.id)));
+        const live = items.filter((i) => still.has(String(i.id)));
+        if (!live.length) return;
+        const out = await batchHandlers[kind].run(live.map((i) => i.payload), t);
+        effects = out?.effects || [];
+        await t.none('DELETE FROM intake_queue WHERE id IN ($1:csv)', [live.map((i) => i.id)]);
+      });
+    } catch (err) {
+      console.warn(`[queue] group of ${items.length} ${kind} item(s) failed (${err.message}); running them one by one`);
+      for (const item of items) await processOne(item);
+      return;
+    }
+    stats.groups++; stats.groupedItems += items.length;
+    await runEffects(`group of ${items.length}`, effects);
+  }
+
+  async function processClaimed(items) {
+    const singles = [];
+    const groups = new Map();
+    for (const item of items) {
+      if (await exhausted(item)) continue;
+      const bh = batchHandlers[item.kind];
+      if (bh && bh.canBatch(item.payload)) {
+        const k = `${item.kind}|${bh.groupKey(item.payload)}`;
+        if (!groups.has(k)) groups.set(k, { kind: item.kind, items: [] });
+        groups.get(k).items.push(item);
+      } else singles.push(item);
+    }
+    for (const g of groups.values()) {
+      if (g.items.length === 1) singles.push(g.items[0]);
+      else await processGroup(g.kind, g.items);
+    }
+    // Items of different tags have no order between them; these run by id.
+    for (const item of singles.sort((a, b) => Number(a.id) - Number(b.id))) await processOne(item);
+  }
+
+  async function loop(lane, n) {
+    const limit = lane === 'complaint' ? 1 : cfg.batchMax;
     while (running) {
-      let item = null;
+      let items = [];
       try {
-        item = await claim();
-        if (item) await processOne(item);
+        items = await claim(lane, limit);
+        if (items.length) await processClaimed(items);
       } catch (err) {
         // the database itself is unreachable or similar: log, wait, carry on
-        console.error(`[queue] worker ${n}:`, err.message);
+        console.error(`[queue] ${lane} worker ${n}:`, err.message);
         await nap(cfg.pollMs * 4);
         continue;
       }
-      if (!item) await nap(cfg.pollMs);
+      if (!items.length) await nap(cfg.pollMs);
     }
   }
 
-  const loops = Array.from({ length: concurrency }, (_, i) => loop(i + 1));
-  console.log(`[queue] intake consumer started: ${concurrency} worker(s), lease ${cfg.leaseMs} ms, max ${cfg.maxAttempts} attempts`);
+  const loops = [
+    ...Array.from({ length: complaintLoops }, (_, i) => loop('complaint', i + 1)),
+    ...Array.from({ length: mainLoops }, (_, i) => loop('main', i + 1)),
+  ];
+  console.log(`[queue] intake consumer started: ${mainLoops} worker(s) + ${complaintLoops} complaint-lane worker(s), batch ${cfg.batchMax}, own pool of ${poolMax}, lease ${cfg.leaseMs} ms, max ${cfg.maxAttempts} attempts`);
   return {
     async stop() { running = false; local.delete(wake); wake(); await Promise.all(loops); },
   };

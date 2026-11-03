@@ -301,6 +301,71 @@ export async function handleScadaEvent(evt, { cx = db, deferEffects = false } = 
   return out.result;
 }
 
+// ---- F5: several queued trips of one feeder in one transaction ----
+// The intake queue hands over the heads of several tags at once (at most one
+// item per tag, so a tag's trip / reclose / trip order is untouched). Trips
+// that need nothing per event beyond the merge (an outage condition, no
+// equipment mRID, not a reclose) are grouped by the feeder they name and run
+// as ONE transaction per group: one scope lock, one open-incident lookup,
+// the first event creates or joins the incident exactly as handleScadaEvent
+// does, then the rest are merged with multi-row writes (one INSERT of their
+// timeline notes, one UPDATE linking their alarms, one UPDATE of the trip
+// tags, at most one severity upgrade). Everything else runs one by one.
+export const canBatchScada = (evt) => !!evt && evt.event !== 'reclose' && !evt.cim_mrid && isOutageCondition(evt.condition);
+export const scadaGroupKey = (evt) => {
+  const loc = locateFromEvent(evt);
+  return `f:${loc.feeder || ''}|s:${loc.substation || ''}`;
+};
+
+export async function handleScadaBatch(evts, t) {
+  await Promise.all(evts.filter((e) => e.tag).map((e) => setTag(e.tag, e.limit_val ?? e.value ?? e.condition, e.quality || 'GOOD')));
+  const located = { ...locateFromEvent(evts[0]), equipment: null };
+  const scope = await resolveScope(located, t);
+  const loc = { ...located, feeder: scope.feeder, substation: scope.substation, scope };
+  const prediction = await predictDownstream({ feeder: loc.feeder });
+  prediction.customers_source = typeof evts[0].customers === 'number' ? 'event' : 'estimated';
+
+  const first = await scadaTripTx(t, evts[0], loc, prediction);
+  const rest = evts.slice(1);
+  const effects = [...(first.effects || [])];
+  if (!rest.length) return { result: [first.result], effects };
+
+  const incidentId = first.result.incidentId;
+  const inc = await repo.incident(incidentId, t);
+  const fromCustomer = inc.source === 'Customer';
+  const now = new Date().toISOString();
+  const notes = rest.map((e) => ({
+    id: 'EV' + nanoid(10), incident_id: incidentId, ts: now, actor: 'SCADA', actor_role: null,
+    kind: fromCustomer ? 'confirmed' : 'field',
+    note: fromCustomer
+      ? `SCADA confirmed this outage (was customer-reported only) - ${e.condition} on ${e.tag || assetKey(loc)}`
+      : `Correlated SCADA ${e.condition} on ${e.tag || assetKey(loc)} (deduplicated)${repeatsNote(e)}`,
+  }));
+  await t.none(`INSERT INTO incident_events (id,incident_id,ts,actor,actor_role,kind,note)
+    SELECT n.id, n.incident_id, n.ts, n.actor, n.actor_role, n.kind, n.note
+      FROM json_populate_recordset(NULL::incident_events, $1::json) n`, [JSON.stringify(notes)]);
+  const alarmIds = rest.flatMap((e) => [e.id, ...(Array.isArray(e.coalesced_ids) ? e.coalesced_ids : [])]).filter(Boolean);
+  if (alarmIds.length) await t.none('UPDATE alarms SET incident_id = $1 WHERE id IN ($2:csv)', [incidentId, alarmIds]);
+  const tags = [...new Set(rest.map((e) => e.tag).filter(Boolean))];
+  if (tags.length) {
+    await t.none(`UPDATE incidents SET
+        open_trip_tags = open_trip_tags || COALESCE((SELECT jsonb_agg(x) FROM unnest($2::text[]) x WHERE NOT (open_trip_tags ? x)), '[]'::jsonb),
+        trip_tag = COALESCE(trip_tag, ($2::text[])[1])
+      WHERE id = $1`, [incidentId, tags]);
+  }
+  if (fromCustomer) {
+    const best = rest.map((e) => classifySeverity(e.condition, estimateCustomers(e, loc)))
+      .reduce((a, b) => (SEVERITY_RANK[b] > SEVERITY_RANK[a] ? b : a), inc.severity);
+    if (SEVERITY_RANK[best] > SEVERITY_RANK[inc.severity]) {
+      await repo.updateIncident(incidentId, { severity: best }, t);
+      await repo.addIncidentEvent(incidentId, 'SCADA', 'confirmed', `SCADA confirmed this outage - severity upgraded ${inc.severity} to ${best}`, undefined, t);
+      const after = await repo.incident(incidentId, t);
+      effects.push(() => bus.publish(TOPICS.INCIDENT_UPDATED, after));
+    }
+  }
+  return { result: [first.result, ...rest.map(() => ({ deduplicated: true, incidentId }))], effects };
+}
+
 // The locked check-and-create for one trip, inside transaction t.
 async function scadaTripTx(t, evt, loc, prediction) {
   const key = assetKey(loc);

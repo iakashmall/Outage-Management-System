@@ -2,7 +2,7 @@
 // HTTP routes submit to the queue, and how they wait for the answer.
 import { repo } from '../infra/repo.js';
 import { enqueue, notifyDone, waitForDone, startIntakeConsumer } from '../infra/intakeQueue.js';
-import { handleScadaEvent } from './scada.js';
+import { handleScadaEvent, handleScadaBatch, canBatchScada, scadaGroupKey } from './scada.js';
 import { ingestComplaint, plannedNotice } from './complaintIntake.js';
 
 // Each handler runs inside the queue item's transaction t and returns
@@ -16,7 +16,12 @@ export const intakeHandlers = {
   },
 };
 
-export const startIntakeWorker = (opts) => startIntakeConsumer(intakeHandlers, opts);
+// F5: queued SCADA trips of one feeder run as one transaction (realtime/scada.js).
+export const intakeBatchHandlers = {
+  scada: { canBatch: canBatchScada, groupKey: scadaGroupKey, run: (evts, t) => handleScadaBatch(evts, t) },
+};
+
+export const startIntakeWorker = (opts) => startIntakeConsumer(intakeHandlers, { batchHandlers: intakeBatchHandlers, ...opts });
 
 export { enqueueScadaEvent } from './scada.js';
 

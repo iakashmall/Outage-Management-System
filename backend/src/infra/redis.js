@@ -8,15 +8,27 @@ import { createClient } from 'redis';
 // plug into instead of the in-memory placeholder that was here before.
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:16379';
 
+// F4 (load-test findings, 3 Nov 2026): a Redis outage must cost
+// milliseconds, not seconds. Every cache call is bounded by
+// REDIS_COMMAND_TIMEOUT_MS (250 ms) in bounded() below -- node-redis 6.2.1's
+// own commandOptions.timeout did not fire on a hung connection when tested,
+// so the bound is applied here. Commands issued while disconnected fail at
+// once instead of waiting in an offline queue, and connecting gives up after
+// REDIS_CONNECT_TIMEOUT_MS (1 s). Once connected, the client keeps
+// reconnecting in the background (back-off up to 2 s) instead of giving up
+// for good after a restart of Redis.
+const envMsInt = (name, dflt) => { const n = Number(process.env[name]); return Number.isFinite(n) && n > 0 ? n : dflt; };
+export const redisTimeouts = () => ({ commandMs: envMsInt('REDIS_COMMAND_TIMEOUT_MS', 250), connectMs: envMsInt('REDIS_CONNECT_TIMEOUT_MS', 1000) });
+let everConnected = false;
 export const redis = createClient({
   url: REDIS_URL,
+  disableOfflineQueue: true,
   socket: {
-    // Bounded retry, and — critically — the client's default strategy
-    // retries forever without the connect() promise ever settling, which
-    // hangs the whole app's boot sequence when Redis isn't running yet.
-    // Give up after a handful of attempts so connectRedis() below always
-    // resolves one way or the other.
-    reconnectStrategy: (retries) => (retries > 3 ? false : Math.min(retries * 100, 500)),
+    connectTimeout: redisTimeouts().connectMs,
+    // Before the first connection: give up after a handful of attempts, so
+    // connectRedis() always settles and boot never hangs on a missing Redis.
+    // After it: keep trying, so the cache comes back when Redis does.
+    reconnectStrategy: (retries) => (!everConnected && retries > 3 ? false : Math.min((retries + 1) * 100, 2000)),
   },
 });
 let loggedError = false;
@@ -35,7 +47,7 @@ export async function connectRedis() {
   if (connected) return redis;
   if (connecting) return connecting;
   connecting = redis.connect()
-    .then(() => { connected = true; console.log(`[redis] connected → ${REDIS_URL}`); })
+    .then(() => { connected = true; everConnected = true; console.log(`[redis] connected → ${REDIS_URL}`); })
     .catch((err) => { console.warn(`[redis] unavailable (${err.message}) — continuing without cache`); })
     .finally(() => { connecting = null; });
   return connecting;
@@ -55,9 +67,17 @@ const tagKey = (path) => `tag:${path}`;
 // Each kind of write warns once per run of failures, so a full Redis doesn't
 // flood the log, and resolves null.
 const failing = new Set();
+// No cache operation waits longer than REDIS_COMMAND_TIMEOUT_MS, whatever the
+// client does; a late reply is simply dropped.
+function bounded(op) {
+  const ms = redisTimeouts().commandMs;
+  let to;
+  return Promise.race([op(), new Promise((_, reject) => { to = setTimeout(() => reject(new Error(`redis command timed out after ${ms} ms`)), ms); to.unref?.(); })])
+    .finally(() => clearTimeout(to));
+}
 async function nonFatal(kind, write) {
   try {
-    const result = await write();
+    const result = await bounded(write);
     failing.delete(kind);
     return result;
   } catch (err) {
@@ -79,15 +99,16 @@ export async function setTag(path, value, quality = 'GOOD') {
 
 export async function getTag(path) {
   if (!connected) return null;
-  const raw = await redis.get(tagKey(path));
+  const raw = await nonFatal('tag read', () => redis.get(tagKey(path)));
   return raw ? JSON.parse(raw) : null;
 }
 
 export async function getTagsByPrefix(prefix = '') {
   if (!connected) return {};
-  const keys = await redis.keys(`tag:${prefix}*`);
-  if (!keys.length) return {};
-  const values = await redis.mGet(keys);
+  const keys = await nonFatal('tag read', () => redis.keys(`tag:${prefix}*`));
+  if (!keys?.length) return {};
+  const values = await nonFatal('tag read', () => redis.mGet(keys));
+  if (!values) return {};
   const out = {};
   keys.forEach((k, i) => { if (values[i]) out[k.slice(4)] = JSON.parse(values[i]); });
   return out;
@@ -98,9 +119,10 @@ export async function getTagsByPrefix(prefix = '') {
 // refresh (e.g. /indicators). Short TTL — this is a speed layer, not a
 // source of truth, so a stale value for a few seconds is an acceptable
 // trade against hammering Postgres on every poll.
+// A failed or slow read is a cache miss: the caller computes the value itself.
 export async function cacheGet(key) {
   if (!connected) return null;
-  const raw = await redis.get(`cache:${key}`);
+  const raw = await nonFatal('cache read', () => redis.get(`cache:${key}`));
   return raw ? JSON.parse(raw) : null;
 }
 

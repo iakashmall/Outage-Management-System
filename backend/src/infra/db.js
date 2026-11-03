@@ -1,6 +1,6 @@
 ﻿import pgPromise from 'pg-promise';
 
-const pgp = pgPromise({
+export const pgp = pgPromise({
 });
 
 const connectionString = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:15432/oms';
@@ -26,6 +26,24 @@ export const db = pgp({
   idleTimeoutMillis: envMs('PG_IDLE_TIMEOUT_MS') ?? 30000,
   ...Object.fromEntries(Object.entries(optional).filter(([, v]) => v !== undefined)),
 });
+
+// F6 (load-test findings, 3 Nov 2026): the intake queue consumer runs on its
+// own pool (QUEUE_PG_POOL_MAX, default 8), created only in a process that
+// runs the consumer. `db` above stays the API's pool (PG_POOL_MAX), so a
+// SCADA storm being worked off can never take the connections the
+// dashboard's reads need.
+let workerPool = null;
+export function workerDb() {
+  if (!workerPool) {
+    workerPool = pgp({
+      connectionString,
+      max: envMs('QUEUE_PG_POOL_MAX') ?? 8,
+      idleTimeoutMillis: envMs('PG_IDLE_TIMEOUT_MS') ?? 30000,
+      ...Object.fromEntries(Object.entries(optional).filter(([, v]) => v !== undefined)),
+    });
+  }
+  return workerPool;
+}
 
 export async function syncIdSequences() {
   // Forward-only: GREATEST() never rewinds a sequence onto live IDs, so calling

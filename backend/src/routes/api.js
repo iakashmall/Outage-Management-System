@@ -32,6 +32,7 @@ import { substationForFeeder } from '../domain/prediction.js';
 import { plannedOutageRoutes } from './plannedOutages.js';
 import { pickIncident } from '../realtime/complaintIntake.js';
 import { submitComplaint, enqueueScadaEvent } from '../realtime/intakeWorker.js';
+import { buildScadaEvent, submitScadaEvent } from '../infra/scadaIntake.js';
 import { feederKpiRoutes } from './feederKpi.js';
 import { dispatchRoutes } from './dispatch.js';
 import { PRIORITY_CLASSES, isActive, isMovable, priorityInfo } from '../domain/rebalance.js';
@@ -563,22 +564,17 @@ async function ingestScadaEvent(req, res, auditAction) {
   // A network.json feeder code without a substation: fill in the substation's
   // full name (the incidents.substation format) so dedup and grouping line up.
   if (feeder && !substation && typeof lat !== 'number') substation = substationForFeeder(feeder) || undefined;
-  const evt = {
-    id: 'ALM-' + Math.random().toString(36).slice(2, 7),
-    tag, event, condition, limit_val,
-    priority: reclose ? 3 : condition === 'CRITICAL' ? 1 : condition === 'MAJOR' ? 2 : 3,
-    customers, feeder, substation, lat, lon, cim_mrid,
-    message: reclose ? `${tag} reclosed` : `${condition} injected on ${tag}`,
-    ts: new Date().toISOString(), ack: 0,
-  };
-  await repo.createAlarm({ id: evt.id, tag: evt.tag, condition: evt.condition, limit_val: evt.limit_val, priority: evt.priority, message: evt.message, ts: evt.ts, ack: reclose ? 1 : 0 });
-  // Durable before the 202 (WP2): the intake queue processes it. The bus
-  // event still goes out for live screens; queued: true tells the SCADA
-  // subscriber not to queue it a second time.
-  await enqueueScadaEvent(evt);
-  bus.publish(TOPICS.ALARM_RAISED, { ...evt, queued: true });
-  await repo.audit(actor(req), auditAction, `${tag}:${event}`);
-  res.status(202).json({ accepted: true, event: evt });
+  // F1/F2/F5 (infra/scadaIntake.js): UUID alarm id, idempotent on the
+  // sender's event id, alarm + queue item + audit row committed in one
+  // micro-batch transaction before the 202.
+  const evt = buildScadaEvent({ ...req.body, tag, event, condition, limit_val, feeder, substation });
+  const r = await submitScadaEvent(evt, { actor: actor(req), auditAction });
+  if (r.duplicate) return res.status(200).json({ accepted: true, duplicate: true, alarmId: r.alarmId });
+  const { event_key: _k, ...published } = r.event;
+  // The bus event still goes out for live screens; queued: true tells the
+  // SCADA subscriber not to queue it a second time.
+  bus.publish(TOPICS.ALARM_RAISED, { ...published, queued: true });
+  res.status(202).json({ accepted: true, event: published });
 }
 
 // Ingestion route (stand-in for a live SCADA feed). Behaviour change: was open

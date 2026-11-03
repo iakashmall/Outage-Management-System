@@ -32,7 +32,8 @@ import { publicOutages } from './domain/publicStatus.js';
 import { startSimulator } from './realtime/simulator.js';
 import { startScadaConsumer } from './realtime/scada.js';
 import { startIntakeWorker } from './realtime/intakeWorker.js';
-import { healthHandler, setHealthInfo } from './routes/health.js';
+import { healthHandler, setHealthInfo, startHealthRefresher } from './routes/health.js';
+import { scadaIntakeTestHooks } from './infra/scadaIntake.js';
 import { startRestorationPublisher } from './realtime/restoration.js';
 import { startNotifier } from './realtime/notifier.js';
 import { startScheduledReports } from './realtime/scheduledReports.js';
@@ -137,6 +138,12 @@ if (RUNS_JOBS) await startBackgroundJobs('boot');
 
 const app = express();
 if (RUNS_HTTP_API) app.use(cors());
+startHealthRefresher(); // F3: /api/health answers from stats refreshed in the background
+// Test-only (selftest-scada-intake.js, F2): die after a SCADA batch commits and
+// before its requests are answered. Ignored when NODE_ENV=production.
+if (process.env.SCADA_TEST_CRASH_AFTER_COMMIT === '1' && process.env.NODE_ENV !== 'production') {
+  scadaIntakeTestHooks.afterCommit = () => { console.log('[test] SCADA batch committed; killing this process before the reply'); process.kill(process.pid, 'SIGKILL'); };
+}
 app.get('/api/health', healthHandler); // + role, intake queue depth (WP2), jobs here (WP4)
 
 if (!RUNS_HTTP_API) {

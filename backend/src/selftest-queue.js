@@ -22,7 +22,7 @@ const { repo } = await import('./infra/repo.js');
 const { distTx, resolve: resolveAsset } = await import('./infra/geo.js');
 const { enqueue, queueStats, closeListener } = await import('./infra/intakeQueue.js');
 const { startIntakeWorker, enqueueScadaEvent } = await import('./realtime/intakeWorker.js');
-const { healthHandler } = await import('./routes/health.js');
+const { healthHandler, refreshHealth, stopHealthRefresher } = await import('./routes/health.js');
 const { api } = await import('./routes/api.js');
 
 let fails = 0, passes = 0;
@@ -232,6 +232,7 @@ try {
     const base = `http://127.0.0.1:${server.address().port}/api`;
 
     for (let i = 0; i < 7; i++) await enqueueScadaEvent({ tag: `G8.T${i}`, condition: 'CRITICAL', feeder: 'G8-FDR', substation: 'G8 SUB' });
+    await refreshHealth(); // F3: /api/health answers from stats refreshed every 2 s; wait for one refresh
     const h = await (await fetch(base + '/health')).json();
     check('G8: /api/health shows the queue depth (7 queued, no worker running)', h.ok === true && h.queue?.depth === 7 && typeof h.queue.oldestAgeS === 'number',
       JSON.stringify(h.queue));
@@ -249,9 +250,11 @@ try {
     await waitUntil(async () => (await queueStats()).depth === 0, 10000, 50);
     const stored = await repo.complaint(b.queryId);
     check('... and is processed under that queryId once a worker runs', stored?.external_id === 'G8-Q1' && !!stored.incident_id, stored?.incident_id);
+    await refreshHealth(); await refreshHealth(); // the second read starts after the drain
     const h2 = await (await fetch(base + '/health')).json();
     check('G8: depth back to 0 after the worker drained it', h2.queue?.depth === 0, JSON.stringify(h2.queue));
     await worker.stop();
+    stopHealthRefresher();
     server.closeAllConnections();
     await new Promise((res) => server.close(res));
   }
