@@ -30,7 +30,8 @@ import { nanoid } from 'nanoid';
 import { db } from '../infra/db.js';
 import { substationForFeeder } from '../domain/prediction.js';
 import { plannedOutageRoutes } from './plannedOutages.js';
-import { plannedComplaintDecision } from '../domain/plannedComplaints.js';
+import { pickIncident } from '../realtime/complaintIntake.js';
+import { submitComplaint, enqueueScadaEvent } from '../realtime/intakeWorker.js';
 import { feederKpiRoutes } from './feederKpi.js';
 import { dispatchRoutes } from './dispatch.js';
 import { PRIORITY_CLASSES, isActive, isMovable, priorityInfo } from '../domain/rebalance.js';
@@ -571,7 +572,11 @@ async function ingestScadaEvent(req, res, auditAction) {
     ts: new Date().toISOString(), ack: 0,
   };
   await repo.createAlarm({ id: evt.id, tag: evt.tag, condition: evt.condition, limit_val: evt.limit_val, priority: evt.priority, message: evt.message, ts: evt.ts, ack: reclose ? 1 : 0 });
-  bus.publish(TOPICS.ALARM_RAISED, evt);
+  // Durable before the 202 (WP2): the intake queue processes it. The bus
+  // event still goes out for live screens; queued: true tells the SCADA
+  // subscriber not to queue it a second time.
+  await enqueueScadaEvent(evt);
+  bus.publish(TOPICS.ALARM_RAISED, { ...evt, queued: true });
   await repo.audit(actor(req), auditAction, `${tag}:${event}`);
   res.status(202).json({ accepted: true, event: evt });
 }
@@ -668,102 +673,22 @@ api.post('/calls/:id/to-incident', requireRole('oms_operator', 'system_admin'), 
 });
 
 // ---------- complaints (external REST intake - dedup - merge - traceability) ----------
-const CATEGORY_TYPE = { 'No Supply': 'Power Outage', 'Partial Supply': 'Partial Power', 'Voltage': 'Power Quality', 'Wire Down': 'Safety Hazard', 'Meter': 'Metering', 'Other': 'Power Outage' };
-const CATEGORY_SEV = { 'Wire Down': 'critical', 'No Supply': 'high', 'Partial Supply': 'medium', 'Voltage': 'medium', 'Meter': 'low', 'Other': 'medium' };
-
-const SUPPLY = ['No Supply', 'Partial Supply', 'Voltage'];      // symptoms of one outage
-const OUTAGE_TYPES = ['Power Outage', 'Partial Power', 'Power Quality'];
-// Decide whether a new complaint belongs to an already-open incident at the same substation. (pure)
-// A supply complaint also joins an outage SCADA opened: scada.js creates those with
-// type 'outage' and cause 'SCADA <condition> on <tag>', which neither list above matches.
-const isScadaOutage = (c) => c.source === 'SCADA' || c.type === 'outage';
-export function pickIncident(candidates, category) {
-  const supply = SUPPLY.includes(category);
-  return candidates.find((c) =>
-    supply ? (OUTAGE_TYPES.includes(c.type) || SUPPLY.includes(c.cause) || isScadaOutage(c)) : c.cause === category) || null;
-}
-
-// Core intake: takes an external complaint, mints our own query id, resolves the
-// affected substation, and either MERGES into an active matching incident or opens a new one.
-async function ingestComplaint(body, who) {
-  const qid = await repo.nextQueryId();
-  const ts = new Date().toISOString();
-  const category = body.category || 'No Supply';
-  const lat = typeof body.lat === 'number' ? body.lat : null;
-  const lon = typeof body.lon === 'number' ? body.lon : null;
-  const loc = resolveAsset(lat, lon);                       // - nearest DT, feeder, substation (in-memory, sync)
-
-  // OMS-01: a supply complaint inside an active planned outage's window (same
-  // feeder, or same substation when a feeder is unknown) belongs to that
-  // planned outage, not to a new fault incident. A different feeder of the
-  // same substation still opens a fault incident, noted below.
-  const plannedDecision = loc.substation
-    ? plannedComplaintDecision({ category, feeder: loc.feeder, substation: loc.substation }, await repo.plannedOutagesForComplaint(loc.substation))
-    : { action: 'none' };
-  const planned = plannedDecision.action === 'attach' ? plannedDecision.outage : null;
-
-  const candidates = loc.substation && !planned ? await repo.activeIncidentsAtSubstation(loc.substation) : [];
-  const match = pickIncident(candidates, category);
-  let incidentId, action, plannedOutage = null;
-
-  if (planned) {                                            // PLANNED OUTAGE
-    // action stays 'merged' (an existing incident) so the response values API
-    // consumers know are unchanged; the new plannedOutage field marks it.
-    incidentId = planned.incident_id; action = 'merged';
-    await repo.addIncidentEvent(incidentId, who, 'complaint',
-      `Customer complaint during planned outage: ${qid}${body.externalId ? ' (ext ' + body.externalId + ')' : ''} - ${category}, ${body.customer || 'customer'}`);
-    const end = new Date(planned.window_end);
-    plannedOutage = {
-      incidentId, plannedOutageId: planned.id, windowEnd: end.toISOString(),
-      message: `Planned maintenance is in progress in your area. Supply is expected to be restored by ${end.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })}. Ref: ${incidentId}.`,
-    };
-    bus.publish(TOPICS.PLANNED_OUTAGE_UPDATED, { id: planned.id, incidentId, status: planned.status, complaint: qid });
-  } else if (match) {                                       // MERGE
-    incidentId = match.id; action = 'merged';
-    await repo.updateIncident(match.id, { customers: (match.customers || 0) + 1 });
-    await repo.addIncidentEvent(match.id, who, 'complaint', `Merged complaint ${qid}${body.externalId ? ' (ext ' + body.externalId + ')' : ''} - ${category}, ${body.customer || 'customer'}`);
-    bus.publish(TOPICS.INCIDENT_UPDATED, await repo.incident(match.id));
-  } else {                                                  // NEW
-    incidentId = await repo.nextIncidentId(); action = 'created';
-    const inc = await repo.createIncident({
-      id: incidentId, type: CATEGORY_TYPE[category] || 'Power Outage', severity: CATEGORY_SEV[category] || 'medium',
-      status: 'open', zone: loc.substation ? loc.substation.replace(/33\/11 kV/i, '').replace(/S\/s/i, '').trim() : (body.address || 'Unknown'),
-      feeder: loc.feeder, customers: 1, cause: category, lat: lat, lon: lon, crew_id: null,
-      opened_at: ts, ert: null, sla_due_at: new Date(Date.now() + 180 * 60000).toISOString(),
-      source: 'Customer', substation: loc.substation,
-    });
-    await repo.addIncidentEvent(incidentId, who, 'created', `Opened from complaint ${qid} - ${category} near ${loc.substation || 'unknown'}`);
-    bus.publish(TOPICS.INCIDENT_CREATED, inc);
-  }
-  if (plannedDecision.action === 'note') {
-    const po = plannedDecision.outage;
-    await repo.addIncidentEvent(incidentId, who, 'complaint',
-      `Planned outage ${po.incident_id} is active at this substation on feeder ${po.feeder} (this complaint resolved to feeder ${loc.feeder || 'unknown'})`);
-  }
-  await cacheDel('indicators');
-
-  const complaint = await repo.addComplaint({
-    qid, external_id: body.externalId || null, customer: body.customer || null, phone: body.phone || null,
-    address: body.address || null, category, lat, lon, dt_id: loc.dt_id, feeder: loc.feeder,
-    substation: loc.substation, incident_id: incidentId, action, ts,
-  });
-  return { complaint, action, incidentId, resolved: loc, plannedOutage };
-}
+// The intake itself (burst-safe, idempotent, one transaction) is realtime/complaintIntake.js.
+export { pickIncident };
 
 api.get('/complaints', async (req, res) => res.json(await repo.complaints()));
 
 // REST intake used by the external complaint service. Call-centre, operator
 // or admin role (an external service needs a service account with one of them).
+// Role check, rate limit and validation (routes/intake.js) run first: a
+// rejected request is answered 403/429/400 and never reaches the queue.
 api.post('/complaints', requireRole(...CALL_ROLES), intakeRateLimit, validate(validateComplaint), async (req, res) => {
-  const r = await ingestComplaint(req.body || {}, req.user);
-  res.status(201).json({
-    queryId: r.complaint.qid, externalId: r.complaint.external_id, action: r.action,
-    incidentId: r.incidentId, feeder: r.resolved.feeder, substation: r.resolved.substation,
-    complaint: r.complaint,
-    // OMS-01, additive: present only when the complaint was linked to a
-    // planned outage; `message` is what to tell the customer.
-    ...(r.plannedOutage ? { plannedOutage: r.plannedOutage } : {}),
-  });
+  // Queued durably, then answered once processed (realtime/intakeWorker.js):
+  // 201 as before; 200 + duplicate: true for an externalId already stored
+  // (nothing new is created); 202 + status: 'queued' if it is still waiting
+  // after INTAKE_SYNC_WAIT_MS.
+  const r = await submitComplaint(req.body || {}, req.user);
+  res.status(r.status).json(r.body);
 });
 
 // Full traceback: complaint - query - incident/problem - feeder - substation
@@ -787,16 +712,20 @@ api.post('/complaints/simulate', requireSimulators, async (req, res) => {
   const names = ['Rakesh Verma', 'Sunita Devi', 'Imran Khan', 'Pooja Sharma', 'Deepak Rana', 'Anjali Bisht', 'Mohit Saini', 'Kavita Joshi'];
   const s = netSubstations[Math.floor(Math.random() * netSubstations.length)] || { lat: 29.95, lon: 78.13 };
   const body = {
-    externalId: 'EXT-' + Math.floor(100000 + Math.random() * 899999),
+    // nanoid, not a 6-digit random number: externalId is unique now, and a
+    // collision would turn a demo complaint into a "duplicate".
+    externalId: 'EXT-SIM-' + nanoid(10),
     customer: names[Math.floor(Math.random() * names.length)],
     phone: '9' + Math.floor(100000000 + Math.random() * 899999999),
     category: cats[Math.floor(Math.random() * cats.length)],
     address: 'Near ' + (s.name || '').replace(/33\/11 kV/i, '').replace(/S\/s/i, '').trim(),
     lat: s.lat + (Math.random() - 0.5) * 0.006, lon: s.lon + (Math.random() - 0.5) * 0.006,
   };
-  const r = await ingestComplaint(body, req.user);
-  res.status(201).json({ queryId: r.complaint.qid, action: r.action, incidentId: r.incidentId, substation: r.resolved.substation, feeder: r.resolved.feeder, category: body.category, customer: body.customer,
-    ...(r.plannedOutage ? { plannedOutage: r.plannedOutage } : {}) });
+  const r = await submitComplaint(body, req.user);
+  const b = r.body;
+  res.status(r.status).json({ queryId: b.queryId, action: b.action, incidentId: b.incidentId, substation: b.substation, feeder: b.feeder, category: body.category, customer: body.customer,
+    ...(b.status ? { status: b.status } : {}),
+    ...(b.plannedOutage ? { plannedOutage: b.plannedOutage } : {}) });
 });
 
 // ---------- indicators / analytics ----------

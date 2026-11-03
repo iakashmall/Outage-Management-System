@@ -16,6 +16,7 @@ import { seedOms03Demo } from './infra/seedOms03.js';
 import { api } from './routes/api.js';
 import { repo } from './infra/repo.js';
 import { bus, initBus, TOPICS } from './domain/bus.js';
+import { startIntakeWorker } from './realtime/intakeWorker.js';
 
 if (!process.env.DATABASE_URL) {
   console.error('selftest-oms03: set DATABASE_URL to a scratch database (this test reseeds it)');
@@ -46,6 +47,7 @@ const runStart = (await db.one('SELECT now() AS t')).t;
 await seed({ force: true });
 const demo = await seedOms03Demo();
 await initBus();
+startIntakeWorker({ pollMs: 50 }); // WP2: POST /complaints is processed from the intake queue
 
 let fails = 0, passes = 0;
 const check = (name, ok, extra = '') => {

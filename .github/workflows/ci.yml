@@ -180,6 +180,33 @@ jobs:
           KAFKA_BROKERS: localhost:9092
         run: node src/selftest-feederkpi.js
 
+      # Burst-safe intake (runbook v2 WP1, G1-G5): one incident per feeder under
+      # concurrent SCADA events and complaints, external_id idempotency, retry,
+      # rollback. Reseeds the database.
+      - name: Run burst-safe intake self-test
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://oms:oms@localhost:5432/oms
+          REDIS_URL: redis://localhost:6379
+        run: node src/selftest-intake.js
+
+      # Durable intake queue (WP2, G6-G8): kill the worker mid-burst of 5,000,
+      # exactly once after restart; poison -> dead letter; depth on /api/health.
+      - name: Run intake queue self-test
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://oms:oms@localhost:5432/oms
+          REDIS_URL: redis://localhost:6379
+        run: node src/selftest-queue.js
+
+      # Worker split (WP4): ROLE=api / worker / all as real processes.
+      - name: Run worker split self-test
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://oms:oms@localhost:5432/oms
+          REDIS_URL: redis://localhost:6379
+        run: node src/selftest-roles.js
+
       # The main self-test again on the same database, now holding planned
       # outages and safety-log rows: seed --force must still reset it.
       - name: Re-run self-test after OMS-01 data exists

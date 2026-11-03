@@ -59,6 +59,36 @@ export OMS_KC_ADMIN_PASSWORD='<strong password>'  # Keycloak "admin" user
   128 MB; Postgres is the system of record. A restart can lose the last few minutes of tag values, which the next
   SCADA readings replace.
 
+## Complaint intake API (`POST /api/complaints`)
+For the external complaint service. The caller needs a token with the `call_centre_attendant`, `oms_operator` or
+`system_admin` role. Every complaint goes into the durable intake queue (Postgres `intake_queue`), which the
+`oms-worker` service processes. The API waits up to `INTAKE_SYNC_WAIT_MS` (default 15000 ms) for the result, then answers:
+
+| Status | Body | Meaning |
+|---|---|---|
+| `201` | `queryId`, `externalId`, `action` (`created` / `merged`), `incidentId`, `feeder`, `substation`, `complaint`, and `plannedOutage` when it joined one | Processed: stored and linked to an incident. |
+| `200` | the stored complaint's fields, plus `duplicate: true` | That `externalId` is already stored. Nothing new was created; resending is safe. |
+| `202` | `queryId`, `externalId`, `status: 'queued'` | Accepted and safely queued, but not processed within `INTAKE_SYNC_WAIT_MS`. It will be processed; do not resend with a new `externalId`. Resending the same `externalId` later answers `200`, `duplicate: true` once it is processed. |
+
+Rejected requests never reach the queue: `401` without a valid token, `403` for any other role, `429` (with
+`Retry-After`) above `INTAKE_RATE_LIMIT_PER_MIN` per client, `413` for a body over 64 KB and `400` for invalid fields.
+A `202` while `oms-worker` is running usually means the queue is backed up: check the queue depth at `/api/health`.
+If `oms-worker` is stopped, every complaint answers `202` and waits in the queue until a worker starts again.
+
+Settings (all optional; put them in `backend/.env.deploy`):
+
+| Variable | Default | What it does |
+|---|---|---|
+| `ROLE` | `all` | `api`, `worker` or `all`; the compose file already sets `api` for `oms-backend` and `worker` for `oms-worker` |
+| `INTAKE_SYNC_WAIT_MS` | `15000` | how long `POST /complaints` waits for the queue before answering `202` |
+| `INTAKE_RATE_LIMIT_PER_MIN` / `SCADA_RATE_LIMIT_PER_MIN` | `6000` / `120000` | per-client limits (`0` turns a limit off) |
+| `ENABLE_SIMULATORS` | `false` | keep `false`: otherwise `/complaints/simulate` and `/scada/simulate` are open |
+| `INTAKE_COALESCE` | on | `off` stops repeated queued SCADA events for the same tag and state from being merged |
+| `QUEUE_CONCURRENCY`, `QUEUE_POLL_MS`, `QUEUE_LEASE_MS`, `QUEUE_MAX_ATTEMPTS`, `QUEUE_BACKOFF_BASE_MS`, `QUEUE_BACKOFF_MAX_MS` | 4, 250, 60000, 8, 1000, 300000 | queue worker tuning; after `QUEUE_MAX_ATTEMPTS` an item moves to `intake_dead_letter` |
+| `INTAKE_RETRY_ATTEMPTS`, `INTAKE_RETRY_BASE_MS` | 3, 100 | retries of one intake transaction (deadlock, serialization failure) |
+| `JOB_LOCK_RETRY_MS` | `15000` | how often a standby worker tries to take over a background job |
+| `HEALTH_QUEUE_TIMEOUT_MS` | `2000` | `/api/health` reports the queue as unknown if it cannot read the depth in this time |
+
 ## Load the network topology
 **Required after the first deploy, and again after any change to `backend/src/infra/importHaridwarInferred.js`.**
 `replace-old-oms.sh` does not do it. Without it the `network.*` tables are missing or empty: trace to source,

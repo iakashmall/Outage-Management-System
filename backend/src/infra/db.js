@@ -782,6 +782,50 @@ export async function migrate() {
     END $$;
     CREATE INDEX IF NOT EXISTS idx_incidents_tripped_equipment ON incidents (tripped_equipment_id);
   `);
+  await migrateIntake();
   const { migrateFeederKpi } = await import('./feederKpiSchema.js');
   await migrateFeederKpi();
+}
+
+// Burst-safe intake (runbook v2 WP1). Idempotent: safe on every boot.
+// complaints.external_id becomes unique (partial: NULL stays allowed). An
+// existing database that already holds duplicate external ids is NOT changed
+// (no rows are deleted or renamed): the unique index is skipped with a
+// warning and a plain index is made instead. Intake stays idempotent through
+// the external-id advisory lock and lookup (realtime/complaintIntake.js); the
+// warning stays until someone resolves the duplicates by hand.
+// Indexes for the scope lookups (D2) are added too.
+async function migrateIntake() {
+  const r = await db.one(`
+    SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'complaints_external_id_key') AS has_unique,
+           (SELECT count(*) FROM (SELECT external_id FROM complaints WHERE external_id IS NOT NULL
+              GROUP BY external_id HAVING count(*) > 1) d)::int AS dup_ids`);
+  if (!r.has_unique) {
+    if (r.dup_ids === 0) {
+      await db.none('CREATE UNIQUE INDEX IF NOT EXISTS complaints_external_id_key ON complaints (external_id) WHERE external_id IS NOT NULL');
+      await db.none('DROP INDEX IF EXISTS idx_complaints_external_id');
+    } else {
+      console.warn(`[migrate] WARNING: ${r.dup_ids} external_id value(s) appear on more than one complaint; `
+        + 'unique index complaints_external_id_key NOT created (no data changed). New complaints are still deduplicated by external id.');
+      await db.none('CREATE INDEX IF NOT EXISTS idx_complaints_external_id ON complaints (external_id)');
+    }
+  }
+  // Merge candidates are the open incidents of the last 4 hours (repo.activeIncidentsInScope).
+  await db.none(`
+    CREATE INDEX IF NOT EXISTS idx_incidents_open_opened_at ON incidents (opened_at DESC)
+      WHERE status NOT IN ('resolved','closed','cancelled');
+  `);
+  // Canonical feeder / substation identity for the D2 merge rule (G9).
+  const { migrateNetworkIdentity } = await import('./networkIdentity.js');
+  await migrateNetworkIdentity();
+  // pgcrypto, safe_decrypt_text and the encrypted phone column, which used
+  // to need the manual db/migrations files.
+  const { migrateComplaintPhones } = await import('./complaintPhones.js');
+  await migrateComplaintPhones();
+  // The durable intake queue and its dead-letter table (WP2).
+  const { migrateIntakeQueue } = await import('./intakeQueue.js');
+  await migrateIntakeQueue();
+  // Cross-process bus relay for ROLE=api / ROLE=worker (WP4).
+  const { migrateBusRelay } = await import('./busRelay.js');
+  await migrateBusRelay();
 }

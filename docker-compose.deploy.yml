@@ -17,6 +17,7 @@ services:
     image: timescale/timescaledb-ha:pg16
     restart: unless-stopped
     logging: *logging
+    mem_limit: 2g
     environment:
       POSTGRES_DB: oms
       POSTGRES_USER: oms
@@ -36,6 +37,7 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     logging: *logging
+    mem_limit: 256m
     # The image's own command was a bare "redis-server" (no flags), so only the memory cap is added. volatile-lru
     # evicts only keys with a TTL (the cache:* entries); tag:* keys have none, so a full Redis rejects tag writes,
     # and setTag (backend/src/infra/redis.js) logs that and carries on.
@@ -49,6 +51,7 @@ services:
     image: quay.io/keycloak/keycloak:24.0
     restart: unless-stopped
     logging: *logging
+    mem_limit: 2560m
     command: ["start-dev", "--http-port=8080", "--import-realm"]
     environment:
       KEYCLOAK_ADMIN: admin
@@ -60,6 +63,7 @@ services:
       KC_HOSTNAME_STRICT: "false"
       KC_HTTP_ENABLED: "true"
       KC_PROXY_HEADERS: xforwarded   # login pages are reached through Caddy (https)
+      JAVA_OPTS_KC_HEAP: "-Xms256m -Xmx1024m"
     ports:
       - "127.0.0.1:18081:8080"   # admin console, this server only: ssh -L 18081:127.0.0.1:18081 <user>@<server>
     volumes:
@@ -74,6 +78,7 @@ services:
     build: ./deploy/map-tunnel
     restart: unless-stopped
     logging: *logging
+    mem_limit: 64m
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -85,10 +90,13 @@ services:
       dockerfile: backend/Dockerfile
     restart: unless-stopped
     logging: *logging
+    mem_limit: 1536m
     depends_on:
       postgres: { condition: service_healthy }
       keycloak: { condition: service_started }
-    environment:
+    environment: &backend-env
+      # api: REST + Socket.IO only. Background jobs and the intake queue run in oms-worker (below).
+      ROLE: api
       PORT: "4000"
       DATABASE_URL: postgres://oms:${OMS_DB_PASSWORD:?set a strong password in the environment}@postgres:5432/oms
       REDIS_URL: redis://redis:6379
@@ -106,6 +114,7 @@ services:
       PG_CONNECT_TIMEOUT_MS: "5000"
       PG_STATEMENT_TIMEOUT_MS: "60000"
       PG_IDLE_TX_TIMEOUT_MS: "60000"
+      NODE_OPTIONS: "--max-old-space-size=1024"
     ports:
       # Crew app API: http://<server>:4000/api (job status, photos, QR scans). The web app goes through Caddy instead.
       # Limit it in the firewall to the crew devices' network if you can; traffic is not encrypted.
@@ -120,6 +129,35 @@ services:
       - path: ./backend/.env.deploy   # optional extras: MAP_*, BREVO_*, NOTIFY_*, REPORT_*
         required: false
 
+  # Same image as oms-backend, ROLE=worker: the durable intake queue (SCADA events, complaints) and every
+  # background job (SMS, DMS restoration, KPIs, reports, escalations). It serves only /api/health, inside the
+  # compose network. Each job runs in exactly one process (Postgres advisory locks), so a second worker
+  # (docker compose up -d --scale oms-worker=2) only adds queue throughput and a standby for the jobs.
+  oms-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 1g
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      <<: *backend-env
+      ROLE: worker
+      NODE_OPTIONS: "--max-old-space-size=768"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/api/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    env_file:
+      - path: ./backend/.env.deploy   # optional extras: MAP_*, BREVO_*, NOTIFY_*, REPORT_*
+        required: false
+
   oms-web:
     build:
       context: .
@@ -129,6 +167,7 @@ services:
         VITE_KEYCLOAK_URL: https://${OMS_HOST:-localhost}:8443
     restart: unless-stopped
     logging: *logging
+    mem_limit: 128m
     depends_on:
       - oms-backend
     ports:
@@ -139,6 +178,7 @@ services:
     image: caddy:2-alpine
     restart: unless-stopped
     logging: *logging
+    mem_limit: 256m
     environment:
       OMS_HOST: ${OMS_HOST:-localhost}
     ports:
