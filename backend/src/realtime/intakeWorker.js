@@ -7,10 +7,19 @@ import { ingestComplaint, plannedNotice } from './complaintIntake.js';
 
 // Each handler runs inside the queue item's transaction t and returns
 // { result, effects }; the queue deletes the item in that same transaction.
+// item is the queue row ({ id, kind, ... }).
 export const intakeHandlers = {
   scada: (evt, t) => handleScadaEvent(evt, { cx: t, deferEffects: true }),
-  complaint: async (p, t) => {
-    const out = await ingestComplaint(p.body, p.who, { cx: t, deferEffects: true, qid: p.qid, ts: p.ts });
+  complaint: async (p, t, item) => {
+    const out = await ingestComplaint(p.body, p.who, { cx: t, deferEffects: true, qid: p.qid, ts: p.ts, itemId: item?.id ?? null });
+    // D2: an item that stores nothing is deleted only with its duplicate verdict
+    // recorded, in the same transaction (a conflict throws IntakeRejected and is
+    // dead-lettered by the queue instead).
+    if (out.result?.duplicate && item) {
+      await t.none(`INSERT INTO intake_duplicates (item_id, kind, dup_key, existing_ref, payload)
+        VALUES ($1, 'complaint', $2, $3, $4) ON CONFLICT (item_id) DO NOTHING`,
+        [item.id, out.result.duplicateKey || 'unknown', out.result.complaint?.qid || null, JSON.stringify(p)]);
+    }
     await notifyDone(t, p.qid); // delivered at commit
     return out;
   },
@@ -44,11 +53,22 @@ export async function submitComplaint(body, user) {
   if (existing) return { status: 200, body: await responseFor(existing, true) };
 
   const qid = await repo.nextQueryId();
-  await enqueue('complaint', { qid, ts: new Date().toISOString(), body, who: whoOf(user) });
-  const find = async () => (await repo.complaint(qid)) || (externalId && await repo.complaintByExternalId(externalId)) || null;
+  const itemId = await enqueue('complaint', { qid, ts: new Date().toISOString(), body, who: whoOf(user) });
+  // D2: a complaint found under our qid counts only if it is OURS (same
+  // external id, or stored by our queue item); otherwise a reused qid would
+  // answer with somebody else's complaint.
+  const find = async () => {
+    if (externalId) return (await repo.complaintByExternalId(externalId)) || null;
+    const who = await repo.complaintIdentity(qid);
+    return who && String(who.intake_item_id) === String(itemId) ? repo.complaint(qid) : null;
+  };
   await waitForDone(qid, { timeoutMs: syncWaitMs(), check: find });
   const c = await find();
-  if (!c) return { status: 202, body: { queryId: qid, externalId, status: 'queued' } };
+  if (!c) {
+    const dead = await repo.deadLetterReason(itemId);
+    if (dead) return { status: 409, body: { queryId: qid, externalId, status: 'rejected', reason: dead } };
+    return { status: 202, body: { queryId: qid, externalId, status: 'queued' } };
+  }
   const duplicate = c.qid !== qid;
   return { status: duplicate ? 200 : 201, body: await responseFor(c, duplicate) };
 }

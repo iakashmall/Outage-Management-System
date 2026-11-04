@@ -117,7 +117,8 @@ at rest (`ENCRYPTION_KEY`), sequence-based ID generation, network topology schem
 `QUEUE_BACKOFF_BASE_MS`, `QUEUE_BACKOFF_MAX_MS`, `JOB_LOCK_RETRY_MS`, `HEALTH_QUEUE_TIMEOUT_MS`, `HEALTH_REFRESH_MS`,
 `QUEUE_PG_POOL_MAX`, `QUEUE_COMPLAINT_CONCURRENCY`, `QUEUE_BATCH_MAX`, `QUEUE_CLAIM_SCAN`, `QUEUE_GROUP_MAX`, `SCADA_BATCH_MAX`, `SCADA_BATCH_WAIT_MS`,
 `REDIS_COMMAND_TIMEOUT_MS`, `REDIS_CONNECT_TIMEOUT_MS`, `PG_POOL_MAX`, `PG_CONNECT_TIMEOUT_MS`, `PG_STATEMENT_TIMEOUT_MS`,
-`PG_IDLE_TX_TIMEOUT_MS`, `PG_IDLE_TIMEOUT_MS`, `DB_WAIT_S`,
+`PG_IDLE_TX_TIMEOUT_MS`, `PG_IDLE_TIMEOUT_MS`, `DB_WAIT_S`, `QUEUE_HEARTBEAT_MS`, `MIGRATION_LOCK_TIMEOUT_MS`,
+`STARTUP_RETRY_ATTEMPTS`, `STARTUP_RETRY_DELAY_MS`,
 `MOMENTARY_MAX_MIN`, `CUSTOMERS_SERVED`, `CUSTOMERS_SERVED_CONFIRMED`, `ENCRYPTION_KEY`, `TILES_DIR`, `MAP_SERVER_URL`, `MAP_API_KEY`. The backend reads `backend/.env` (git-ignored). The seed script does not load it: run it with `node --env-file=.env`.
 
 **Intake tuning added or changed by the load-test fixes F3 to F6 (3 Nov 2026).** Each must be a positive whole number; anything else falls back to the default. `deploy/ubuntu/DEPLOY.md` (Complaint intake API section) has the same list, the values fixed in the code, and the connection budget.
@@ -131,6 +132,9 @@ at rest (`ENCRYPTION_KEY`), sequence-based ID generation, network topology schem
 | `QUEUE_BATCH_MAX` | 200 | items one SCADA-lane loop claims at once; trips of one feeder run in one transaction |
 | `QUEUE_CLAIM_SCAN` | 10 × `QUEUE_BATCH_MAX` | oldest claimable items a claim looks at; it claims whole feeder groups out of them, oldest group first (4 Nov 2026) |
 | `QUEUE_GROUP_MAX` | 50 | most items of one feeder group in one claim |
+| `QUEUE_LEASE_MS` | 10000 | *(changed 4 Nov 2026, was 60000)* how long a claim lasts without renewal; a live worker renews it every `QUEUE_HEARTBEAT_MS` (lease / 3), so a dead or stalled worker's items are taken over within about one lease |
+| `MIGRATION_LOCK_TIMEOUT_MS` | 2000 | `lock_timeout` of the schema migration, which runs only when the stored schema version is older than the code's (a normal start runs no DDL) |
+| `STARTUP_RETRY_ATTEMPTS` / `STARTUP_RETRY_DELAY_MS` | 5 / 2000 | retries of a failed startup step, with a doubling delay; after the last one the process exits with code 1 |
 | `SCADA_BATCH_MAX` | 500 | `POST /scada/fault` requests written in one transaction |
 | `SCADA_BATCH_WAIT_MS` | 5 | how long a write batch waits to fill before it is written |
 | `HEALTH_REFRESH_MS` | 2000 | refresh interval of the cached queue figures `/api/health` answers with |

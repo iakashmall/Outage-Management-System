@@ -20,8 +20,8 @@ const ORIGIN = nanoid(10);
 const MAX_INLINE = 7500; // bytes; NOTIFY payloads must stay under 8000
 const LOCAL_ONLY = new Set([TOPICS.FEEDER_ANALOG]); // raw analog samples: per process, high volume
 
-export async function migrateBusRelay() {
-  await db.none(`
+export async function migrateBusRelay(cx = db) {
+  await cx.none(`
     CREATE TABLE IF NOT EXISTS bus_relay (
       id         BIGSERIAL PRIMARY KEY,
       topic      TEXT NOT NULL,

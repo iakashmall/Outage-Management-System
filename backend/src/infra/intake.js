@@ -39,6 +39,13 @@ export async function lockExternalId(t, externalId) {
   if (externalId) await t.any('SELECT pg_advisory_xact_lock($1, hashtext($2))', [NS.externalId, String(externalId)]);
 }
 
+// D2 (4 Nov 2026): an intake item that must not be stored and must not be
+// retried (its outcome would be the same). The intake queue moves it straight
+// to intake_dead_letter with this message as the reason, and logs it.
+export class IntakeRejected extends Error {
+  constructor(message) { super(message); this.name = 'IntakeRejected'; this.deadLetter = true; }
+}
+
 // Bounded retry with exponential back-off and jitter. Every failed attempt is
 // logged; after the last one the error is rethrown, never swallowed.
 export async function withRetry(fn, { label = 'intake', attempts = Number(process.env.INTAKE_RETRY_ATTEMPTS) || 3,
@@ -47,6 +54,7 @@ export async function withRetry(fn, { label = 'intake', attempts = Number(proces
     try {
       return await fn(i);
     } catch (err) {
+      if (err?.deadLetter) throw err; // IntakeRejected: the same input fails the same way, do not retry
       if (i >= attempts) {
         console.error(`[${label}] failed after ${i} attempt(s), giving up:`, err.message);
         throw err;

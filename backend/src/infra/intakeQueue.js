@@ -24,6 +24,8 @@
 // Ordering: items with the same order_key (a SCADA tag: its trip before its
 // reclose) are taken strictly in id order; a failing item only holds back
 // later items with its own key, never the rest of the queue.
+import { hostname } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { db, workerDb } from './db.js';
 
 const envInt = (name, dflt) => {
@@ -33,14 +35,16 @@ const envInt = (name, dflt) => {
 export const queueConfig = () => ({
   concurrency: envInt('QUEUE_CONCURRENCY', 4),
   pollMs: envInt('QUEUE_POLL_MS', 250),
-  leaseMs: envInt('QUEUE_LEASE_MS', 60000),
+  // D3 (4 Nov 2026): 10 s, renewed by a heartbeat while the worker lives
+  // (was 60 s with no renewal: a killed worker's items waited a full minute).
+  leaseMs: envInt('QUEUE_LEASE_MS', 10000),
   maxAttempts: envInt('QUEUE_MAX_ATTEMPTS', 8),
   backoffBaseMs: envInt('QUEUE_BACKOFF_BASE_MS', 1000),
   backoffMaxMs: envInt('QUEUE_BACKOFF_MAX_MS', 300000),
 });
 
-export async function migrateIntakeQueue() {
-  await db.none(`
+export async function migrateIntakeQueue(cx = db) {
+  await cx.none(`
     CREATE TABLE IF NOT EXISTS intake_queue (
       id           BIGSERIAL PRIMARY KEY,
       kind         TEXT NOT NULL,
@@ -70,6 +74,22 @@ export async function migrateIntakeQueue() {
     CREATE UNIQUE INDEX IF NOT EXISTS alarms_event_key_uq ON alarms (event_key) WHERE event_key IS NOT NULL;
     -- F6: the complaint lane claims complaints without scanning a SCADA backlog.
     CREATE INDEX IF NOT EXISTS idx_intake_queue_complaints ON intake_queue (id) WHERE kind = 'complaint';
+    -- D2 (4 Nov 2026): no queue item is deleted unless it was stored, recorded
+    -- here as a duplicate of something already stored, or dead-lettered.
+    -- complaints.intake_item_id is the queue item that stored the complaint:
+    -- the idempotency key of a complaint that has no external id.
+    ALTER TABLE complaints ADD COLUMN IF NOT EXISTS intake_item_id BIGINT;
+    -- D3: which claim holds an item (one token per claim); the heartbeat renews
+    -- only that claim's lease, and only that claim may process or fail the item.
+    ALTER TABLE intake_queue ADD COLUMN IF NOT EXISTS claimed_by TEXT;
+    CREATE TABLE IF NOT EXISTS intake_duplicates (
+      item_id      BIGINT PRIMARY KEY,
+      kind         TEXT NOT NULL,
+      dup_key      TEXT NOT NULL,
+      existing_ref TEXT,
+      payload      JSONB NOT NULL,
+      decided_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
   `);
 }
 
@@ -218,7 +238,7 @@ export async function closeListener() {
 // grouping only decides what is claimed together: processClaimed still
 // groups on the handler's exact key, and order/exactly-once rest on the
 // head rule and the per-transaction DELETE as before.
-const stats = { groups: 0, groupedItems: 0 };
+const stats = { groups: 0, groupedItems: 0, heartbeats: 0, renewed: 0, leaseLost: 0 };
 export const consumerStats = () => ({ ...stats });
 
 export function startIntakeConsumer(handlers, opts = {}) {
@@ -248,11 +268,44 @@ export function startIntakeConsumer(handlers, opts = {}) {
   local.add(wake);
 
   const lease = String(cfg.leaseMs);
+  // D3 lease heartbeat. Every claim gets its own token (claimed_by). While this
+  // process lives, a timer pushes the lease of every claim it still holds
+  // forward (every leaseMs / 3, QUEUE_HEARTBEAT_MS), so a slow item is never
+  // taken by another worker. A killed worker stops renewing, and its items are
+  // claimable again within one lease (10 s by default). A worker that stalls
+  // (blocked event loop) also stops renewing; if its items are re-claimed, the
+  // token no longer matches and it skips them instead of processing them a
+  // second time (processOne / processGroup / failed / deadLetter check it).
+  const consumerId = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
+  let claimSeq = 0;
+  const held = new Set(); // tokens of claims this process is still working on
+  const heartbeatMs = Math.max(200, envInt('QUEUE_HEARTBEAT_MS', Math.round(cfg.leaseMs / 3)));
+  const heartbeat = setInterval(async () => {
+    if (!held.size) return;
+    try {
+      // SKIP LOCKED: the row being processed right now is locked by our own
+      // processing transaction (and protected by that lock); waiting for it
+      // would stall the heartbeat until it commits and let the others expire.
+      const r = await pool.result(`UPDATE intake_queue SET available_at = now() + ($1 || ' milliseconds')::interval
+        WHERE id IN (SELECT id FROM intake_queue WHERE claimed_by = ANY($2::text[]) FOR UPDATE SKIP LOCKED)`, [lease, [...held]]);
+      stats.heartbeats++; stats.renewed += r.rowCount;
+    } catch (err) { console.warn('[queue] lease heartbeat failed:', err.message); }
+  }, heartbeatMs);
+  heartbeat.unref?.();
   const laneFilter = { complaint: "q.kind = 'complaint'", main: "q.kind <> 'complaint'" };
   // lane 'complaint': complaints only; lane 'main': everything else.
-  const claim = (lane, limit) => (lane === 'main' ? claimGroups(limit) : claimHeads(lane, limit));
-  const claimHeads = (lane, limit) => pool.any(`
-    UPDATE intake_queue u SET attempts = u.attempts + 1, available_at = now() + ($1 || ' milliseconds')::interval
+  const claim = async (lane, limit) => {
+    const token = `${consumerId}:${++claimSeq}`;
+    held.add(token);
+    try {
+      const items = await (lane === 'main' ? claimGroups(limit, token) : claimHeads(lane, limit, token));
+      if (!items.length) held.delete(token);
+      for (const i of items) i.claim = token;
+      return items;
+    } catch (err) { held.delete(token); throw err; }
+  };
+  const claimHeads = (lane, limit, token) => pool.any(`
+    UPDATE intake_queue u SET attempts = u.attempts + 1, available_at = now() + ($1 || ' milliseconds')::interval, claimed_by = $3
     FROM (
       SELECT q.id FROM intake_queue q
       WHERE ${laneFilter[lane]}
@@ -263,12 +316,12 @@ export function startIntakeConsumer(handlers, opts = {}) {
       FOR UPDATE SKIP LOCKED
       LIMIT $2) c
     WHERE u.id = c.id
-    RETURNING u.id, u.kind, u.payload, u.order_key, u.attempts, u.last_error`, [lease, limit]);
+    RETURNING u.id, u.kind, u.payload, u.order_key, u.attempts, u.last_error`, [lease, limit, token]);
   // Main lane: whole feeder groups out of the oldest claimScan heads (see the
   // comment above startIntakeConsumer). The lock step re-checks the lane and
   // available_at on the current row, so an item another loop claimed between
   // our snapshot and our lock is skipped, as with claimHeads.
-  const claimGroups = (limit) => pool.any(`
+  const claimGroups = (limit, token) => pool.any(`
     WITH heads AS (
       SELECT q.id, q.kind || '|' || COALESCE(
                NULLIF(q.payload->>'feeder', ''),
@@ -289,16 +342,20 @@ export function startIntakeConsumer(handlers, opts = {}) {
       SELECT q.id FROM intake_queue q
       WHERE q.id IN (SELECT id FROM pick) AND ${laneFilter.main} AND q.available_at <= now()
       FOR UPDATE SKIP LOCKED)
-    UPDATE intake_queue u SET attempts = u.attempts + 1, available_at = now() + ($1 || ' milliseconds')::interval
+    UPDATE intake_queue u SET attempts = u.attempts + 1, available_at = now() + ($1 || ' milliseconds')::interval, claimed_by = $5
     FROM c
     WHERE u.id = c.id
-    RETURNING u.id, u.kind, u.payload, u.order_key, u.attempts, u.last_error`, [lease, limit, cfg.claimScan, cfg.groupMax]);
+    RETURNING u.id, u.kind, u.payload, u.order_key, u.attempts, u.last_error`, [lease, limit, cfg.claimScan, cfg.groupMax, token]);
 
-  const deadLetter = (id, reason) => pool.tx(async (t) => {
+  // D3: only the claim that holds the item (token) may dead-letter it.
+  const deadLetter = (id, reason, token) => pool.tx(async (t) => {
+    const row = await t.oneOrNone('SELECT claimed_by FROM intake_queue WHERE id = $1 FOR UPDATE', [id]);
+    if (!row || (token && row.claimed_by !== token)) return false; // gone, or another worker's claim now
     await t.none(`INSERT INTO intake_dead_letter (id, kind, payload, order_key, attempts, last_error, created_at)
       SELECT id, kind, payload, order_key, attempts, $2, created_at FROM intake_queue WHERE id = $1
       ON CONFLICT (id) DO NOTHING`, [id, String(reason).slice(0, 2000)]);
     await t.none('DELETE FROM intake_queue WHERE id = $1', [id]);
+    return true;
   });
 
   // An item that already used up its attempts (e.g. it kept killing the
@@ -306,19 +363,20 @@ export function startIntakeConsumer(handlers, opts = {}) {
   const exhausted = async (item) => {
     if (item.attempts <= cfg.maxAttempts) return false;
     console.error(`[queue] item ${item.id} (${item.kind}) used up ${cfg.maxAttempts} attempts without finishing -> dead letter`);
-    await deadLetter(item.id, item.last_error || 'attempts exhausted (worker stopped while processing it)');
+    await deadLetter(item.id, item.last_error || 'attempts exhausted (worker stopped while processing it)', item.claim);
     return true;
   };
 
   const failed = async (item, msg) => {
     if (item.attempts >= cfg.maxAttempts) {
       console.error(`[queue] item ${item.id} (${item.kind}) failed ${item.attempts} time(s), moved to dead letter: ${msg}`);
-      await deadLetter(item.id, msg);
+      await deadLetter(item.id, msg, item.claim);
     } else {
       const wait = Math.min(cfg.backoffMaxMs, cfg.backoffBaseMs * 2 ** (item.attempts - 1));
       console.warn(`[queue] item ${item.id} (${item.kind}) attempt ${item.attempts}/${cfg.maxAttempts} failed, retry in ${wait} ms: ${msg}`);
-      await pool.none(`UPDATE intake_queue SET last_error = $2, available_at = now() + ($3 || ' milliseconds')::interval WHERE id = $1`,
-        [item.id, msg.slice(0, 2000), String(wait)]);
+      // releases the claim (the heartbeat must not override the back-off)
+      await pool.none(`UPDATE intake_queue SET last_error = $2, available_at = now() + ($3 || ' milliseconds')::interval, claimed_by = NULL
+        WHERE id = $1 AND claimed_by IS NOT DISTINCT FROM $4`, [item.id, msg.slice(0, 2000), String(wait), item.claim ?? null]);
     }
   };
 
@@ -335,13 +393,25 @@ export function startIntakeConsumer(handlers, opts = {}) {
     try {
       if (!handler) throw new Error(`no handler for intake kind "${item.kind}"`);
       await pool.tx('intake-item', async (t) => {
-        const still = await t.oneOrNone('SELECT id FROM intake_queue WHERE id = $1 FOR UPDATE', [item.id]);
-        if (!still) return; // finished by another worker after our lease ran out
-        const out = await handler(item.payload, t);
+        const row = await t.oneOrNone('SELECT claimed_by FROM intake_queue WHERE id = $1 FOR UPDATE', [item.id]);
+        if (!row) return; // finished by another worker after our lease ran out
+        if (item.claim && row.claimed_by !== item.claim) { // D3: re-claimed by another worker while we stalled
+          stats.leaseLost++;
+          console.warn(`[queue] item ${item.id} (${item.kind}): lease lost (now claimed by another worker), skipped here`);
+          return;
+        }
+        const out = await handler(item.payload, t, item);
         effects = out?.effects || [];
         await t.none('DELETE FROM intake_queue WHERE id = $1', [item.id]);
       });
     } catch (err) {
+      if (err?.deadLetter) { // D2: IntakeRejected -- retrying gives the same answer
+        console.error(`[queue] item ${item.id} (${item.kind}) rejected, moved to dead letter: ${err.message}`);
+        await deadLetter(item.id, err.message, item.claim);
+        // wake an HTTP request waiting for this item (it then reads the reason)
+        if (item.payload?.qid) await notifyDone(pool, item.payload.qid).catch(() => {});
+        return;
+      }
       await failed(item, err?.message || String(err));
       return;
     }
@@ -354,8 +424,13 @@ export function startIntakeConsumer(handlers, opts = {}) {
     try {
       await pool.tx('intake-group', async (t) => {
         const ids = items.map((i) => i.id).sort((a, b) => Number(a) - Number(b));
-        const still = new Set((await t.any('SELECT id FROM intake_queue WHERE id IN ($1:csv) ORDER BY id FOR UPDATE', [ids])).map((r) => String(r.id)));
-        const live = items.filter((i) => still.has(String(i.id)));
+        const rows = await t.any('SELECT id, claimed_by FROM intake_queue WHERE id IN ($1:csv) ORDER BY id FOR UPDATE', [ids]);
+        const mine = new Set(rows.filter((r) => !items[0].claim || r.claimed_by === items[0].claim).map((r) => String(r.id)));
+        if (rows.length > mine.size) {
+          stats.leaseLost += rows.length - mine.size;
+          console.warn(`[queue] group of ${items.length} ${kind} item(s): ${rows.length - mine.size} re-claimed by another worker (lease lost), skipped here`);
+        }
+        const live = items.filter((i) => mine.has(String(i.id)));
         if (!live.length) return;
         const out = await batchHandlers[kind].run(live.map((i) => i.payload), t);
         effects = out?.effects || [];
@@ -396,7 +471,9 @@ export function startIntakeConsumer(handlers, opts = {}) {
       let items = [];
       try {
         items = await claim(lane, limit);
-        if (items.length) await processClaimed(items);
+        if (items.length) {
+          try { await processClaimed(items); } finally { held.delete(items[0].claim); } // D3: stop renewing this claim
+        }
       } catch (err) {
         // the database itself is unreachable or similar: log, wait, carry on
         console.error(`[queue] ${lane} worker ${n}:`, err.message);
@@ -411,8 +488,8 @@ export function startIntakeConsumer(handlers, opts = {}) {
     ...Array.from({ length: complaintLoops }, (_, i) => loop('complaint', i + 1)),
     ...Array.from({ length: mainLoops }, (_, i) => loop('main', i + 1)),
   ];
-  console.log(`[queue] intake consumer started: ${mainLoops} worker(s) + ${complaintLoops} complaint-lane worker(s), batch ${cfg.batchMax} (feeder groups of up to ${cfg.groupMax} from the oldest ${cfg.claimScan} heads), own pool of ${poolMax}, lease ${cfg.leaseMs} ms, max ${cfg.maxAttempts} attempts`);
+  console.log(`[queue] intake consumer started: ${mainLoops} worker(s) + ${complaintLoops} complaint-lane worker(s), batch ${cfg.batchMax} (feeder groups of up to ${cfg.groupMax} from the oldest ${cfg.claimScan} heads), own pool of ${poolMax}, lease ${cfg.leaseMs} ms renewed every ${heartbeatMs} ms, max ${cfg.maxAttempts} attempts`);
   return {
-    async stop() { running = false; local.delete(wake); wake(); await Promise.all(loops); },
+    async stop() { running = false; local.delete(wake); wake(); await Promise.all(loops); clearInterval(heartbeat); },
   };
 }

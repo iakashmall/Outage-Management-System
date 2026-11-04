@@ -16,8 +16,8 @@
 // After this, the two manual files are no-ops ("already encrypted").
 import { db } from './db.js';
 
-export async function migrateComplaintPhones() {
-  await db.none(`
+export async function migrateComplaintPhones(cx = db) {
+  await cx.none(`
     CREATE EXTENSION IF NOT EXISTS pgcrypto;
     CREATE OR REPLACE FUNCTION safe_decrypt_text(data bytea, key text)
     RETURNS text AS $$
@@ -43,7 +43,7 @@ export async function migrateComplaintPhones() {
     $$ LANGUAGE plpgsql IMMUTABLE;
   `);
 
-  const col = await db.oneOrNone(`SELECT data_type FROM information_schema.columns
+  const col = await cx.oneOrNone(`SELECT data_type FROM information_schema.columns
     WHERE table_schema = current_schema() AND table_name = 'complaints' AND column_name = 'phone'`);
   if (!col || col.data_type === 'bytea') return { phone: col?.data_type || 'missing', converted: false };
   const key = process.env.ENCRYPTION_KEY;
@@ -51,7 +51,7 @@ export async function migrateComplaintPhones() {
     console.warn('[migrate] complaints.phone is still TEXT and ENCRYPTION_KEY is not set: phones are not encrypted at rest. Set ENCRYPTION_KEY and restart to convert.');
     return { phone: col.data_type, converted: false };
   }
-  await db.tx('complaint-phones', async (t) => {
+  await cx.tx('complaint-phones', async (t) => {
     // The key reaches the USING clause through a transaction-local setting.
     await t.one("SELECT set_config('oms.phone_key', $1, true)", [key]);
     await t.none(`ALTER TABLE complaints ALTER COLUMN phone TYPE bytea USING (

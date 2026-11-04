@@ -18,7 +18,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { Server } from 'socket.io';
-import { db, migrate } from './infra/db.js';
+import { db, ensureSchema } from './infra/db.js';
 import { seed } from './infra/seed.js';
 import { api } from './routes/api.js';
 import { repo } from './infra/repo.js';
@@ -75,22 +75,57 @@ console.log(`[role] ${ROLE}`);
 // burst test killed the backend ~1.2s in). Staying up degraded beats
 // vanishing: an OMS that drops SCADA fault detection during a storm because
 // one complaint insert lost a race is worse than one that logs and limps.
+//
+// D1 (4 Nov 2026): that applies once the process is running. A failure BEFORE
+// startup finished used to land here too and was only logged: the half-started
+// process served nothing and later exited with code 0 (load test section 8.2),
+// which a restart-on-failure supervisor does not restart. Until `startupDone`,
+// a fatal error now exits with code 1.
+let startupDone = false;
 function logFatal(kind, err) {
   console.error(`[fatal] ${kind} at ${new Date().toISOString()}:`, err?.stack || err);
+  if (!startupDone) {
+    console.error('[fatal] startup did not finish: exiting with code 1');
+    process.exit(1);
+  }
 }
 process.on('unhandledRejection', (reason) => logFatal('unhandledRejection', reason));
 process.on('uncaughtException', (err) => logFatal('uncaughtException', err));
 
-// Schema and first-run seed, one process at a time (an api and a worker
-// starting together must not both create the same tables or demo rows).
-await db.task(async (t) => {
-  await t.one('SELECT pg_advisory_lock(41000, 1)');
-  try {
-    await migrate();
-    await seed(); // idempotent — only seeds an empty DB
-  } finally {
-    await t.one('SELECT pg_advisory_unlock(41000, 1)');
+// A startup step that can fail for a passing reason (a lock wait over
+// lock_timeout, a deadlock while another process takes traffic, the database
+// restarting) is retried with a growing delay: STARTUP_RETRY_ATTEMPTS (5),
+// STARTUP_RETRY_DELAY_MS (2000, doubled each time, at most 30 s). After the
+// last attempt the process exits with code 1.
+async function startupStep(name, fn) {
+  const attempts = Math.max(1, Number(process.env.STARTUP_RETRY_ATTEMPTS) || 5);
+  const base = Math.max(0, Number(process.env.STARTUP_RETRY_DELAY_MS ?? 2000));
+  for (let n = 1; ; n++) {
+    try { return await fn(); } catch (err) {
+      if (n >= attempts) {
+        console.error(`[fatal] startup step "${name}" failed ${n} time(s), last: ${err?.message || err}: exiting with code 1`);
+        process.exit(1);
+      }
+      const wait = Math.min(30000, base * 2 ** (n - 1));
+      console.warn(`[startup] step "${name}" failed (attempt ${n}/${attempts}): ${err?.message || err}; retrying in ${wait} ms`);
+      await new Promise((r) => setTimeout(r, wait));
+    }
   }
+}
+
+// Schema (D1): when the database already has the current schema version --
+// every normal start -- this runs no DDL and no setval and takes no lock, so
+// a process can start while others take traffic. Only an older schema is
+// migrated, under one advisory lock with a short lock_timeout (infra/db.js).
+await startupStep('schema', () => ensureSchema());
+// First-run demo data, only on an empty database, one process at a time.
+await startupStep('seed', async () => {
+  const { n } = await db.one('SELECT count(*)::int AS n FROM incidents');
+  if (n > 0) return;
+  await db.task(async (t) => {
+    await t.one('SELECT pg_advisory_lock(41000, 1)');
+    try { await seed(); } finally { await t.one('SELECT pg_advisory_unlock(41000, 1)'); }
+  });
 });
 await connectRedis(); // non-fatal if unreachable — see infra/redis.js
 await initBus();       // memory driver by default; EVENT_BUS_DRIVER=kafka for the real broker
@@ -151,6 +186,7 @@ if (!RUNS_HTTP_API) {
   app.use((req, res) => res.status(404).json({ error: 'not found (ROLE=worker serves only /api/health)' }));
   createServer(app).listen(PORT, async () => {
     console.log(`\n  OMS worker running (ROLE=worker) - Health → http://localhost:${PORT}/api/health\n`);
+    startupDone = true;
     await startBackgroundJobs('listening');
   });
 } else {
@@ -203,6 +239,7 @@ if (!RUNS_HTTP_API) {
     console.log(`  REST   → http://localhost:${PORT}/api`);
     console.log(`  WS     → ws://localhost:${PORT}`);
     console.log(`  Health → http://localhost:${PORT}/api/health\n`);
+    startupDone = true;
     if (RUNS_JOBS) await startBackgroundJobs('listening');
     else console.log('  [role] api: no background jobs and no intake consumer in this process (run ROLE=worker)');
   });

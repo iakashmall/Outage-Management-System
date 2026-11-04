@@ -397,6 +397,13 @@ export const repo = {
      FROM complaints WHERE qid=$/qid/`,
     { qid, key: process.env.ENCRYPTION_KEY }
   ),
+  // D2: why a queue item was dead-lettered, or null.
+  deadLetterReason: async (itemId, cx = db) =>
+    (await cx.oneOrNone('SELECT last_error FROM intake_dead_letter WHERE id = $1', [itemId]))?.last_error ?? null,
+  // D2: what identifies the complaint stored under a qid (its idempotency keys
+  // and enough content to say whether another submission is the same), or null.
+  complaintIdentity: (qid, cx = db) => cx.oneOrNone(
+    `SELECT qid, external_id, intake_item_id, customer, category, lat, lon FROM complaints WHERE qid = $1`, [qid]),
   // The complaint already stored under an external system's id (idempotent intake), or null.
   complaintByExternalId: (externalId, cx = db) => cx.oneOrNone(
     `SELECT qid, external_id, customer,
@@ -420,9 +427,9 @@ export const repo = {
   },
   addComplaint: async (c, cx = db) => {
     await cx.none(`INSERT INTO complaints
-      (qid,external_id,customer,phone,address,category,lat,lon,dt_id,feeder,substation,incident_id,action,ts)
-      VALUES ($/qid/,$/external_id/,$/customer/,pgp_sym_encrypt($/phone/,$/key/),$/address/,$/category/,$/lat/,$/lon/,$/dt_id/,$/feeder/,$/substation/,$/incident_id/,$/action/,$/ts/)`,
-      { ...c, key: process.env.ENCRYPTION_KEY });
+      (qid,external_id,customer,phone,address,category,lat,lon,dt_id,feeder,substation,incident_id,action,ts,intake_item_id)
+      VALUES ($/qid/,$/external_id/,$/customer/,pgp_sym_encrypt($/phone/,$/key/),$/address/,$/category/,$/lat/,$/lon/,$/dt_id/,$/feeder/,$/substation/,$/incident_id/,$/action/,$/ts/,$/intake_item_id/)`,
+      { intake_item_id: null, ...c, key: process.env.ENCRYPTION_KEY });
     return repo.complaint(c.qid, cx);
   },
   // Active incidents at a substation within the correlation window (most recent first).

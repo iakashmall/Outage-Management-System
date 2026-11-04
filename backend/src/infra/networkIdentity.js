@@ -31,8 +31,8 @@ export const norm = (t) => {
 };
 const coreName = (name) => String(name || '').replace(/^\s*\d+\s*\/\s*\d+\s*kv\s*/i, '').replace(/\s*s\/s\s*$/i, '');
 
-export async function migrateNetworkIdentity() {
-  await db.none(`
+export async function migrateNetworkIdentity(cx = db) {
+  await cx.none(`
     CREATE TABLE IF NOT EXISTS network_aliases (
       kind      TEXT NOT NULL CHECK (kind IN ('feeder', 'substation')),
       alias     TEXT NOT NULL,
@@ -64,7 +64,7 @@ export async function migrateNetworkIdentity() {
           (SELECT si.substation FROM substation_identity si WHERE si.alias_norm = oms_norm($1)),
           'RAW:' || oms_norm($1)) $$;
   `);
-  await refreshNetworkIdentity();
+  // refreshNetworkIdentity() (data) runs from ensureSchema() on every start.
 }
 
 // Rebuilds feeder_identity and substation_identity from every source.

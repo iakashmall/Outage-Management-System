@@ -84,7 +84,10 @@ Settings (all optional; put them in `backend/.env.deploy`):
 | `INTAKE_RATE_LIMIT_PER_MIN` / `SCADA_RATE_LIMIT_PER_MIN` | `6000` / `120000` | per-client limits (`0` turns a limit off) |
 | `ENABLE_SIMULATORS` | `false` | keep `false`: otherwise `/complaints/simulate` and `/scada/simulate` are open |
 | `INTAKE_COALESCE` | on | `off` stops repeated queued SCADA events for the same tag and state from being merged. Applies to SCADA events arriving on the event bus (DNP3 adapter, Kafka); since F5, `POST /scada/fault` writes in batches and does not coalesce |
-| `QUEUE_POLL_MS`, `QUEUE_LEASE_MS`, `QUEUE_MAX_ATTEMPTS`, `QUEUE_BACKOFF_BASE_MS`, `QUEUE_BACKOFF_MAX_MS` | 250, 60000, 8, 1000, 300000 | queue worker tuning; after `QUEUE_MAX_ATTEMPTS` an item moves to `intake_dead_letter`. An item claimed by a worker that dies waits for its lease (`QUEUE_LEASE_MS`) before another worker takes it |
+| `QUEUE_POLL_MS`, `QUEUE_LEASE_MS`, `QUEUE_MAX_ATTEMPTS`, `QUEUE_BACKOFF_BASE_MS`, `QUEUE_BACKOFF_MAX_MS` | 250, 10000, 8, 1000, 300000 | queue worker tuning; after `QUEUE_MAX_ATTEMPTS` an item moves to `intake_dead_letter`. *(changed 4 Nov 2026: the lease was 60000)* A live worker renews the lease of the items it holds (heartbeat), so the lease only matters when a worker dies or stalls: its items are taken over within about one lease |
+| `QUEUE_HEARTBEAT_MS` | `QUEUE_LEASE_MS / 3` | how often a worker renews the leases it holds (at least 200) |
+| `MIGRATION_LOCK_TIMEOUT_MS` | `2000` | `lock_timeout` for the schema migration, which runs only when the database's schema version is older than the code's. A longer lock wait fails the migration step instead of queueing live traffic behind it; the step is then retried |
+| `STARTUP_RETRY_ATTEMPTS`, `STARTUP_RETRY_DELAY_MS` | 5, 2000 | a startup step that fails (schema migration, first-run seed) is retried with a delay that doubles each time (at most 30 s). After the last attempt the process exits with code 1, so `restart: unless-stopped` starts it again |
 | `INTAKE_RETRY_ATTEMPTS`, `INTAKE_RETRY_BASE_MS` | 3, 100 | retries of one intake transaction (deadlock, serialization failure) |
 | `JOB_LOCK_RETRY_MS` | `15000` | how often a standby worker tries to take over a background job |
 

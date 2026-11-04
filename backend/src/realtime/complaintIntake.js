@@ -16,7 +16,7 @@ import { bus, TOPICS } from '../domain/bus.js';
 import { resolve as resolveAsset } from '../infra/geo.js';
 import { cacheDel } from '../infra/redis.js';
 import { plannedComplaintDecision } from '../domain/plannedComplaints.js';
-import { lockScope, lockExternalId, runIntake, runEffectsSafely, intakeTestHooks } from '../infra/intake.js';
+import { lockScope, lockExternalId, runIntake, runEffectsSafely, intakeTestHooks, IntakeRejected } from '../infra/intake.js';
 import { resolveScope } from '../infra/networkIdentity.js';
 
 const CATEGORY_TYPE = { 'No Supply': 'Power Outage', 'Partial Supply': 'Partial Power', 'Voltage': 'Power Quality', 'Wire Down': 'Safety Hazard', 'Meter': 'Metering', 'Other': 'Power Outage' };
@@ -42,10 +42,10 @@ export function pickIncident(candidates, category) {
 //   deferEffects: return { result, effects } instead of running the effects
 // Returns { complaint, action, incidentId, resolved, plannedOutage, duplicate }.
 // Throws after the bounded retries; nothing is swallowed.
-export async function ingestComplaint(body, who, { cx = db, deferEffects = false, qid = null, ts = null } = {}) {
+export async function ingestComplaint(body, who, { cx = db, deferEffects = false, qid = null, ts = null, itemId = null } = {}) {
   const id = qid || await repo.nextQueryId();
   const at = ts || new Date().toISOString();
-  const out = await runIntake('complaint', (t) => complaintTx(t, body, who, id, at), { cx, runEffects: false });
+  const out = await runIntake('complaint', (t) => complaintTx(t, body, who, id, at, itemId), { cx, runEffects: false });
   if (deferEffects) return out;
   await runEffectsSafely('complaint', out.effects);
   return out.result;
@@ -72,12 +72,32 @@ const duplicateOf = (c) => ({
   resolved: { dt_id: c.dt_id, feeder: c.feeder, substation: c.substation },
 });
 
-async function complaintTx(t, body, who, qid, ts) {
+async function complaintTx(t, body, who, qid, ts, itemId = null) {
   const externalId = body.externalId || null;
-  // --- idempotency: the same external id (or a redelivered qid) once only ---
+  // --- idempotency: decided by the submission's OWN key, never by qid alone ---
+  // D2 (4 Nov 2026; load test section 8.4): this used to treat any complaint
+  // already stored under the same qid as "this one, redelivered" and drop the
+  // new one. A qid handed out twice (the counter rewind fixed by D1) then lost
+  // a complaint silently. Now:
+  //   - same external id already stored         -> duplicate (as before, G3)
+  //   - qid stored by THIS queue item (same id)  -> duplicate: a redelivery
+  //   - qid stored by anything else              -> IntakeRejected: not stored;
+  //     the queue dead-letters the item with this reason and logs it
   await lockExternalId(t, externalId);
-  const already = (externalId && await repo.complaintByExternalId(externalId, t)) || await repo.complaint(qid, t);
-  if (already) return { result: duplicateOf(already), effects: [] };
+  const byExternalId = externalId && await repo.complaintByExternalId(externalId, t);
+  if (byExternalId) return { result: { ...duplicateOf(byExternalId), duplicateKey: `external_id:${externalId}` }, effects: [] };
+  const holder = await repo.complaintIdentity(qid, t);
+  if (holder) {
+    if (itemId != null && holder.intake_item_id != null && String(holder.intake_item_id) === String(itemId)) {
+      return { result: { ...duplicateOf(await repo.complaint(qid, t)), duplicateKey: `intake_item:${itemId}` }, effects: [] };
+    }
+    const sameContent = holder.customer === (body.customer || null) && holder.category === (body.category || 'No Supply')
+      && holder.lat === (typeof body.lat === 'number' ? body.lat : null) && holder.lon === (typeof body.lon === 'number' ? body.lon : null);
+    throw new IntakeRejected(`complaint qid ${qid} is already used by another complaint `
+      + `(external id ${holder.external_id || 'none'}, queue item ${holder.intake_item_id ?? 'none'}); this submission `
+      + `(external id ${externalId || 'none'}, queue item ${itemId ?? 'none'}) has a different idempotency key and `
+      + `${sameContent ? 'the same' : 'different'} content: not stored`);
+  }
 
   const category = body.category || 'No Supply';
   const lat = typeof body.lat === 'number' ? body.lat : null;
@@ -138,7 +158,7 @@ async function complaintTx(t, body, who, qid, ts) {
   const complaint = await repo.addComplaint({
     qid, external_id: externalId, customer: body.customer || null, phone: body.phone || null,
     address: body.address || null, category, lat, lon, dt_id: loc.dt_id, feeder: loc.feeder,
-    substation: loc.substation, incident_id: incidentId, action, ts,
+    substation: loc.substation, incident_id: incidentId, action, ts, intake_item_id: itemId,
   }, t);
   effects.push(() => cacheDel('indicators'));
   return { result: { complaint, action, incidentId, resolved: loc, plannedOutage, duplicate: false }, effects };
