@@ -1,18 +1,28 @@
 // G10 / G11 self-test (4 Nov 2026; load test results section 8): restarts
 // under load. Starts the real backend as ROLE=api (PORT, default 4101) and
-// ROLE=worker (PORT+1) on a scratch database, sends 1,000 SCADA events a
-// second and 200 complaints a second through the real HTTP routes and auth,
-// and meanwhile kills (SIGKILL) and restarts the worker and the API 10 times
-// each, alternating. Senders behave like a gateway: network errors, 5xx and
-// 429 are retried with the same eventId / externalId.
-//   DATABASE_URL=<scratch db> PORT=4101 node src/selftest-restarts.js
+// ROLE=worker (PORT+1) on a scratch database, sends SCADA events and
+// complaints through the real HTTP routes and auth, and meanwhile kills
+// (SIGKILL) and restarts the worker and the API, alternating. Senders behave
+// like a gateway: network errors, 5xx and 429 are retried with the same
+// eventId / externalId. Two profiles:
+//   light (default; npm test and CI): 3 + 3 restarts, 200 SCADA/s, 40 complaints/s,
+//         about a minute, test process well under 1 GB
+//     DATABASE_URL=<scratch db> PORT=4101 node src/selftest-restarts.js
+//   full (npm run test:restarts:full; never in CI): 10 + 10 restarts, 1,000
+//         SCADA/s and 200 complaints/s (the G10 gate rate)
+//     DATABASE_URL=<scratch db> PORT=4101 node src/selftest-restarts.js --full
+// RESTARTS_EACH, G10_SCADA_RATE, G10_COMPLAINT_RATE and G10_MAX_IN_FLIGHT
+// (300) override either profile.
 //   G10  every restart is healthy again; no [fatal] line in any process;
 //        no acknowledged complaint (201/200/202) is lost; nothing dead-lettered
 //   G11  every acknowledged complaint exists exactly once, under the qid it was
 //        given, and no qid was ever given to two different complaints
 // The complaint rate limit is raised for this test only (200/s is above the
-// default 100/s per user); RESTARTS_EACH (10) and the rates can be lowered for
-// a smoke run.
+// default 100/s per user).
+// CI robustness: fixed ports (PORT, PORT+1), a 60 s wait for each restart to
+// answer /api/health, a 180 s drain wait, and no assertion on any duration:
+// times are reported, not checked. The sender is capped in flight, so a slow
+// runner sends fewer requests (reported as not sent) instead of piling them up.
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
@@ -28,8 +38,15 @@ const { seed } = await import('./infra/seed.js');
 const { distTx } = await import('./infra/geo.js');
 
 const API_PORT = Number(process.env.PORT || 4101), WORKER_PORT = API_PORT + 1;
-const EACH = Number(process.env.RESTARTS_EACH || 10);
-const SCADA_RATE = Number(process.env.G10_SCADA_RATE || 1000), COMPLAINT_RATE = Number(process.env.G10_COMPLAINT_RATE || 200);
+const FULL = process.argv.includes('--full');
+const PROFILE = FULL ? { each: 10, scada: 1000, complaints: 200 } : { each: 3, scada: 200, complaints: 40 };
+const EACH = Number(process.env.RESTARTS_EACH || PROFILE.each);
+const SCADA_RATE = Number(process.env.G10_SCADA_RATE || PROFILE.scada), COMPLAINT_RATE = Number(process.env.G10_COMPLAINT_RATE || PROFILE.complaints);
+const T_START = Date.now();
+let peakRssMb = 0;
+const rssTimer = setInterval(() => { peakRssMb = Math.max(peakRssMb, process.memoryUsage().rss / 1048576); }, 500);
+rssTimer.unref();
+console.log(`  profile ${FULL ? 'full' : 'light'}: ${EACH} + ${EACH} restarts, ${SCADA_RATE} SCADA/s, ${COMPLAINT_RATE} complaints/s, cap ${process.env.G10_MAX_IN_FLIGHT || 300} in flight`);
 let fails = 0, passes = 0;
 const check = (name, ok, extra = '') => {
   ok ? passes++ : fails++;
@@ -110,16 +127,30 @@ async function send(path, body) {
 const dts = distTx.filter((d) => typeof d.lat === 'number' && d.feeder).slice(0, 20);
 const scada = [], complaints = [];
 let sending = true;
+// Keeps only what the checks read (key, status, the answered qid) and counts
+// requests in flight instead of holding every promise: at ~1,200 requests a
+// second for several minutes the full requests and answers took over 0.5 GB.
+// Bounded: at most MAX_IN_FLIGHT requests (both senders together; a request
+// counts until its last retry ends) are open at once. A request that falls due
+// while the cap is reached is not queued: it is counted as not sent and the
+// sender waits for the next tick. A not-sent request was never acknowledged,
+// so the loss checks are unaffected; the counts are reported.
+const MAX_IN_FLIGHT = Number(process.env.G10_MAX_IN_FLIGHT || 300);
+let inFlightAll = 0, peakInFlight = 0;
 function openLoop(rate, make, into) {
-  const t0 = Date.now(); let i = 0; const pending = [];
+  const t0 = Date.now(); let i = 0, inFlight = 0, notSent = 0;
   return (async () => {
     while (sending) {
       const due = Math.floor(((Date.now() - t0) / 1000) * rate);
-      while (i < due) { const it = make(i++); pending.push(send(it.path, it.body).then((r) => into.push({ ...it, r }))); }
+      while (i < due) {
+        if (inFlightAll >= MAX_IN_FLIGHT) { notSent += due - i; i = due; break; }
+        const it = make(i++); inFlight++; inFlightAll++; peakInFlight = Math.max(peakInFlight, inFlightAll);
+        send(it.path, it.body).then((r) => { into.push({ key: it.key, r: { status: r.status, body: r.body?.queryId ? { queryId: r.body.queryId } : null } }); inFlight--; inFlightAll--; });
+      }
       await sleep(5);
     }
-    await Promise.all(pending);
-    return i;
+    while (inFlight > 0) await sleep(50);
+    return { due: i, sent: i - notSent, notSent };
   })();
 }
 
@@ -149,12 +180,15 @@ for (let n = 0; n < EACH * 2; n++) {
   if (role === 'api') api = next; else worker = next;
   const ms = await healthy(next);
   restarts.push({ n: n + 1, role, healthyMs: ms, exit: next.entry.exit });
+  console.log(`  restart ${n + 1}/${EACH * 2} ${role}: ${ms == null ? 'NOT healthy' : `healthy in ${ms} ms`} (${complaints.length} complaint and ${scada.length} SCADA answers so far)`);
   if (ms == null) console.log(`--- ${role} restart ${n + 1} not healthy ---\n${next.entry.out.slice(-2500)}`);
   await sleep(2000);
 }
 sending = false;
-const [scadaSent, complaintsSent] = await Promise.all([scadaLoop, complaintLoop]);
+const [scadaRun, complaintRun] = await Promise.all([scadaLoop, complaintLoop]);
+const scadaSent = scadaRun.sent, complaintsSent = complaintRun.sent;
 const loadS = (Date.now() - t0) / 1000;
+console.log(`  sender (cap ${MAX_IN_FLIGHT} in flight, peak ${peakInFlight}): SCADA ${scadaRun.due} due, ${scadaRun.sent} sent, ${scadaRun.notSent} not sent (cap reached); complaints ${complaintRun.due} due, ${complaintRun.sent} sent, ${complaintRun.notSent} not sent (cap reached); achieved ${(scadaRun.sent / loadS).toFixed(0)} SCADA/s and ${(complaintRun.sent / loadS).toFixed(0)} complaints/s over ${loadS.toFixed(0)} s`);
 
 // ---- drain, then verify
 const drainT0 = Date.now();
@@ -190,10 +224,10 @@ for (const c of ackedC) {
   const stored = byExt.get(c.key);
   if (stored && stored.length === 1 && c.r.status !== 200 && stored[0] !== q) wrongQid++;
 }
-const distinctQ = (await db.one('SELECT count(*)::int n, count(DISTINCT qid)::int d FROM complaints')).n;
+const qidAll = await db.one('SELECT count(*)::int n, count(qid)::int q, count(DISTINCT qid)::int d FROM complaints');
 check('G11: every acknowledged complaint exists exactly once, under the qid it was given; no qid given to two different complaints',
-  dupC === 0 && qidShared === 0 && wrongQid === 0 && lostC.length === 0,
-  `(${byExt.size} distinct complaints, ${dupC} stored more than once, ${qidShared} qid(s) answered for two complaints, ${wrongQid} stored under another qid than answered; ${distinctQ} complaint rows in all)`);
+  dupC === 0 && qidShared === 0 && wrongQid === 0 && lostC.length === 0 && qidAll.q === qidAll.d,
+  `(${byExt.size} distinct complaints, ${dupC} stored more than once, ${qidShared} qid(s) answered for two complaints, ${wrongQid} stored under another qid than answered; whole table: ${qidAll.n} complaint rows, ${qidAll.q} with a qid, ${qidAll.d} distinct qids)`);
 
 const ackedS = scada.filter((s) => [200, 202].includes(s.r.status));
 const sv = await db.one(`SELECT count(*)::int n, count(DISTINCT tag)::int tags, count(incident_id)::int linked FROM alarms WHERE tag LIKE $1`, [`G10${RUN}.%`]);
@@ -203,6 +237,9 @@ check('G10: SCADA under the same restarts: every acknowledged event stored once 
 
 console.log(`  load ${loadS.toFixed(0)} s; statuses ${JSON.stringify(statuses)}`);
 console.log(`  restarts: ${restarts.map((r) => `${r.role[0]}${r.n}:${r.healthyMs ?? 'X'}`).join(' ')}`);
+peakRssMb = Math.max(peakRssMb, process.memoryUsage().rss / 1048576);
+check('test process stays under 1 GB', peakRssMb < 1024, `(peak RSS ${peakRssMb.toFixed(0)} MB, sampled every 0.5 s; backend processes not included)`);
+console.log(`  total ${((Date.now() - T_START) / 1000).toFixed(0)} s from start (light profile budget 180 s; reported, not asserted)`);
 for (const p of [api, worker]) { try { p.kill('SIGKILL'); } catch { /* gone */ } }
 idp.close(); agent.destroy();
 console.log('  ----------------------------------------');
