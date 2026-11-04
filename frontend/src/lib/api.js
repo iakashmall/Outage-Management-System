@@ -82,6 +82,8 @@ export const api = {
   postMessage: (id, body) => req('POST', `/incidents/${id}/messages`, { body }),
   setErt: (id, ert) => req('PATCH', `/incidents/${id}/ert`, { ert }),
   crews: () => req('GET', '/crews'),
+  // Road route from each crew to its assigned incident: { routes: [{ crewId, incidentId, state, meters, seconds, coords }] }
+  crewRoutes: () => req('GET', '/crew-routes'),
   // GPS trail of one crew between two instants (newest `limit` fixes, oldest -> newest).
   crewTrack: (id, from, to, limit = 5000) => req('GET', `/mobile/crews/${encodeURIComponent(id)}/track?${new URLSearchParams({ from, to, limit })}`),
   nearestCrews: (incidentId) => req('GET', `/incidents/${incidentId}/nearest-crews`),

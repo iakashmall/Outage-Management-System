@@ -26,7 +26,7 @@ const LAYER_GROUPS = [
   ['Network', [['htLines', 'HT network', true], ['feeders', 'Feeder lines', true], ['substations', 'Substations', true],
     ['powerTx', 'Power transformers', false], ['distTx', 'Distribution txr', false],
     ['switches', 'Switches', false], ['rmus', 'RMUs', false], ['fuses', 'Drop-out fuses', false]]],
-  ['Operations', [['incidents', 'Incidents', true], ['crews', 'Crews', true], ['trails', 'Crew trails', false], ['scans', 'Asset scans (crew QR, 7 days)', true]]],
+  ['Operations', [['incidents', 'Incidents', true], ['crews', 'Crews', true], ['trails', 'Crew trails', false], ['routes', 'Crew routes (to job)', true],['scans', 'Asset scans (crew QR, 7 days)', true]]],
 ];
 // CIM topology (network.* PostGIS schema) -- real connectivity data, imported
 // from a CIM RDF/XML export. Separate from the Haridwar layers above, which
@@ -44,9 +44,37 @@ const TOPO_STYLE = {
 };
 const topoGroupOf = (cls) => (cls === 'ACLineSegment' ? 'topoLines' : ['Structure', 'Junction', 'Meter'].includes(cls) ? 'topoStruct' : 'topoEquip');
 const SECTION_COLOR = '#ff6a00';
-// One stable colour per crew for its trail (a crew keeps its colour as its status changes).
-const TRAIL_COLORS = ['#e11d48', '#7c3aed', '#0891b2', '#ca8a04', '#16a34a', '#db2777', '#2563eb', '#ea580c'];
-const trailColor = (id) => { let h = 0; for (let i = 0; i < String(id).length; i++) h = (h * 31 + String(id).charCodeAt(i)) >>> 0; return TRAIL_COLORS[h % TRAIL_COLORS.length]; };
+// One stable colour per crew (it keeps its colour as its status changes). The only source of a crew's
+// colour: its marker ring, its trail and its route all use it, so they can never disagree.
+const CREW_COLORS = ['#e11d48', '#7c3aed', '#0891b2', '#ca8a04', '#16a34a', '#db2777', '#2563eb', '#ea580c'];
+const crewColor = (id) => { let h = 0; for (let i = 0; i < String(id).length; i++) h = (h * 31 + String(id).charCodeAt(i)) >>> 0; return CREW_COLORS[h % CREW_COLORS.length]; };
+// Crew routes: why a crew with a job has no line to draw (GET /api/crew-routes states).
+const ROUTE_STATE_TEXT = {
+  at_site: 'at the incident', no_position: 'no GPS position yet', no_incident_location: 'incident has no location',
+  off_network: 'crew is over 3 km from any mapped road', incident_off_network: 'incident is over 3 km from any mapped road',
+  no_route: 'no road route found', no_graph: 'road graph not generated on the server',
+};
+const fmtKm = (m) => (m < 1000 ? `${Math.round(m / 10) * 10} m` : `${(m / 1000).toFixed(m < 10000 ? 1 : 0)} km`);
+const fmtEta = (s) => { const min = Math.max(1, Math.round(s / 60)); return min < 60 ? `${min} min` : `${Math.floor(min / 60)} h ${min % 60} min`; };
+const routeText = (r) => (r.state === 'ok' ? `${fmtKm(r.meters)} · ${fmtEta(r.seconds)}` : ROUTE_STATE_TEXT[r.state] || r.state);
+// The cached route starts where the crew was when it was computed (it is redone only every 75 m): draw it
+// from the crew's current position instead, joining the route at the nearest point on it.
+function routeAhead(coords, here) {
+  if (!here || coords.length < 2) return coords;
+  const kx = Math.cos(here[0] * Math.PI / 180);
+  let best = { d: Infinity, i: 0, p: coords[0] };
+  for (let i = 0; i < coords.length - 1; i++) {
+    const [aLat, aLon] = coords[i], [bLat, bLon] = coords[i + 1];
+    const dx = (bLon - aLon) * kx, dy = bLat - aLat, len2 = dx * dx + dy * dy;
+    const t = len2 ? Math.max(0, Math.min(1, (((here[1] - aLon) * kx) * dx + (here[0] - aLat) * dy) / len2)) : 0;
+    const p = [aLat + dy * t, aLon + (bLon - aLon) * t];
+    const d = ((here[1] - p[1]) * kx) ** 2 + (here[0] - p[0]) ** 2;
+    if (d < best.d) best = { d, i, p };
+  }
+  return [here, best.p, ...coords.slice(best.i + 1)];
+}
+const esc = (s) => String(s).replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
+const routeIcon = (text, col) => L.divIcon({ className: '', html: `<span class="mk-route" style="--r:${col}">${esc(text)}</span>`, iconSize: [0, 0], iconAnchor: [0, 0] });
 
 // A crew QR asset scan: a small purple diamond.
 const SCAN_ICON = () => L.divIcon({ className: '', html: '<div style="width:11px;height:11px;background:#6b3fa0;border:2px solid #fff;transform:rotate(45deg);box-shadow:0 1px 4px rgba(15,27,45,.45)"></div>', iconSize: [14, 14], iconAnchor: [7, 7] });
@@ -74,6 +102,8 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
   const [trailBusy, setTrailBusy] = useState(false);
   const [trailFailed, setTrailFailed] = useState(false);
   const [scans, setScans] = useState([]);                   // crew QR asset scans (last 7 days)
+  const [routes, setRoutes] = useState([]);                 // GET /api/crew-routes: one per crew with a job
+  const [routesErr, setRoutesErr] = useState(null);         // last crew-routes request failed: why
 
   const boxRef = useRef();
   const mapRef = useRef(null);
@@ -86,6 +116,8 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
   const selRef = useRef(null); selRef.current = sel;
   const trailsOnRef = useRef(false), trailCrewRef = useRef(null), trailWinRef = useRef(DEFAULT_WINDOW);
   const trailTimers = useRef({}), trailFit = useRef(null);
+  const routeLines = useRef(new Map()); // crew id -> { casing, line, label, text }
+  const routesOnRef = useRef(false), routesTimer = useRef(null);
 
   useEffect(() => { api.network().then(setNet).catch(() => setNet({ error: true })); }, []);
   useEffect(() => { api.networkTopology().then(setTopo).catch(() => setTopo({ error: true })); }, []);
@@ -260,7 +292,9 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     groups.current.crews = mk();
     groups.current.trails = mk();
     groups.current.scans = mk();
+    groups.current.routes = mk();
     crewMarkers.current.clear();
+    routeLines.current.clear();
     groups.current.built = true;
     // add the default-on layers
     ALL.forEach(([k, , on]) => { if (on && groups.current[k]) groups.current[k].addTo(map); });
@@ -376,7 +410,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
       const color = CREWC[c.status] || '#9fb0c4';
       let e = live.get(c.id);
       if (!e) {
-        const m = L.marker([c.lat, c.lon], { icon: L.divIcon({ className: '', html: `<div class="mk-crew-wrap"><div class="mk-crew" style="--c:${color}"></div></div>`, iconSize: [16, 16], iconAnchor: [8, 8] }), zIndexOffset: 900, title: `Crew ${c.name || c.id}` });
+        const m = L.marker([c.lat, c.lon], { icon: L.divIcon({ className: '', html: `<div class="mk-crew-wrap" style="--r:${crewColor(c.id)}"><div class="mk-crew" style="--c:${color}"></div></div>`, iconSize: [16, 16], iconAnchor: [8, 8] }), zIndexOffset: 900, title: `Crew ${c.name || c.id}` });
         e = { m, crew: c, at: Date.now(), heading: 0, raf: 0 };
         m.on('click', () => select('crew', e.crew, e.crew.name));
         // Leaflet rebuilds the icon element when the layer is toggled back on
@@ -484,7 +518,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
     const names = Object.fromEntries(crews.map((c) => [c.id, c.name]));
     (trailCrew ? [trailCrew] : Object.keys(trails)).forEach((id) => {
       const pts = trails[id]; if (!pts || !pts.length) return;
-      const col = trailColor(id), nm = names[id] || id;
+      const col = crewColor(id), nm = names[id] || id;
       const { legs, gaps } = splitTrail(pts);
       legs.forEach((leg) => { if (leg.length > 1) L.polyline(leg.map((p) => [p.lat, p.lon]), { color: col, weight: 4, opacity: 0.85, lineJoin: 'round', interactive: false }).addTo(g); });
       gaps.forEach(([a, b]) => L.polyline([[a.lat, a.lon], [b.lat, b.lon]], { color: col, weight: 2.5, opacity: 0.7, dashArray: '2 8' })
@@ -495,6 +529,52 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
       L.circleMarker([f.lat, f.lon], { radius: 7, color: '#ffffff', weight: 2.5, fillColor: col, fillOpacity: 1 }).bindTooltip(`${nm} · trail start ${fmtClock(f.t)}`).addTo(g);
     });
   }, [trails, trailCrew, crewNamesKey, ready]); // eslint-disable-line
+
+  // ---- crew routes ---------------------------------------------------------------
+  // Road path ahead: from each crew to its assigned incident (GET /api/crew-routes; the server reroutes a
+  // crew only once it has moved 75 m). crew.updated fires on every GPS tick, so refetches are coalesced
+  // exactly as in Dispatch.jsx.
+  const routesOn = !!layers.routes;
+  routesOnRef.current = routesOn;
+  const loadRoutes = () => api.crewRoutes().then((r) => { setRoutes(r.routes || []); setRoutesErr(null); }).catch((e) => setRoutesErr(e.message || 'request failed'));
+  const routesSoon = () => { if (!routesOnRef.current) return; clearTimeout(routesTimer.current); routesTimer.current = setTimeout(loadRoutes, 400); };
+  useEffect(() => { if (routesOn) loadRoutes(); return () => clearTimeout(routesTimer.current); }, [routesOn]); // eslint-disable-line
+  useLiveRefresh(['crew.updated', 'crew.job.updated', 'oms.incident.updated'], routesSoon);
+
+  // draw: a white casing under a dotted line in the crew's colour, plus a distance / ETA label,
+  // kept per crew and moved in place on every update (never cleared and rebuilt, which flickers)
+  useEffect(() => {
+    const g = groups.current.routes; if (!g) return;
+    const live = routeLines.current, seen = new Set();
+    const byId = Object.fromEntries(crews.map((c) => [c.id, c]));
+    routes.forEach((r) => {
+      if (r.state !== 'ok' || !r.coords || r.coords.length < 2) return;
+      const c = byId[r.crewId];
+      const path = routeAhead(r.coords, c && c.lat && c.lon ? [Number(c.lat), Number(c.lon)] : null);
+      const col = crewColor(r.crewId), text = `${c?.name || r.crewId} · ${routeText(r)}`;
+      const mid = path[Math.floor(path.length / 2)];
+      seen.add(r.crewId);
+      const e = live.get(r.crewId);
+      if (!e) {
+        const casing = L.polyline(path, { color: '#ffffff', weight: 8, opacity: 0.85, lineCap: 'round', lineJoin: 'round', interactive: false }).addTo(g);
+        const line = L.polyline(path, { color: col, weight: 4.5, opacity: 1, dashArray: '1 8', lineCap: 'round', lineJoin: 'round' })
+          .bindTooltip(`${text} to ${r.incidentId}`, { sticky: true }).addTo(g);
+        const label = L.marker(mid, { icon: routeIcon(text, col), interactive: false, zIndexOffset: 700 }).addTo(g);
+        live.set(r.crewId, { casing, line, label, text });
+        return;
+      }
+      e.casing.setLatLngs(path); e.line.setLatLngs(path); e.label.setLatLng(mid);
+      if (e.text !== text) { e.text = text; e.label.setIcon(routeIcon(text, col)); e.line.setTooltipContent(`${text} to ${r.incidentId}`); }
+    });
+    live.forEach((e, id) => { if (!seen.has(id)) { g.removeLayer(e.casing); g.removeLayer(e.line); g.removeLayer(e.label); live.delete(id); } });
+  }, [routes, crews, ready]);
+
+  function focusRoute(r) {
+    const e = routeLines.current.get(r.crewId), c = crews.find((x) => x.id === r.crewId);
+    if (e && mapRef.current) mapRef.current.flyToBounds(e.line.getBounds().pad(0.2), { duration: 0.5, maxZoom: 17 });
+    if (c) select('crew', c, c.name);
+  }
+  const routeOf = (id) => { const r = routes.find((x) => x.crewId === id); return r ? `${routeText(r)} → ${r.incidentId}` : 'no job assigned'; };
 
   function focusTrail(id) {
     setLayers((l) => ({ ...l, trails: true }));
@@ -576,7 +656,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
               <div className="lp-h">{group}</div>
               {group.startsWith('Topology') && <div className="lp-sub">From CIM import · click any item, then “Trace electrical section”</div>}
               {ls.map(([k, label]) => {
-                const n = k.startsWith('topo') ? topoCounts[k] : k === 'incidents' ? plottedInc.length : k === 'crews' ? crews.length : k === 'trails' ? Object.values(trails).filter((p) => p && p.length).length : (c[k === 'feeders' ? 'feederLines' : k] || 0);
+                const n = k.startsWith('topo') ? topoCounts[k] : k === 'incidents' ? plottedInc.length : k === 'crews' ? crews.length : k === 'trails' ? Object.values(trails).filter((p) => p && p.length).length : k === 'routes' ? routes.filter((r) => r.state === 'ok').length : (c[k === 'feeders' ? 'feederLines' : k] || 0);
                 return (
                   <label key={k} className={`lp-row ${layers[k] ? 'on' : ''}`}>
                     <input type="checkbox" checked={!!layers[k]} onChange={() => setLayers((l) => ({ ...l, [k]: !l[k] }))} />
@@ -588,6 +668,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
               {group === 'Operations' && trailsOn && (
                 <TrailPanel crews={crews} trails={trails} trailCrew={trailCrew} trailWin={trailWin} setTrailWin={setTrailWin}
                   busy={trailBusy} failed={trailFailed} onFocus={focusTrail} onAll={() => setTrailCrew(null)} />)}
+              {group === 'Operations' && routesOn && <RoutePanel routes={routes} crews={crews} error={routesErr} onFocus={focusRoute} />}
             </div>
           ))}
           {selFeeder && <button className="lp-clear" onClick={() => { setSelFeeder(null); setSel(null); }}>Clear feeder highlight</button>}
@@ -608,7 +689,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
               <span className="lp-krow"><Sym shape="tri" color="#3b82f6" /> In service</span>
               <span className="lp-krow"><Sym shape="tri" color="#9fb0c4" /> On break</span>
             </div>
-            <div className="lp-knote">Active incidents show a pulsing ring. Feeder colour identifies its circuit.</div>
+            <div className="lp-knote">Active incidents show a pulsing ring. Feeder colour identifies its circuit. A crew's ring colour is also its trail (solid, path travelled) and its route (dotted, path ahead to its job).</div>
           </div>
 
           <div className="lp-hint">Drag to pan · scroll to zoom · click a feeder to trace its circuit</div>
@@ -714,7 +795,7 @@ export default function NetworkMap({ mapFocus, clearMapFocus } = {}) {
                 </>}
                 {sel.kind === 'scan' && <><span className="chip chip-soft">Crew QR asset scan</span><KV k="Asset" v={sel.asset_id || sel.raw_value} mono /><KV k="Crew" v={sel.crew_id} mono /><KV k="Job" v={sel.job_id} mono /><KV k="Incident" v={sel.incident_id} mono />
                   <KV k="Scanned" v={sel.scanned_at ? new Date(sel.scanned_at).toLocaleString() : '—'} /><KV k="Lat / Long" v={`${Number(sel.lat).toFixed(6)}, ${Number(sel.lon).toFixed(6)}`} mono /></>}
-                {sel.kind === 'crew' && <><span className="chip chip-soft">Field crew</span><KV k="Lead" v={sel.lead} /><KV k="Status" v={sel.status ? sel.status.replace('_', ' ') : ''} /><KV k="Location" v={sel.location} /><KV k="Skills" v={sel.skills} />
+                {sel.kind === 'crew' && <><span className="chip chip-soft">Field crew</span><KV k="Lead" v={sel.lead} /><KV k="Status" v={sel.status ? sel.status.replace('_', ' ') : ''} /><KV k="Location" v={sel.location} /><KV k="Skills" v={sel.skills} /><KV k="Route to job" v={routeOf(sel.id)} />
                   <CrewTrailInfo pts={trails[sel.id]} win={trailWin} lastFix={sel.location_updated_at} onShow={() => focusTrail(sel.id)} /></>}
               </div>
             </div>
@@ -742,7 +823,7 @@ function TrailPanel({ crews, trails, trailCrew, trailWin, setTrailWin, busy, fai
           return (
             <button key={c.id} className="trail-row" onClick={() => onFocus(c.id)}
               title={pts && !s.count ? `${c.name}: no position in the last ${trailWin}. Last heard ${c.location_updated_at ? fmtAgo(c.location_updated_at) : 'never'}.` : "Zoom to this crew's trail"}>
-              <span className="trail-sw" style={{ background: trailColor(c.id) }} />
+              <span className="trail-sw" style={{ background: crewColor(c.id) }} />
               <span className="trail-name">{c.name}</span>
               <span className="trail-meta">
                 {!pts ? (busy ? 'loading…' : '—')
@@ -754,6 +835,27 @@ function TrailPanel({ crews, trails, trailCrew, trailWin, setTrailWin, busy, fai
         })}
       </div>
       <div className="lp-knote" title="Hollow dots were recorded offline and uploaded later. A dashed line means no position was received for 10+ minutes, so the route in between is unknown.">Hollow dot = recorded offline · dashed = 10+ min gap</div>
+    </div>
+  );
+}
+
+// Side-panel list of crew routes: one row per crew with a job, distance and ETA, or why there is no line.
+function RoutePanel({ routes, crews, error, onFocus }) {
+  const names = Object.fromEntries(crews.map((c) => [c.id, c.name]));
+  return (
+    <div className="trail-ctl">
+      {error && <div className="trail-warn">Routes could not be loaded: {error}</div>}
+      <div className="trail-list">
+        {routes.map((r) => (
+          <button key={r.crewId} className="trail-row" onClick={() => onFocus(r)} title={`${names[r.crewId] || r.crewId} → ${r.incidentId}`}>
+            <span className="trail-sw" style={{ background: crewColor(r.crewId) }} />
+            <span className="trail-name">{names[r.crewId] || r.crewId}</span>
+            <span className="trail-meta">{routeText(r)}</span>
+          </button>
+        ))}
+        {!routes.length && <div className="lp-knote">No crew has a job assigned.</div>}
+      </div>
+      <div className="lp-knote">Road route at road speed limits, no traffic. Rerouted every 75 m.</div>
     </div>
   );
 }

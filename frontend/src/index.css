@@ -379,7 +379,9 @@ tr.row-hot td{background:var(--crit-bg)}
 .mk-ss-d::after{content:"";position:absolute;inset:3px;background:#ffd23f;border-radius:1px}
 .mk-ss-l{font-family:var(--disp,sans-serif);font-weight:700;font-size:10.5px;color:#12294a;background:rgba(255,255,255,.92);padding:1px 6px;border-radius:6px;border:1px solid #d7e0ea;box-shadow:0 1px 3px rgba(15,27,45,.15)}
 .mk-ptx{width:11px;height:11px;background:#e0742b;border:1.5px solid #fff;border-radius:2px;box-shadow:0 1px 3px rgba(15,27,45,.4)}
-.mk-crew-wrap{width:16px;height:16px;display:flex;align-items:center;justify-content:center;transition:transform .6s ease}
+.mk-crew-wrap{width:16px;height:16px;display:flex;align-items:center;justify-content:center;transition:transform .6s ease;border-radius:50%;box-shadow:0 0 0 2px rgba(255,255,255,.9),0 0 0 4.5px var(--r,transparent)}
+/* crew route label (Network Map "Crew routes"): name, distance, ETA, in the crew's colour */
+.mk-route{display:inline-block;transform:translate(-50%,-50%);white-space:nowrap;font:600 11px/1.2 var(--font,system-ui);color:#0f1b2d;background:#fff;border:2px solid var(--r);border-radius:10px;padding:2px 7px;box-shadow:0 1px 4px rgba(15,27,45,.35)}
 .mk-crew{width:0;height:0;border-left:8px solid transparent;border-right:8px solid transparent;border-bottom:14px solid var(--c);filter:drop-shadow(0 1px 2px rgba(15,27,45,.4))}
 .mk-inc{width:16px;height:16px;border-radius:50%;background:var(--c);border:2.5px solid #fff;box-shadow:0 1px 5px rgba(15,27,45,.4);position:relative}
 .mk-inc.live::before{content:"";position:absolute;inset:-6px;border-radius:50%;background:var(--c);opacity:.35;animation:incpulse 2s ease-out infinite;z-index:-1}
@@ -831,6 +833,7 @@ body{
 
 /* ---- crew trails (Network map) ---- */
 .sw-trails{background:#7c3aed;height:4px;width:13px;border-radius:2px;align-self:center}
+.sw-routes{height:0;width:13px;border-top:3px dotted #2563eb;align-self:center}
 .trail-ctl{margin:4px 8px 6px;padding:8px;border:1px solid var(--line);border-radius:10px;background:var(--paper)}
 .trail-win{display:flex;gap:4px;margin-bottom:7px}
 .trail-win .tw{flex:1;border:1px solid var(--line);background:var(--surface);color:var(--ink-2);border-radius:7px;padding:5px 0;font-size:11.5px;font-weight:600;cursor:pointer}

@@ -10,6 +10,7 @@ import { computeIndices, computePlannedIndices, computeMTTR, computeSLAComplianc
 import { buildCsv, buildPdf } from '../domain/reports.js';
 import { MAX_LOCATION_BATCH, parseLocationBatch, newestLivePoint, parseTileParams } from '../domain/locations.js';
 import { createRouter } from '../domain/roadRouter.js';
+import { createCrewRoutes } from '../domain/crewRoutes.js';
 import { mapProxy } from './mapProxy.js';
 import { createMapRegionRoutes } from './mapRegions.js';
 import { sendReportNow } from '../realtime/scheduledReports.js';
@@ -1127,6 +1128,20 @@ api.get('/route', (req, res) => {
   const route = router.route(from, to);
   if (!route) return res.status(404).json({ error: 'no road route between these points (outside the mapped area?)' });
   res.json({ ...route, source: 'server' });
+});
+
+// Live road route from each crew to its assigned incident (Network Map,
+// "Crew routes"). Cached per crew and job; recomputed only after the crew
+// has moved 75 m, so the dashboard can ask on every crew.updated.
+const crewRoutes = createCrewRoutes({ getRouter: getRoadRouter });
+api.get('/crew-routes', async (req, res) => {
+  try {
+    const [crews, incidents] = await Promise.all([repo.crews(), repo.incidents()]);
+    res.json({ routes: crewRoutes.compute(crews, incidents) });
+  } catch (e) {
+    console.error('[crew-routes]', e);
+    res.status(500).json({ error: 'could not compute crew routes' });
+  }
 });
 
 api.get('/tiles/:z/:x/:y.:ext(png|webp)', (req, res) => {
