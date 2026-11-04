@@ -126,6 +126,86 @@ Database connections at most, with the defaults:
 
 The compose file's `oms-backend` (api) and `oms-worker` (worker) together use at most 29.
 
+## First start of this version (schema version, phone encryption, rollback)
+This version (burst-safe intake, November 2026) changes the database schema once, on its first start. Do these in order.
+
+**1. Before the update: back up and keep the previous images and folder.**
+```bash
+bash deploy/ubuntu/backup-db.sh                       # note the file: ~/oms-backups/oms_<date>.dump
+docker compose -f docker-compose.deploy.yml images    # the names of the images now running
+docker tag oms-oms-backend:latest oms-oms-backend:pre-update
+docker tag oms-oms-web:latest oms-oms-web:pre-update
+```
+`oms-oms-backend` and `oms-oms-web` are Compose's names for the built images (project `oms`, then the service). If the
+`images` command shows other names, tag those. `up -d --build` re-uses the `latest` tag, so without these tags the
+previous images cannot be started again. Keep the previous `OMS-deploy` folder; unzip the new version into a new one.
+Note the time of the update: anything received after it is not in this backup.
+
+**2. Set `ENCRYPTION_KEY` before the first start.** Put it in `backend/.env.deploy`, using the key the server
+already uses. On the first start the migration converts `complaints.phone` from TEXT to encrypted `bytea`:
+- values already encrypted by the app (hex text) are decoded, not encrypted twice;
+- plain-text phones are encrypted with `ENCRYPTION_KEY`.
+
+**If the key is missing on the first start, the phone column stays TEXT: the phones are not encrypted at rest.** The
+log shows `[migrate] complaints.phone is still TEXT and ENCRYPTION_KEY is not set` once. Adding the key later and
+restarting converts the column then, because the key is part of the schema version. The conversion cannot be undone
+without the backup, and the phones can be read again only with the same key. To check after the start:
+```bash
+docker compose -f docker-compose.deploy.yml exec postgres psql -U oms -d oms -tAc \
+  "SELECT data_type FROM information_schema.columns WHERE table_name = 'complaints' AND column_name = 'phone'"   # bytea
+```
+
+**3. What the first start does: the schema version is created and the migration runs once, under a lock.**
+- **The database has no `oms_schema_version` table yet**, so both `oms-backend` and `oms-worker` find the schema
+  version missing.
+- **Each takes the advisory lock (41000, 1).** The first one runs the whole migration once: the schema statements,
+  the id-counter sync (which only ever moves a counter forward), and the phone conversion. It then writes the new
+  version to `oms_schema_version`.
+- **The other waits for the lock,** finds the version current and runs no schema statements.
+- **Expected log lines:** `[schema] migrated (none) -> <version> in <n> ms` from one process, and
+  `[schema] version <version> is current: no DDL (another process migrated it)` from the other. Every later start
+  logs `[schema] version <version> is current: no DDL`, and takes no lock and runs no DDL. To check:
+  ```bash
+  docker compose -f docker-compose.deploy.yml logs oms-backend oms-worker | grep '\[schema\]'
+  docker compose -f docker-compose.deploy.yml exec postgres psql -U oms -d oms -c 'SELECT * FROM oms_schema_version'
+  ```
+- **Lock waits are short.** The migration waits at most `MIGRATION_LOCK_TIMEOUT_MS` (2 s) for each table lock, so
+  it never queues live traffic behind it. If a lock is busy for longer, the step fails and is retried with a
+  doubling delay (2, 4, 8, 16 s; `STARTUP_RETRY_ATTEMPTS`, `STARTUP_RETRY_DELAY_MS`). After the last attempt the
+  process exits with code 1 and Docker starts it again. Update at a quiet time so the first attempt gets its locks.
+- **Statement timeout.** The backend containers apply a 60 s statement timeout, and the phone conversion rewrites the
+  whole `complaints` table. If the log shows `canceling statement due to statement timeout` during the migration,
+  stop both services and run the migration once without the limit, then start them:
+  ```bash
+  docker compose -f docker-compose.deploy.yml stop oms-backend oms-worker
+  docker compose -f docker-compose.deploy.yml run --rm -e PG_STATEMENT_TIMEOUT_MS= oms-backend \
+    node --input-type=module -e "const { ensureSchema } = await import('./src/infra/db.js'); await ensureSchema(); process.exit(0)"
+  docker compose -f docker-compose.deploy.yml start oms-backend oms-worker
+  ```
+- **Later versions:** any later version whose migration code changes migrates once on its first start in the same
+  way. A version with unchanged migration code runs no DDL.
+
+**4. Rollback: restore the pre-update dump and run the previous images.** The migration changes the schema (the
+phone column's type, new tables, the schema version). The previous code was not tested against the new schema, so
+restoring the database is part of the rollback. Complaints and events received after the update are not in the
+dump; export what you need first.
+```bash
+# in THIS version's folder
+docker compose -f docker-compose.deploy.yml stop oms-backend oms-worker oms-web
+docker compose -f docker-compose.deploy.yml rm -f oms-worker
+PG=$(docker compose -f docker-compose.deploy.yml ps -q postgres)
+docker exec -i "$PG" psql -U oms -d postgres -c 'DROP DATABASE oms' -c 'CREATE DATABASE oms'
+docker exec -i "$PG" psql -U oms -d oms -c 'CREATE EXTENSION IF NOT EXISTS timescaledb' -c 'SELECT timescaledb_pre_restore()'
+docker exec -i "$PG" pg_restore -U oms -d oms --no-owner < ~/oms-backups/oms_<date>.dump    # the dump from step 1
+docker exec -i "$PG" psql -U oms -d oms -c 'SELECT timescaledb_post_restore()'
+docker tag oms-oms-backend:pre-update oms-oms-backend:latest
+docker tag oms-oms-web:pre-update oms-oms-web:latest
+# in the PREVIOUS version's folder (same project name, oms)
+docker compose -f docker-compose.deploy.yml up -d --no-build oms-backend oms-web
+```
+Then check `https://<server-ip>:8443` and `docker compose -f docker-compose.deploy.yml logs -f oms-backend`. Keycloak
+is not changed by this version, so its database needs no restore.
+
 ## Load the network topology
 **Required after the first deploy, and again after any change to `backend/src/infra/importHaridwarInferred.js`.**
 `replace-old-oms.sh` does not do it. Without it the `network.*` tables are missing or empty: trace to source,
@@ -201,15 +281,16 @@ Everything the OMS keeps, including every crew photo and QR asset scan, is in th
   30 2 * * * bash /path/to/OMS-deploy/deploy/ubuntu/backup-db.sh >> $HOME/oms-backups/backup.log 2>&1
   ```
 - Copy `~/oms-backups` to another machine regularly; a backup on the same disk is lost with the disk.
-- Restore (into an empty `oms` database, with the backend stopped):
+- Restore (into an empty `oms` database, with the backend and the worker stopped; `DROP DATABASE` fails while
+  either still holds a connection):
   ```bash
-  docker compose -f docker-compose.deploy.yml stop oms-backend
+  docker compose -f docker-compose.deploy.yml stop oms-backend oms-worker
   PG=$(docker compose -f docker-compose.deploy.yml ps -q postgres)
   docker exec -i "$PG" psql -U oms -d postgres -c 'DROP DATABASE oms' -c 'CREATE DATABASE oms'
   docker exec -i "$PG" psql -U oms -d oms -c 'CREATE EXTENSION IF NOT EXISTS timescaledb' -c 'SELECT timescaledb_pre_restore()'
   docker exec -i "$PG" pg_restore -U oms -d oms --no-owner < ~/oms-backups/oms_<date>.dump
   docker exec -i "$PG" psql -U oms -d oms -c 'SELECT timescaledb_post_restore()'
-  docker compose -f docker-compose.deploy.yml start oms-backend
+  docker compose -f docker-compose.deploy.yml start oms-backend oms-worker
   ```
 
 ## Map server (in-house map on this same server)
