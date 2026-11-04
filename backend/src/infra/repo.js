@@ -277,7 +277,9 @@ export const repo = {
   ...feederKpiRepo,
   // ---- incidents
   incidents: () => db.any('SELECT * FROM incidents ORDER BY opened_at DESC'),
-  incident: (id) => db.oneOrNone('SELECT * FROM incidents WHERE id=$1', [id]),
+  // cx: an optional pg-promise task or transaction. Burst-safe intake
+  // (infra/intake.js) runs these inside one; everyone else gets the pool.
+  incident: (id, cx = db) => cx.oneOrNone('SELECT * FROM incidents WHERE id=$1', [id]),
   incidentEvents: (id) => db.any('SELECT * FROM incident_events WHERE incident_id=$1 ORDER BY ts ASC', [id]),
   allIncidentEvents: () => db.any('SELECT * FROM incident_events ORDER BY ts ASC'),
   allJobUpdates: () => db.any('SELECT * FROM job_updates ORDER BY ts ASC'),
@@ -285,11 +287,11 @@ export const repo = {
   // number. The previous SELECT COUNT(*) version could, and the duplicate-key
   // error that followed crashed the whole process (P8.6 -- see
   // db/migrations/sequence_based_id_generation.sql). Same external format.
-  nextIncidentId: async () => {
-    const { n } = await db.one("SELECT nextval('incident_id_seq') n");
+  nextIncidentId: async (cx = db) => {
+    const { n } = await cx.one("SELECT nextval('incident_id_seq') n");
     return 'INC-2026-' + String(n).padStart(6, '0');
   },
-  createIncident: async (i) => {
+  createIncident: async (i, cx = db) => {
     // Known zone centroids for the Ganga Corridor network -- lets manually
     // created incidents (from the "New Incident" form, which has no map
     // picker) still get a real lat/lon so nearest-crew matching works,
@@ -314,11 +316,11 @@ export const repo = {
     // tripped_equipment_id: the network.* equipment a SCADA event named by
     // mRID (OMS-05); geog follows lat/lon through trg_incidents_geog.
     const row = { substation: null, tripped_equipment_id: null, ...i, lat, lon };
-    await db.none(`INSERT INTO incidents
+    await cx.none(`INSERT INTO incidents
       (id,type,severity,status,zone,feeder,customers,cause,lat,lon,crew_id,opened_at,ert,sla_due_at,source,substation,tripped_equipment_id)
       VALUES ($/id/,$/type/,$/severity/,$/status/,$/zone/,$/feeder/,$/customers/,$/cause/,$/lat/,$/lon/,$/crew_id/,$/opened_at/,$/ert/,$/sla_due_at/,$/source/,$/substation/,$/tripped_equipment_id/)`,
       row);
-    return repo.incident(i.id);
+    return repo.incident(i.id, cx);
   },
   // One network.* equipment row by mRID, with its position and hierarchy
   // (OMS-05): { id, cim_mrid, cim_class, name, lat, lon, feeder, substation }
@@ -342,19 +344,19 @@ export const repo = {
   // exists (its foreign key), so no to_regclass check is needed here.
   trippedEquipment: (equipmentId) =>
     db.oneOrNone('SELECT name, cim_mrid FROM network.conducting_equipment WHERE id = $1', [equipmentId]),
-  updateIncident: async (id, patch) => {
-    await db.none(`UPDATE incidents SET ${setClause(patch)} WHERE id=$/id/`, { ...patch, id });
-    return repo.incident(id);
+  updateIncident: async (id, patch, cx = db) => {
+    await cx.none(`UPDATE incidents SET ${setClause(patch)} WHERE id=$/id/`, { ...patch, id });
+    return repo.incident(id, cx);
   },
   // SCADA trip tags still open on an incident (OMS-02). Atomic jsonb ops so
   // two concurrent events can't lose each other's tag.
-  addTripTag: async (id, tag) => {
-    await db.none(
+  addTripTag: async (id, tag, cx = db) => {
+    await cx.none(
       `UPDATE incidents SET
          open_trip_tags = CASE WHEN open_trip_tags ? $/tag/ THEN open_trip_tags ELSE open_trip_tags || to_jsonb($/tag/::text) END,
          trip_tag = COALESCE(trip_tag, $/tag/)
        WHERE id=$/id/`, { id, tag });
-    return repo.incident(id);
+    return repo.incident(id, cx);
   },
   // Removes the tag from every active incident holding it; returns those incidents after removal.
   removeTripTag: (tag) => db.any(
@@ -363,9 +365,9 @@ export const repo = {
      RETURNING *`, { tag }),
   // ts: when it happened, if not now (e.g. a crew update synced late).
   // actor: the verified token user (req.user) for a person, or a fixed service name.
-  addIncidentEvent: async (incidentId, actor, kind, note, ts) => {
+  addIncidentEvent: async (incidentId, actor, kind, note, ts, cx = db) => {
     const ev = { id: 'EV' + nanoid(8), incident_id: incidentId, ts: ts || new Date().toISOString(), ...eventActor(actor), kind, note };
-    await db.none(`INSERT INTO incident_events (id,incident_id,ts,actor,actor_role,kind,note)
+    await cx.none(`INSERT INTO incident_events (id,incident_id,ts,actor,actor_role,kind,note)
       VALUES ($/id/,$/incident_id/,$/ts/,$/actor/,$/actor_role/,$/kind/,$/note/)`, ev);
     return ev;
   },
@@ -388,12 +390,27 @@ export const repo = {
      FROM complaints ORDER BY ts DESC`,
     { key: process.env.ENCRYPTION_KEY }
   ),
-  complaint: (qid) => db.oneOrNone(
+  complaint: (qid, cx = db) => cx.oneOrNone(
     `SELECT qid, external_id, customer,
        safe_decrypt_text(phone, $/key/) AS phone,
        address, category, lat, lon, dt_id, feeder, substation, incident_id, action, ts
      FROM complaints WHERE qid=$/qid/`,
     { qid, key: process.env.ENCRYPTION_KEY }
+  ),
+  // D2: why a queue item was dead-lettered, or null.
+  deadLetterReason: async (itemId, cx = db) =>
+    (await cx.oneOrNone('SELECT last_error FROM intake_dead_letter WHERE id = $1', [itemId]))?.last_error ?? null,
+  // D2: what identifies the complaint stored under a qid (its idempotency keys
+  // and enough content to say whether another submission is the same), or null.
+  complaintIdentity: (qid, cx = db) => cx.oneOrNone(
+    `SELECT qid, external_id, intake_item_id, customer, category, lat, lon FROM complaints WHERE qid = $1`, [qid]),
+  // The complaint already stored under an external system's id (idempotent intake), or null.
+  complaintByExternalId: (externalId, cx = db) => cx.oneOrNone(
+    `SELECT qid, external_id, customer,
+       safe_decrypt_text(phone, $/key/) AS phone,
+       address, category, lat, lon, dt_id, feeder, substation, incident_id, action, ts
+     FROM complaints WHERE external_id=$/externalId/ ORDER BY ts ASC LIMIT 1`,
+    { externalId, key: process.env.ENCRYPTION_KEY }
   ),
   complaintsForIncident: (incidentId) => db.any(
     `SELECT qid, external_id, customer,
@@ -404,16 +421,16 @@ export const repo = {
   ),
   // Atomic, for the same reason as nextIncidentId above -- this is the exact
   // call that raced and took the backend down under concurrent complaints.
-  nextQueryId: async () => {
-    const { n } = await db.one("SELECT nextval('complaint_qid_seq') n");
+  nextQueryId: async (cx = db) => {
+    const { n } = await cx.one("SELECT nextval('complaint_qid_seq') n");
     return 'QRY-2026-' + String(n).padStart(6, '0');
   },
-  addComplaint: async (c) => {
-    await db.none(`INSERT INTO complaints
-      (qid,external_id,customer,phone,address,category,lat,lon,dt_id,feeder,substation,incident_id,action,ts)
-      VALUES ($/qid/,$/external_id/,$/customer/,pgp_sym_encrypt($/phone/,$/key/),$/address/,$/category/,$/lat/,$/lon/,$/dt_id/,$/feeder/,$/substation/,$/incident_id/,$/action/,$/ts/)`,
-      { ...c, key: process.env.ENCRYPTION_KEY });
-    return repo.complaint(c.qid);
+  addComplaint: async (c, cx = db) => {
+    await cx.none(`INSERT INTO complaints
+      (qid,external_id,customer,phone,address,category,lat,lon,dt_id,feeder,substation,incident_id,action,ts,intake_item_id)
+      VALUES ($/qid/,$/external_id/,$/customer/,pgp_sym_encrypt($/phone/,$/key/),$/address/,$/category/,$/lat/,$/lon/,$/dt_id/,$/feeder/,$/substation/,$/incident_id/,$/action/,$/ts/,$/intake_item_id/)`,
+      { intake_item_id: null, ...c, key: process.env.ENCRYPTION_KEY });
+    return repo.complaint(c.qid, cx);
   },
   // Active incidents at a substation within the correlation window (most recent first).
   // Planned outages (OMS-01) are never candidates: a SCADA trip merged into
@@ -431,10 +448,36 @@ export const repo = {
       { substation, cutoff }
     );
   },
+  // Merge candidates for intake (runbook decision D2, G9). Both sides are
+  // compared by canonical identity (infra/networkIdentity.js), never by raw text:
+  //   event feeder known:   incidents on the same canonical feeder, or
+  //                         incidents whose feeder is unknown at the same substation
+  //   event feeder unknown: incidents at the same substation (any feeder)
+  //   neither known:        none (the caller opens a new incident)
+  // Same feeder first, then most recent. Same 4-hour window and planned
+  // outage exclusion as activeIncidentsAtSubstation.
+  activeIncidentsInScope: ({ feederKey, substationKey }, cx = db, windowMin = 240) => {
+    if (!feederKey && !substationKey) return Promise.resolve([]);
+    const cutoff = new Date(Date.now() - windowMin * 60000).toISOString();
+    const match = feederKey
+      ? '(c.fk = $/feederKey/ OR (c.fk IS NULL AND c.sk = $/substationKey/))'
+      : 'c.sk = $/substationKey/';
+    return cx.any(
+      `SELECT * FROM (
+         SELECT i.*, oms_feeder_key(i.feeder) AS fk, oms_substation_key(i.substation, i.feeder) AS sk
+         FROM incidents i
+         WHERE status NOT IN ('resolved','closed','cancelled')
+           AND opened_at >= $/cutoff/
+           AND NOT EXISTS (SELECT 1 FROM planned_outages po WHERE po.incident_id = i.id)) c
+       WHERE ${match}
+       ORDER BY (c.fk IS NOT DISTINCT FROM $/feederKey/) DESC, c.opened_at DESC`,
+      { feederKey: feederKey || null, substationKey: substationKey || null, cutoff }
+    );
+  },
   isPlannedIncident: async (incidentId) =>
     !!(await db.oneOrNone('SELECT 1 FROM planned_outages WHERE incident_id=$1', [incidentId])),
   // Planned outages with supply off (or being switched) at a substation.
-  activePlannedOutagesAtSubstation: (substation) => db.any(
+  activePlannedOutagesAtSubstation: (substation, cx = db) => cx.any(
     `SELECT po.id, po.incident_id, i.status FROM planned_outages po JOIN incidents i ON i.id = po.incident_id
      WHERE i.substation IS NOT DISTINCT FROM $1 AND i.status IN ('isolating','in_progress','restoring')`, [substation]),
   // Other live planned outages whose window overlaps this one at the same
@@ -459,7 +502,7 @@ export const repo = {
      FROM planned_outages po JOIN incidents i ON i.id = po.incident_id`),
   // Planned outages a complaint at this substation might belong to; the
   // window and feeder decision is domain/plannedComplaints.js.
-  plannedOutagesForComplaint: (substation) => db.any(
+  plannedOutagesForComplaint: (substation, cx = db) => cx.any(
     `SELECT po.id, po.incident_id, po.window_start, po.window_end, i.status, i.feeder, i.substation
      FROM planned_outages po JOIN incidents i ON i.id = po.incident_id
      WHERE i.substation = $1 AND i.status IN ('notified','isolating','in_progress','restoring')`, [substation]),
@@ -528,9 +571,9 @@ export const repo = {
     `, [incidentId, limit]),
   // ---- alarms
   alarms: () => db.any('SELECT * FROM alarms ORDER BY ts DESC'),
-  updateAlarm: async (id, patch) => {
-    await db.none(`UPDATE alarms SET ${setClause(patch)} WHERE id=$/id/`, { ...patch, id });
-    return db.oneOrNone('SELECT * FROM alarms WHERE id=$1', [id]);
+  updateAlarm: async (id, patch, cx = db) => {
+    await cx.none(`UPDATE alarms SET ${setClause(patch)} WHERE id=$/id/`, { ...patch, id });
+    return cx.oneOrNone('SELECT * FROM alarms WHERE id=$1', [id]);
   },
   createAlarm: async (a) => {
     await db.none(`INSERT INTO alarms (id,tag,condition,limit_val,priority,message,ts,ack)
@@ -840,8 +883,8 @@ export const repo = {
     ORDER BY COALESCE(decided_at, created_at) DESC LIMIT $1`, [limit]),
 
   // ---- admin / audit
-  audit: async (actor, action, target) => {
-    await db.none(`INSERT INTO audit_log (id,ts,actor,action,target) VALUES ($1,$2,$3,$4,$5)`,
+  audit: async (actor, action, target, cx = db) => {
+    await cx.none(`INSERT INTO audit_log (id,ts,actor,action,target) VALUES ($1,$2,$3,$4,$5)`,
       ['AU' + nanoid(8), new Date().toISOString(), actor, action, target]);
   },
   auditLog: () => db.any('SELECT * FROM audit_log ORDER BY ts DESC LIMIT 50'),

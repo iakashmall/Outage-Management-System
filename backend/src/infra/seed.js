@@ -135,11 +135,16 @@ export async function seed({ force = false } = {}) {
     ['QRY-2026-000003','EXT-449120','Farhan Ali','9837045678','Sector 4 Ind. Area','No Supply',29.9481,78.1465,null,'UPCL-IA-B','33/11 kV INDUSTRIAL AREA S/s','INC-2026-000002','merged',70],
     ['QRY-2026-000004','EXT-450871','Nisha Thapa','9837023456','Bairagi Camp','No Supply',29.9389,78.1576,null,'UPCL-BC-A','33/11 kV BAIRAGI CAMP S/s','INC-2026-000006','created',8],
   ];
+  // Phones are stored the way repo.addComplaint stores them (pgcrypto, set up
+  // by migrate()); a plain-text phone in an encrypted column reads back as NULL.
+  const phoneIsBytea = (await db.oneOrNone(`SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name = 'complaints' AND column_name = 'phone' AND data_type = 'bytea'`)) != null;
+  const phoneSql = phoneIsBytea ? 'pgp_sym_encrypt($/phone/, $/key/)' : '$/phone/';
   for (const c of comps) {
     await db.none(`INSERT INTO complaints
       (qid,external_id,customer,phone,address,category,lat,lon,dt_id,feeder,substation,incident_id,action,ts)
-      VALUES ($/qid/,$/external_id/,$/customer/,$/phone/,$/address/,$/category/,$/lat/,$/lon/,$/dt_id/,$/feeder/,$/substation/,$/incident_id/,$/action/,$/ts/)`,
-      { qid: c[0], external_id: c[1], customer: c[2], phone: c[3], address: c[4], category: c[5], lat: c[6], lon: c[7], dt_id: c[8], feeder: c[9], substation: c[10], incident_id: c[11], action: c[12], ts: iso(c[13]) });
+      VALUES ($/qid/,$/external_id/,$/customer/,${phoneSql},$/address/,$/category/,$/lat/,$/lon/,$/dt_id/,$/feeder/,$/substation/,$/incident_id/,$/action/,$/ts/)`,
+      { qid: c[0], external_id: c[1], customer: c[2], phone: c[3], address: c[4], category: c[5], lat: c[6], lon: c[7], dt_id: c[8], feeder: c[9], substation: c[10], incident_id: c[11], action: c[12], ts: iso(c[13]), key: process.env.ENCRYPTION_KEY });
   }
 
   // The demo incidents/complaints above use hand-written IDs, inserted after

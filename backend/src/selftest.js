@@ -12,6 +12,7 @@ import { repo } from './infra/repo.js';
 import { initBus } from './domain/bus.js';
 import { connectRedis, isRedisConnected } from './infra/redis.js';
 import { handleScadaEvent, startScadaConsumer, _resetDedupState } from './realtime/scada.js';
+import { startIntakeWorker } from './realtime/intakeWorker.js';
 import { publishRestoration, _resetPublishedState } from './realtime/restoration.js';
 import { Dnp3Master, Dnp3TestOutstation, _internal as dnp3Internal } from './realtime/dnp3.js';
 import { computeIndices, customersServed } from './domain/indices.js';
@@ -27,6 +28,7 @@ await seed({ force: true });
 await connectRedis();
 await initBus();
 startScadaConsumer(); // subscribes to scada.alarm.raised — needed for the DNP3 adapter's bus-integration test below
+startIntakeWorker({ pollMs: 50 }); // WP2: SCADA events and complaints are processed from the intake queue
 
 const app = express();
 app.use(express.json());
@@ -39,8 +41,8 @@ app.use(express.json());
 app.use((req, res, next) => { req.user = { username: 'test-harness', roles: ['system_admin', 'oms_operator'] }; next(); });
 app.use('/api', api);
 
-const server = app.listen(4100, async () => {
-  const base = 'http://127.0.0.1:4100/api';
+const server = app.listen(Number(process.env.PORT), async () => {
+  const base = `http://127.0.0.1:${process.env.PORT}/api`;
   const j = async (m, p, b) => {
     const r = await fetch(base + p, {
       method: m, headers: { 'content-type': 'application/json' },
@@ -163,9 +165,11 @@ const server = app.listen(4100, async () => {
   app2.use(express.json());
   app2.use((req, res, next) => { req.user = { username: 'crew-user', roles: ['field_crew_coordinator'] }; next(); });
   app2.use('/api', api);
-  const server2 = app2.listen(4101);
+  // OS-assigned port: a fixed PORT+1 could collide with another test run on this machine
+  const server2 = await new Promise((r) => { const sv = app2.listen(0, '127.0.0.1', () => r(sv)); });
+  const port2 = server2.address().port;
   const j2 = async (m, p, b) => {
-    const r = await fetch('http://127.0.0.1:4101/api' + p, { method: m, headers: { 'content-type': 'application/json' }, body: b ? JSON.stringify(b) : undefined });
+    const r = await fetch(`http://127.0.0.1:${port2}/api` + p, { method: m, headers: { 'content-type': 'application/json' }, body: b ? JSON.stringify(b) : undefined });
     return r.status;
   };
   check('POST /calls is 403 without a permitted role', await j2('POST', '/calls', { customer: 'x', phone: '1', address: 'a', category: 'Normal' }) === 403);

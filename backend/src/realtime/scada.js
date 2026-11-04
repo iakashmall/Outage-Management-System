@@ -7,6 +7,10 @@ import { canScadaRestore, LABELS } from '../domain/lifecycle.js';
 import { predictDownstream } from '../domain/prediction.js';
 import { slaDueAt } from '../domain/sla.js';
 import { sendRestorationCallbacks } from './notifier.js';
+import { db } from '../infra/db.js';
+import { lockScope, runIntake, runEffectsSafely, intakeTestHooks } from '../infra/intake.js';
+import { enqueue } from '../infra/intakeQueue.js';
+import { resolveScope } from '../infra/networkIdentity.js';
 
 // ============================================================
 // Phase 2 ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â SCADA & DMS integration: fault-event ingest + auto-detection
@@ -30,9 +34,11 @@ import { sendRestorationCallbacks } from './notifier.js';
 // works unchanged on an auto-detected incident.
 // ============================================================
 
-// Dedup window: two fault events on the same feeder within this window are
-// treated as the same outage. 60s per FR-OMS-003.
-const DEDUP_WINDOW_MS = 60_000;
+// Dedup (FR-OMS-003, decision D2): a fault joins an incident still open on
+// the same feeder (or, feeder unknown, the same substation) opened within the
+// last 4 hours, decided in the database under a per-feeder advisory lock
+// (infra/intake.js). The old in-process 60 s map is gone: it raced under
+// bursts and cannot be shared between processes (worker split, WP4).
 
 // SCADA "condition" ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ base severity. TRIP/CRITICAL is a confirmed outage;
 // MAJOR is likely; MINOR is usually a warning that isn't an outage on its own.
@@ -48,10 +54,7 @@ const CONDITION_SEVERITY = {
 // measurement ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â Phase 3's load model will replace this.
 const CUSTOMERS_PER_KVA = 2;
 
-// In-memory index of "asset ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ most recent open incident id + time", so dedup
-// is O(1) and doesn't hammer the DB on every tag. Rebuilt lazily; the DB is
-// still the source of truth (we double-check there before creating).
-const recentByAsset = new Map(); // key: feeder||substation, val: { incidentId, ts }
+// Asset key used in timeline notes (the feeder, else the substation).
 
 function assetKey(loc) {
   return (loc.feeder || loc.substation || 'UNKNOWN').toUpperCase();
@@ -109,14 +112,14 @@ function locationNote(loc) {
 // if that incident has no link yet: the equipment's point then replaces a
 // merely reported position (equipment > reported > none). An incident
 // already linked keeps its first equipment.
-async function linkEquipment(incidentId, loc) {
+async function linkEquipment(t, incidentId, loc) {
   if (!loc.equipment) return;
-  const inc = await repo.incident(incidentId);
+  const inc = await repo.incident(incidentId, t);
   if (!inc || inc.tripped_equipment_id) return;
   const patch = { tripped_equipment_id: loc.equipment.id };
   if (loc.equipment.positioned) Object.assign(patch, { lat: loc.lat, lon: loc.lon });
-  await repo.updateIncident(incidentId, patch);
-  await repo.addIncidentEvent(incidentId, 'SCADA', 'field', locationNote(loc));
+  await repo.updateIncident(incidentId, patch, t);
+  await repo.addIncidentEvent(incidentId, 'SCADA', 'field', locationNote(loc), undefined, t);
 }
 
 // Pull lat/lon out of a SCADA event if it carries them; otherwise fall back to
@@ -173,18 +176,17 @@ const SEVERITY_RANK = { low: 1, medium: 2, high: 3, critical: 4 };
 // a higher severity than the complaint-based guess, the incident should be
 // upgraded to reflect that. Returns true if it wrote a "confirmed" event
 // (so the caller can skip its own generic dedup note).
-async function corroborateFromCustomerReport(inc, evt, loc) {
+async function corroborateFromCustomerReport(t, inc, evt, loc) {
   if (inc.source !== 'Customer') return false;
   const customers = estimateCustomers(evt, loc);
   const scadaSeverity = classifySeverity(evt.condition, customers);
   if (SEVERITY_RANK[scadaSeverity] > SEVERITY_RANK[inc.severity]) {
-    await repo.updateIncident(inc.id, { severity: scadaSeverity });
+    await repo.updateIncident(inc.id, { severity: scadaSeverity }, t);
     await repo.addIncidentEvent(inc.id, 'SCADA', 'confirmed',
-      `SCADA confirmed this outage (was customer-reported only) - severity upgraded ${inc.severity} to ${scadaSeverity}`);
-    bus.publish(TOPICS.INCIDENT_UPDATED, await repo.incident(inc.id));
+      `SCADA confirmed this outage (was customer-reported only) - severity upgraded ${inc.severity} to ${scadaSeverity}`, undefined, t);
   } else {
     await repo.addIncidentEvent(inc.id, 'SCADA', 'confirmed',
-      `SCADA confirmed this outage (was customer-reported only) - severity unchanged (${inc.severity})`);
+      `SCADA confirmed this outage (was customer-reported only) - severity unchanged (${inc.severity})`, undefined, t);
   }
   return true;
 }
@@ -193,14 +195,14 @@ async function corroborateFromCustomerReport(inc, evt, loc) {
 
 // Record the trip's tag on the incident it created or was merged into, and
 // attach a downstream prediction if the incident doesn't have one yet.
-async function recordTrip(incidentId, evt, loc) {
-  if (evt.tag) await repo.addTripTag(incidentId, evt.tag);
-  const inc = await repo.incident(incidentId);
+// prediction is computed before the transaction (it may read network.*), so
+// nothing inside the transaction waits for a second pool connection.
+async function recordTrip(t, incidentId, evt, prediction) {
+  if (evt.tag) await repo.addTripTag(incidentId, evt.tag, t);
+  const inc = await repo.incident(incidentId, t);
   if (inc && !inc.prediction) {
-    const prediction = await predictDownstream({ feeder: loc.feeder, cim_mrid: evt.cim_mrid });
-    prediction.customers_source = typeof evt.customers === 'number' ? 'event' : 'estimated';
-    await repo.updateIncident(incidentId, { prediction });
-    await repo.addIncidentEvent(incidentId, 'SCADA', 'predicted', predictionNote(prediction));
+    await repo.updateIncident(incidentId, { prediction }, t);
+    await repo.addIncidentEvent(incidentId, 'SCADA', 'predicted', predictionNote(prediction), undefined, t);
   }
 }
 
@@ -262,78 +264,146 @@ async function restoreFromScada(inc, tag) {
   return { incidentId: inc.id, momentary, status: final.status };
 }
 
-export async function handleScadaEvent(evt) {
-  try {
-    // Always push the raw value into the RTDB tag cache first -- even non-outage
-    // conditions matter for the live HMI (Phase 2's live tag view). Non-fatal
-    // if Redis is down.
-    if (evt.tag) {
-      await setTag(evt.tag, evt.limit_val ?? evt.value ?? evt.condition, evt.quality || 'GOOD');
+// One SCADA event in, at most one incident out. Throws when the event could
+// not be processed after the bounded retries (infra/intake.js withRetry): the
+// caller (bus subscriber, intake queue) then logs it, retries it later or
+// dead-letters it. Nothing is swallowed.
+//   cx:            run inside this transaction (a savepoint), e.g. the queue's
+//   deferEffects:  return { result, effects } instead of running the
+//                  post-commit effects (bus publishes) here
+export async function handleScadaEvent(evt, { cx = db, deferEffects = false } = {}) {
+  // Always push the raw value into the RTDB tag cache first -- even non-outage
+  // conditions matter for the live HMI (Phase 2's live tag view). Non-fatal
+  // if Redis is down, and idempotent, so safe on a retry.
+  if (evt.tag) {
+    await setTag(evt.tag, evt.limit_val ?? evt.value ?? evt.condition, evt.quality || 'GOOD');
+  }
+  const done = (result, effects = []) => (deferEffects ? { result, effects } : result);
+
+  // A reclose is idempotent (the tag is removed once), so it is not wrapped.
+  if (evt.event === 'reclose') return done({ reclose: true, ...(await handleReclose(evt)) });
+
+  if (!isOutageCondition(evt.condition)) return done(null); // recorded, not an outage
+
+  // Reads that may use the network model run before the transaction, so the
+  // transaction never waits on a second pool connection.
+  // Canonical feeder / substation (G9): a tag feeder ("DEHRA.FDR7") resolves
+  // to its network code through the identity tables, or stays unknown.
+  const located = await locate(evt);
+  const scope = await resolveScope(located);
+  const loc = { ...located, feeder: scope.feeder, substation: scope.substation, scope };
+  const prediction = await predictDownstream({ feeder: loc.feeder, cim_mrid: evt.cim_mrid });
+  prediction.customers_source = typeof evt.customers === 'number' ? 'event' : 'estimated';
+
+  const out = await runIntake('scada', (t) => scadaTripTx(t, evt, loc, prediction), { cx, runEffects: false });
+  if (deferEffects) return out;
+  await runEffectsSafely('scada', out.effects);
+  return out.result;
+}
+
+// ---- F5: several queued trips of one feeder in one transaction ----
+// The intake queue hands over the heads of several tags at once (at most one
+// item per tag, so a tag's trip / reclose / trip order is untouched). Trips
+// that need nothing per event beyond the merge (an outage condition, no
+// equipment mRID, not a reclose) are grouped by the feeder they name and run
+// as ONE transaction per group: one scope lock, one open-incident lookup,
+// the first event creates or joins the incident exactly as handleScadaEvent
+// does, then the rest are merged with multi-row writes (one INSERT of their
+// timeline notes, one UPDATE linking their alarms, one UPDATE of the trip
+// tags, at most one severity upgrade). Everything else runs one by one.
+export const canBatchScada = (evt) => !!evt && evt.event !== 'reclose' && !evt.cim_mrid && isOutageCondition(evt.condition);
+export const scadaGroupKey = (evt) => {
+  const loc = locateFromEvent(evt);
+  return `f:${loc.feeder || ''}|s:${loc.substation || ''}`;
+};
+
+export async function handleScadaBatch(evts, t) {
+  await Promise.all(evts.filter((e) => e.tag).map((e) => setTag(e.tag, e.limit_val ?? e.value ?? e.condition, e.quality || 'GOOD')));
+  const located = { ...locateFromEvent(evts[0]), equipment: null };
+  const scope = await resolveScope(located, t);
+  const loc = { ...located, feeder: scope.feeder, substation: scope.substation, scope };
+  const prediction = await predictDownstream({ feeder: loc.feeder });
+  prediction.customers_source = typeof evts[0].customers === 'number' ? 'event' : 'estimated';
+
+  const first = await scadaTripTx(t, evts[0], loc, prediction);
+  const rest = evts.slice(1);
+  const effects = [...(first.effects || [])];
+  if (!rest.length) return { result: [first.result], effects };
+
+  const incidentId = first.result.incidentId;
+  const inc = await repo.incident(incidentId, t);
+  const fromCustomer = inc.source === 'Customer';
+  const now = new Date().toISOString();
+  const notes = rest.map((e) => ({
+    id: 'EV' + nanoid(10), incident_id: incidentId, ts: now, actor: 'SCADA', actor_role: null,
+    kind: fromCustomer ? 'confirmed' : 'field',
+    note: fromCustomer
+      ? `SCADA confirmed this outage (was customer-reported only) - ${e.condition} on ${e.tag || assetKey(loc)}`
+      : `Correlated SCADA ${e.condition} on ${e.tag || assetKey(loc)} (deduplicated)${repeatsNote(e)}`,
+  }));
+  await t.none(`INSERT INTO incident_events (id,incident_id,ts,actor,actor_role,kind,note)
+    SELECT n.id, n.incident_id, n.ts, n.actor, n.actor_role, n.kind, n.note
+      FROM json_populate_recordset(NULL::incident_events, $1::json) n`, [JSON.stringify(notes)]);
+  const alarmIds = rest.flatMap((e) => [e.id, ...(Array.isArray(e.coalesced_ids) ? e.coalesced_ids : [])]).filter(Boolean);
+  if (alarmIds.length) await t.none('UPDATE alarms SET incident_id = $1 WHERE id IN ($2:csv)', [incidentId, alarmIds]);
+  const tags = [...new Set(rest.map((e) => e.tag).filter(Boolean))];
+  if (tags.length) {
+    await t.none(`UPDATE incidents SET
+        open_trip_tags = open_trip_tags || COALESCE((SELECT jsonb_agg(x) FROM unnest($2::text[]) x WHERE NOT (open_trip_tags ? x)), '[]'::jsonb),
+        trip_tag = COALESCE(trip_tag, ($2::text[])[1])
+      WHERE id = $1`, [incidentId, tags]);
+  }
+  if (fromCustomer) {
+    const best = rest.map((e) => classifySeverity(e.condition, estimateCustomers(e, loc)))
+      .reduce((a, b) => (SEVERITY_RANK[b] > SEVERITY_RANK[a] ? b : a), inc.severity);
+    if (SEVERITY_RANK[best] > SEVERITY_RANK[inc.severity]) {
+      await repo.updateIncident(incidentId, { severity: best }, t);
+      await repo.addIncidentEvent(incidentId, 'SCADA', 'confirmed', `SCADA confirmed this outage - severity upgraded ${inc.severity} to ${best}`, undefined, t);
+      const after = await repo.incident(incidentId, t);
+      effects.push(() => bus.publish(TOPICS.INCIDENT_UPDATED, after));
     }
+  }
+  return { result: [first.result, ...rest.map(() => ({ deduplicated: true, incidentId }))], effects };
+}
 
-    if (evt.event === 'reclose') return { reclose: true, ...(await handleReclose(evt)) };
+// The locked check-and-create for one trip, inside transaction t.
+async function scadaTripTx(t, evt, loc, prediction) {
+  const key = assetKey(loc);
+  await lockScope(t, loc.scope);
 
-    if (!isOutageCondition(evt.condition)) return null; // recorded, not an outage
-
-    const loc = await locate(evt);
-    const key = assetKey(loc);
-    const now = Date.now();
-
-    // --- de-duplication (FR-OMS-003) ---
-    // 1) fast in-memory check
-    const recent = recentByAsset.get(key);
-    if (recent && now - recent.ts < DEDUP_WINDOW_MS) {
-      // Same asset, same window -- attach as evidence to the existing incident
-      // instead of opening a new one. If that incident was customer-reported
-      // only, this SCADA event is a real confirmation, not just a repeat.
-      const existingInc = await repo.incident(recent.incidentId);
-      const confirmed = existingInc ? await corroborateFromCustomerReport(existingInc, evt, loc) : false;
-      if (!confirmed) {
-        await repo.addIncidentEvent(recent.incidentId, 'SCADA', 'field',
-          `Correlated SCADA ${evt.condition} on ${evt.tag || key} (deduplicated)`);
-      }
-      if (evt.id) await repo.updateAlarm(evt.id, { incident_id: recent.incidentId }).catch(() => {});
-      await recordTrip(recent.incidentId, evt, loc);
-      await linkEquipment(recent.incidentId, loc);
-      recentByAsset.set(key, { incidentId: recent.incidentId, ts: now });
-      return { deduplicated: true, incidentId: recent.incidentId };
+  // --- de-duplication (FR-OMS-003, D2): same feeder, else same substation ---
+  const [open] = await repo.activeIncidentsInScope(loc.scope, t);
+  if (open) {
+    // Attach as evidence to the existing incident instead of opening a new
+    // one. If that incident was customer-reported only, this SCADA event is a
+    // real confirmation, not just a repeat.
+    const confirmed = await corroborateFromCustomerReport(t, open, evt, loc);
+    if (!confirmed) {
+      await repo.addIncidentEvent(open.id, 'SCADA', 'field',
+        `Correlated SCADA ${evt.condition} on ${evt.tag || key} (deduplicated)${repeatsNote(evt)}`, undefined, t);
     }
-    // 2) authoritative DB check -- covers restarts / multiple app instances,
-    //    where the in-memory index is cold. Reuses the same helper the
-    //    trouble-call path uses.
-    if (loc.substation) {
-      const open = await repo.activeIncidentsAtSubstation(loc.substation);
-      if (open && open.length) {
-        const inc = open[0];
-        const confirmed = await corroborateFromCustomerReport(inc, evt, loc);
-        if (!confirmed) {
-          await repo.addIncidentEvent(inc.id, 'SCADA', 'field',
-            `Correlated SCADA ${evt.condition} on ${evt.tag || key} (deduplicated)`);
-        }
-        if (evt.id) await repo.updateAlarm(evt.id, { incident_id: inc.id }).catch(() => {});
-        await recordTrip(inc.id, evt, loc);
-        await linkEquipment(inc.id, loc);
-        recentByAsset.set(key, { incidentId: inc.id, ts: now });
-        return { deduplicated: true, incidentId: inc.id };
-      }
-    }
+    await linkAlarms(t, evt, open.id);
+    await recordTrip(t, open.id, evt, prediction);
+    await linkEquipment(t, open.id, loc);
+    const after = await repo.incident(open.id, t);
+    const effects = after.severity !== open.severity ? [() => bus.publish(TOPICS.INCIDENT_UPDATED, after)] : [];
+    return { result: { deduplicated: true, incidentId: open.id }, effects };
+  }
 
-    // --- classify (FR-OMS-004) ---
-    const customers = estimateCustomers(evt, loc);
-    const severity = classifySeverity(evt.condition, customers);
+  // --- classify (FR-OMS-004) ---
+  const customers = estimateCustomers(evt, loc);
+  const severity = classifySeverity(evt.condition, customers);
 
-    // --- downstream prediction (OMS-02) ---
-    // A real customer count on the event always wins; otherwise the incident
-    // carries the prediction's kVA-share estimate. Severity above is unchanged.
-    const prediction = await predictDownstream({ feeder: loc.feeder, cim_mrid: evt.cim_mrid });
-    const hasRealCount = typeof evt.customers === 'number';
-    prediction.customers_source = hasRealCount ? 'event' : 'estimated';
-    const incCustomers = hasRealCount || prediction.customers_estimate == null ? customers : prediction.customers_estimate;
+  // --- downstream prediction (OMS-02) ---
+  // A real customer count on the event always wins; otherwise the incident
+  // carries the prediction's kVA-share estimate. Severity above is unchanged.
+  const hasRealCount = typeof evt.customers === 'number';
+  const incCustomers = hasRealCount || prediction.customers_estimate == null ? customers : prediction.customers_estimate;
 
-    // --- auto-create the incident (FR-OMS-001) ---
-    const id = await repo.nextIncidentId();
-    const openedAt = new Date().toISOString();
-    const created = await repo.createIncident({
+  // --- auto-create the incident (FR-OMS-001) ---
+  const id = await repo.nextIncidentId(t);
+  const openedAt = new Date().toISOString();
+  const created = await repo.createIncident({
       id,
       type: 'outage',
       severity,
@@ -350,36 +420,34 @@ export async function handleScadaEvent(evt) {
       ert: null,
       sla_due_at: slaDueAt(severity, openedAt),
       source: 'SCADA',
-      tripped_equipment_id: loc.equipment?.id ?? null,
-    });
-    await repo.addIncidentEvent(id, 'SCADA', 'created',
-      `Auto-detected from SCADA ${evt.condition} on ${evt.tag || key} - ${severity} severity, ~${incCustomers} customers`);
-    const where = locationNote(loc);
-    if (where) await repo.addIncidentEvent(id, 'SCADA', 'field', where);
-    await repo.audit('SCADA', 'incident.autodetect', id);
-    if (evt.id) await repo.updateAlarm(evt.id, { incident_id: id }).catch(() => {});
-    if (evt.tag) await repo.addTripTag(id, evt.tag);
-    await repo.updateIncident(id, { prediction });
-    await repo.addIncidentEvent(id, 'SCADA', 'predicted', predictionNote(prediction));
-    const inc = await repo.incident(id) || created;
+    tripped_equipment_id: loc.equipment?.id ?? null,
+  }, t);
+  if (intakeTestHooks.afterIncidentInsert) await intakeTestHooks.afterIncidentInsert(t, { source: 'scada', id });
+  await repo.addIncidentEvent(id, 'SCADA', 'created',
+    `Auto-detected from SCADA ${evt.condition} on ${evt.tag || key} - ${severity} severity, ~${incCustomers} customers`, undefined, t);
+  const where = locationNote(loc);
+  if (where) await repo.addIncidentEvent(id, 'SCADA', 'field', where, undefined, t);
+  await repo.audit('SCADA', 'incident.autodetect', id, t);
+  await linkAlarms(t, evt, id);
+  if (evt.tag) await repo.addTripTag(id, evt.tag, t);
+  await repo.updateIncident(id, { prediction }, t);
+  await repo.addIncidentEvent(id, 'SCADA', 'predicted', predictionNote(prediction), undefined, t);
+  const inc = await repo.incident(id, t) || created;
 
-    // A planned outage switching at this substation may explain the trip
-    // (an isolate step opening a breaker). Say so on both timelines, but
-    // still raise the incident: a real fault must never be hidden.
-    if (loc.substation) {
-      for (const po of await repo.activePlannedOutagesAtSubstation(loc.substation)) {
-        await repo.addIncidentEvent(id, 'SCADA', 'field', `Planned outage ${po.incident_id} is ${po.status} at this substation - this trip may be its planned switching; verify before dispatching`);
-        await repo.addIncidentEvent(po.incident_id, 'SCADA', 'field', `SCADA ${evt.condition} on ${evt.tag || key} raised ${id} - check whether it is this outage's planned switching`);
-      }
+  // A planned outage switching at this substation may explain the trip
+  // (an isolate step opening a breaker). Say so on both timelines, but
+  // still raise the incident: a real fault must never be hidden.
+  if (loc.substation) {
+    for (const po of await repo.activePlannedOutagesAtSubstation(loc.substation, t)) {
+      await repo.addIncidentEvent(id, 'SCADA', 'field', `Planned outage ${po.incident_id} is ${po.status} at this substation - this trip may be its planned switching; verify before dispatching`, undefined, t);
+      await repo.addIncidentEvent(po.incident_id, 'SCADA', 'field', `SCADA ${evt.condition} on ${evt.tag || key} raised ${id} - check whether it is this outage's planned switching`, undefined, t);
     }
-
-    recentByAsset.set(key, { incidentId: id, ts: now });
-    bus.publish(TOPICS.INCIDENT_CREATED, inc);
-    return { deduplicated: false, incidentId: id, incident: inc };
-  } catch (e) {
-    console.error('[scada] failed to handle event', evt?.tag || '', e.message);
-    return null;
   }
+
+  return {
+    result: { deduplicated: false, incidentId: id, incident: inc },
+    effects: [() => bus.publish(TOPICS.INCIDENT_CREATED, inc)],
+  };
 }
 
 // Wire the consumer to the bus. Call once at boot AFTER initBus().
@@ -387,10 +455,38 @@ export async function handleScadaEvent(evt) {
 // so in local dev the existing simulated alarms now drive real auto-detection;
 // in production the SCADA ingest adapter (DNP3/IEC 61968, P2.2) publishes to the
 // same topic and nothing here changes.
+// WP2: the subscriber only writes the event to the durable intake queue; the
+// queue consumer (realtime/intakeWorker.js) runs handleScadaEvent. Events the
+// HTTP route already queued arrive flagged queued: true and are skipped. The
+// promise is returned, so the Kafka driver commits its offset only after the
+// event is safely queued (and retries / dead-letters if that fails).
 export function startScadaConsumer() {
-  bus.subscribe(TOPICS.ALARM_RAISED, (evt) => { handleScadaEvent(evt); });
-  console.log('[scada] fault-event consumer subscribed to', TOPICS.ALARM_RAISED);
+  bus.subscribe(TOPICS.ALARM_RAISED, (evt) => (evt?.queued ? null : enqueueScadaEvent(evt)));
+  console.log('[scada] fault-event consumer subscribed to', TOPICS.ALARM_RAISED, '(queues to intake_queue)');
 }
 
-// Exposed for the self-test so dedup state can be reset between assertions.
-export function _resetDedupState() { recentByAsset.clear(); }
+// A SCADA event's queue position is ordered by its tag, so a trip is always
+// processed before the reclose of the same device.
+// Repeats of the same state on the same tag, queued while the previous one is
+// still waiting, are coalesced into that item (infra/intakeQueue.js): the
+// state is the event kind plus its condition, so a reclose never absorbs a
+// trip, and a CRITICAL never absorbs a MAJOR.
+export const scadaCoalesceKey = (evt) => (evt?.tag
+  ? `scada|${evt.tag}|${evt.event === 'reclose' ? 'reclose' : `trip:${String(evt.condition || '').toUpperCase()}`}`
+  : null);
+export const enqueueScadaEvent = (evt) => {
+  const { queued, ...clean } = evt || {};
+  return enqueue('scada', clean, { orderKey: clean.tag ? `tag:${clean.tag}` : null, coalesceKey: scadaCoalesceKey(clean) });
+};
+
+// Every alarm row behind this event, including repeats coalesced into it,
+// points at the incident it raised or joined.
+async function linkAlarms(t, evt, incidentId) {
+  const ids = [evt.id, ...(Array.isArray(evt.coalesced_ids) ? evt.coalesced_ids : [])].filter(Boolean);
+  if (ids.length) await t.none('UPDATE alarms SET incident_id = $1 WHERE id IN ($2:csv)', [incidentId, ids]);
+}
+const repeatsNote = (evt) => (Array.isArray(evt.coalesced_ids) && evt.coalesced_ids.length
+  ? ` (+${evt.coalesced_ids.length} identical event(s) coalesced while queued)` : '');
+
+// Kept for the self-tests: dedup has no in-process state any more (WP1).
+export function _resetDedupState() {}

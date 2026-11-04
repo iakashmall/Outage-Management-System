@@ -1,6 +1,7 @@
 // Intake hardening self-test (runbook WP3 gates): oversized body 413, bad
 // fields 400, no token 401, wrong role 403, simulator routes 404 by default,
-// plus the generous rate limit (429). The app is wired the way index.js wires
+// plus the generous rate limit (429), and that every rejected complaint is
+// answered before it reaches the intake queue (runbook v2 WP1/WP2). The app is wired the way index.js wires
 // it (intake parsers, app-wide 12 MB parser, the REAL requireAuth, api,
 // errorHandler). Tokens are RS256, signed with a key made here and served from
 // a local JWKS endpoint, so requireAuth verifies them exactly as it verifies
@@ -40,6 +41,8 @@ const { errorHandler } = await import('./routes/errors.js');
 const { mountIntakeParsers } = await import('./routes/intake.js');
 const { initBus } = await import('./domain/bus.js');
 const { substations } = await import('./infra/geo.js');
+const { startIntakeWorker } = await import('./realtime/intakeWorker.js');
+const { intakeStats, closeListener } = await import('./infra/intakeQueue.js');
 
 await migrate();
 // The complaint insert encrypts the phone (repo.addComplaint, pgp_sym_encrypt):
@@ -55,6 +58,8 @@ if ((await db.oneOrNone(`SELECT data_type FROM information_schema.columns WHERE 
 await db.none(readFileSync(new URL('../../db/migrations/safe_decrypt_phone.sql', import.meta.url), 'utf8')); // CREATE OR REPLACE
 await seed({ force: true });
 await initBus();
+// POST /complaints is queued (WP2) and answers 201 once processed: run the queue consumer here, as ROLE=all does.
+const worker = startIntakeWorker({ pollMs: 20 });
 
 let fails = 0, passes = 0;
 const check = (name, ok, extra = '') => {
@@ -194,6 +199,38 @@ const server = app.listen(0, async () => {
     process.env.INTAKE_RATE_LIMIT_PER_MIN = '0';
     check('INTAKE_RATE_LIMIT_PER_MIN=0 turns the limit off', (await call('rl', 'POST', '/complaints', good('rl-off'))).status === 201);
     delete process.env.INTAKE_RATE_LIMIT_PER_MIN;
+
+    // ---- rejected requests never reach the intake queue ----
+    // Role check, rate limit, body limit and validation sit in front of
+    // submitComplaint (api.js), so nothing they reject is enqueued or stored.
+    const queued = () => intakeStats.enqueued + intakeStats.coalesced;
+    const stored = (ids) => db.one('SELECT count(*)::int AS n FROM complaints WHERE external_id = ANY($1)', [ids]);
+    const okBefore = queued();
+    const okRes = await call('cc', 'POST', '/complaints', good('q-ok'));
+    check('an accepted complaint does go through the queue (the counter works)', okRes.status === 201 && queued() === okBefore + 1, `${okRes.status} enqueued +${queued() - okBefore}`);
+    T.rlq = token('rl.queue', ['call_centre_attendant']);
+    let first = null;
+    const rejected = [
+      ['401 no token', () => call(null, 'POST', '/complaints', good('q-401')), 401, 'EXT-WP3-q-401'],
+      ['401 forged token', () => call('forged', 'POST', '/complaints', good('q-forged')), 401, 'EXT-WP3-q-forged'],
+      ['403 field_crew', () => call('crew', 'POST', '/complaints', good('q-403')), 403, 'EXT-WP3-q-403'],
+      ['400 bad category', () => call('op', 'POST', '/complaints', { ...good('q-400'), category: 'Ghosts' }), 400, 'EXT-WP3-q-400'],
+      ['400 malformed JSON', () => call('op', 'POST', '/complaints', null, '{"externalId": "EXT-WP3-q-bad",'), 400, 'EXT-WP3-q-bad'],
+      ['413 70 KB body', () => call('op', 'POST', '/complaints', null, JSON.stringify({ ...good('q-413'), notes: 'x'.repeat(70 * 1024) })), 413, 'EXT-WP3-q-413'],
+      ['429 over the rate limit', () => call('rlq', 'POST', '/complaints', good('q-429')), 429, 'EXT-WP3-q-429'],
+    ];
+    for (const [name, send, want] of rejected) {
+      if (want === 429) { // limit 1 a minute, used up by rl.queue's first (accepted) complaint
+        process.env.INTAKE_RATE_LIMIT_PER_MIN = '1';
+        first = await call('rlq', 'POST', '/complaints', good('q-rl-first'));
+      }
+      const before = queued();
+      const r = await send();
+      check(`${name}: answered ${want}, nothing enqueued`, r.status === want && queued() === before, `${r.status}, enqueued +${queued() - before}`);
+    }
+    delete process.env.INTAKE_RATE_LIMIT_PER_MIN;
+    const leaked = await stored(rejected.map((x) => x[3]));
+    check('no rejected complaint was stored', first?.status === 201 && leaked.n === 0, `first ${first.status}, stored ${leaked.n}`);
   } catch (err) {
     fails++;
     console.log('  [FAIL] threw:', err.stack || err.message);
@@ -201,6 +238,8 @@ const server = app.listen(0, async () => {
     console.log(`\n${passes} passed, ${fails} failed`);
     server.close();
     jwks.close();
+    await worker.stop();
+    await closeListener();
     await db.$pool.end();
     process.exit(fails ? 1 : 0);
   }

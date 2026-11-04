@@ -180,6 +180,84 @@ jobs:
           KAFKA_BROKERS: localhost:9092
         run: node src/selftest-feederkpi.js
 
+      # Burst-safe intake (runbook v2 WP1, G1-G5): one incident per feeder under
+      # concurrent SCADA events and complaints, external_id idempotency, retry,
+      # rollback. Reseeds the database.
+      - name: Run burst-safe intake self-test
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://oms:oms@localhost:5432/oms
+          REDIS_URL: redis://localhost:6379
+        run: node src/selftest-intake.js
+
+      # Durable intake queue (WP2, G6-G8): kill the worker mid-burst of 5,000,
+      # exactly once after restart; poison -> dead letter; depth on /api/health.
+      - name: Run intake queue self-test
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://oms:oms@localhost:5432/oms
+          REDIS_URL: redis://localhost:6379
+        run: node src/selftest-queue.js
+
+      # Worker split (WP4): ROLE=api / worker / all as real processes.
+      - name: Run worker split self-test
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://oms:oms@localhost:5432/oms
+          REDIS_URL: redis://localhost:6379
+        run: node src/selftest-roles.js
+
+      # Load-test fixes (F1-F6): collision-proof alarm ids, SCADA idempotency,
+      # cached health, fail-fast Redis, batched queue, complaint lane.
+      - name: Run load fixes self-test
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://oms:oms@localhost:5432/oms
+          REDIS_URL: redis://localhost:6379
+        run: |
+          node --test src/infra/redisFailFast.test.js
+          node src/selftest-loadfixes.js
+
+      # D1: schema-versioned startup; a restart under load runs no DDL that
+      # deadlocks with inserts, and id counters never rewind.
+      - name: Run startup self-test
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://oms:oms@localhost:5432/oms
+          REDIS_URL: redis://localhost:6379
+        run: node src/selftest-startup.js
+
+      # D2: no silent deletes; duplicates kept in intake_duplicates; 409 on a
+      # dead-lettered item.
+      - name: Run intake verdicts self-test
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://oms:oms@localhost:5432/oms
+          REDIS_URL: redis://localhost:6379
+        run: node src/selftest-verdicts.js
+
+      # D3: 10 s lease with heartbeat and claim token (G13).
+      - name: Run queue lease self-test
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://oms:oms@localhost:5432/oms
+          REDIS_URL: redis://localhost:6379
+        run: node src/selftest-lease.js
+
+      # G10/G11 light: 3 + 3 SIGKILL restarts of the worker and the API at
+      # 200 SCADA/s and 40 complaints/s. Regression test for the restart
+      # deadlock and the qid counter rewind. Fixed ports 4101/4102, sender
+      # capped at 300 in flight, no duration assertions. The full profile
+      # (npm run test:restarts:full, 10 + 10 at 1,000/200) is not run in CI.
+      - name: Run restarts under load self-test (light)
+        working-directory: backend
+        timeout-minutes: 5
+        env:
+          DATABASE_URL: postgres://oms:oms@localhost:5432/oms
+          REDIS_URL: redis://localhost:6379
+          PORT: "4101"
+        run: node src/selftest-restarts.js
+
       # The main self-test again on the same database, now holding planned
       # outages and safety-log rows: seed --force must still reset it.
       - name: Re-run self-test after OMS-01 data exists

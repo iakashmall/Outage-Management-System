@@ -1,6 +1,7 @@
 ﻿import pgPromise from 'pg-promise';
+import { createHash } from 'node:crypto';
 
-const pgp = pgPromise({
+export const pgp = pgPromise({
 });
 
 const connectionString = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:15432/oms';
@@ -27,32 +28,45 @@ export const db = pgp({
   ...Object.fromEntries(Object.entries(optional).filter(([, v]) => v !== undefined)),
 });
 
-export async function syncIdSequences() {
-  // Forward-only: GREATEST() never rewinds a sequence onto live IDs, so calling
-  // this again at any point (e.g. after seed()) can only move a counter forward.
-  await db.none(`
-    DO $$
-    DECLARE target bigint;
-    BEGIN
-      SELECT GREATEST(
-        COALESCE((SELECT MAX((substring(id from '[0-9]+$'))::bigint) FROM incidents
-                   WHERE id ~ '^INC-[0-9]{4}-[0-9]+$'), 0),
-        COALESCE((SELECT last_value FROM pg_sequences
-                   WHERE schemaname = 'public' AND sequencename = 'incident_id_seq'), 0)
-      ) INTO target;
-      IF target < 1 THEN PERFORM setval('incident_id_seq', 1, false);
-      ELSE PERFORM setval('incident_id_seq', target, true); END IF;
+// F6 (load-test findings, 3 Nov 2026): the intake queue consumer runs on its
+// own pool (QUEUE_PG_POOL_MAX, default 8), created only in a process that
+// runs the consumer. `db` above stays the API's pool (PG_POOL_MAX), so a
+// SCADA storm being worked off can never take the connections the
+// dashboard's reads need.
+let workerPool = null;
+export function workerDb() {
+  if (!workerPool) {
+    workerPool = pgp({
+      connectionString,
+      max: envMs('QUEUE_PG_POOL_MAX') ?? 8,
+      idleTimeoutMillis: envMs('PG_IDLE_TIMEOUT_MS') ?? 30000,
+      ...Object.fromEntries(Object.entries(optional).filter(([, v]) => v !== undefined)),
+    });
+  }
+  return workerPool;
+}
 
-      SELECT GREATEST(
-        COALESCE((SELECT MAX((substring(qid from '[0-9]+$'))::bigint) FROM complaints
-                   WHERE qid ~ '^QRY-[0-9]{4}-[0-9]+$'), 0),
-        COALESCE((SELECT last_value FROM pg_sequences
-                   WHERE schemaname = 'public' AND sequencename = 'complaint_qid_seq'), 0)
-      ) INTO target;
-      IF target < 1 THEN PERFORM setval('complaint_qid_seq', 1, false);
-      ELSE PERFORM setval('complaint_qid_seq', target, true); END IF;
-    END $$;
-  `);
+// Moves the ID counters past IDs written by hand (seed, a restored dump), and
+// only forward. D1 (4 Nov 2026): the old version read the counter and then
+// called setval() as two separate steps, so a nextval() another process made in
+// between was rewound and handed out twice (load test section 8.4: a complaint
+// qid reused, the complaint dropped). Now, per sequence, in ONE transaction:
+// ALTER SEQUENCE (a no-op change) takes the lock that every nextval() waits
+// for, the reached value and the table's highest ID are read, and setval() is
+// called only when the table is ahead -- never below what the sequence has
+// already handed out. Only ensureSchema() (on an older schema) and seed() call
+// this; a normal start never does.
+export async function syncIdSequences(cx = db) {
+  const one = (seq, table, col, prefix) => cx.tx(`sync-${seq}`, async (t) => {
+    await t.none(`ALTER SEQUENCE ${seq} INCREMENT BY 1`); // holds nextval() off until commit
+    const s = await t.one(`SELECT last_value::bigint AS v, is_called FROM ${seq}`);
+    const reached = s.is_called ? Number(s.v) : Number(s.v) - 1;
+    const { max } = await t.one(`SELECT COALESCE(MAX((substring(${col} from '[0-9]+$'))::bigint), 0)::bigint AS max
+      FROM ${table} WHERE ${col} ~ '^${prefix}-[0-9]{4}-[0-9]+$'`);
+    if (Number(max) > reached) await t.one(`SELECT setval('${seq}', $1, true)`, [Number(max)]);
+  });
+  await one('incident_id_seq', 'incidents', 'id', 'INC');
+  await one('complaint_qid_seq', 'complaints', 'qid', 'QRY');
 }
 
 // On a fresh server the database container passes its health check, then restarts once after its
@@ -70,9 +84,10 @@ async function waitForDb() {
   }
 }
 
-export async function migrate() {
-  await waitForDb();
-  await db.none(`
+// The schema statements themselves. Runs only from ensureSchema(), on the one
+// connection that holds the schema lock and the short lock_timeout (cx).
+async function runMigrations(cx) {
+  await cx.none(`
     CREATE TABLE IF NOT EXISTS incidents (
       id            TEXT PRIMARY KEY,
       type          TEXT NOT NULL,
@@ -242,7 +257,7 @@ export async function migrate() {
       ts        TIMESTAMPTZ NOT NULL
     );
   `);
-  await db.none(`
+  await cx.none(`
     ALTER TABLE alarms    ADD COLUMN IF NOT EXISTS incident_id TEXT REFERENCES incidents(id);
     -- The role of the login in incident_events.actor (field_crew, oms_operator, ...); null for service names and old rows.
     ALTER TABLE incident_events ADD COLUMN IF NOT EXISTS actor_role TEXT;
@@ -289,7 +304,7 @@ export async function migrate() {
   // against being overwritten by an older, late-arriving backfill batch.
   // No FK to crews(id): a ping can arrive for a crew_id the demo data
   // doesn't recognize.
-  await db.none(`
+  await cx.none(`
     CREATE TABLE IF NOT EXISTS crew_locations (
       id           TEXT PRIMARY KEY,
       crew_id      TEXT NOT NULL,
@@ -329,7 +344,7 @@ export async function migrate() {
   // 'Scheduled') plus a planned_outages row; crew work on it is an ordinary
   // job. work_permits.job_id has no FK on purpose: db/reset-demo.sql deletes
   // every job, and a permit is a safety record that must outlive it.
-  await db.none(`
+  await cx.none(`
     CREATE TABLE IF NOT EXISTS planned_outages (
       id                  TEXT PRIMARY KEY,
       incident_id         TEXT UNIQUE NOT NULL REFERENCES incidents(id),
@@ -501,7 +516,7 @@ export async function migrate() {
   // status. aor = substation names (the incidents.substation strings); NULL
   // or empty means unrestricted. Proposals and reassignments use nanoid ids,
   // so there is no new sequence to keep in step with seeded rows.
-  await db.none(`
+  await cx.none(`
     ALTER TABLE crews ADD COLUMN IF NOT EXISTS capacity NUMERIC NOT NULL DEFAULT 4,
       ADD COLUMN IF NOT EXISTS on_shift BOOLEAN NOT NULL DEFAULT true,
       ADD COLUMN IF NOT EXISTS aor TEXT[];
@@ -570,7 +585,7 @@ export async function migrate() {
   // this column existed are backfilled best effort: the rebalancer's
   // "Reassigned from"/"Unassigned from" notes and assignment rows are
   // 'dispatch', everything else is taken as 'crew'.
-  await db.none(`
+  await cx.none(`
     ALTER TABLE job_updates ADD COLUMN IF NOT EXISTS source TEXT;
     UPDATE job_updates SET source = CASE
       WHEN note LIKE 'Reassigned from %' OR note LIKE 'Unassigned from %' OR note LIKE 'Assigned to %' THEN 'dispatch'
@@ -709,7 +724,7 @@ export async function migrate() {
   // ID sequences for incidents.id / complaints.qid. These replace the old
   // SELECT COUNT(*) minting in repo.js, which raced under concurrency and
   // crashed the process on the resulting duplicate-key error (P8.6).
-  await db.none(`
+  await cx.none(`
     CREATE SEQUENCE IF NOT EXISTS incident_id_seq   AS bigint MINVALUE 1;
     CREATE SEQUENCE IF NOT EXISTS complaint_qid_seq AS bigint MINVALUE 1;
   `);
@@ -719,14 +734,14 @@ export async function migrate() {
   // the counter at 1 on a brand-new database, so the first real incident got an
   // ID that already existed -> duplicate key -> HTTP 500 (this is what turned
   // CI red: its database is always brand new). seed() now calls
-  // syncIdSequences() again after its inserts; this call keeps a production
-  // database (no seed step) self-bootstrapping on migrate() alone.
-  await syncIdSequences();
+  // syncIdSequences() again after its inserts. ensureSchema() syncs the
+  // counters at the end of the same locked step (D1, 4 Nov 2026), so a
+  // production database (no seed step) still bootstraps on migrate() alone.
 
-  const postgis = await db.oneOrNone(
+  const postgis = await cx.oneOrNone(
     "SELECT 1 FROM pg_extension WHERE extname = 'postgis'"
   );
-  if (postgis) await db.none(`
+  if (postgis) await cx.none(`
     ALTER TABLE incidents ADD COLUMN IF NOT EXISTS geog public.geography(Point, 4326);
     ALTER TABLE crews     ADD COLUMN IF NOT EXISTS geog public.geography(Point, 4326);
     ALTER TABLE complaints ADD COLUMN IF NOT EXISTS geog public.geography(Point, 4326);
@@ -770,7 +785,7 @@ export async function migrate() {
   // as soon as network.* exists -- network_topology_schema.sql is a separate,
   // manual migration, so a database without it (CI, a fresh install) still
   // migrates, and gets the FK on the first boot after it is applied.
-  await db.none(`
+  await cx.none(`
     ALTER TABLE incidents ADD COLUMN IF NOT EXISTS tripped_equipment_id BIGINT;
     DO $$
     BEGIN
@@ -782,6 +797,133 @@ export async function migrate() {
     END $$;
     CREATE INDEX IF NOT EXISTS idx_incidents_tripped_equipment ON incidents (tripped_equipment_id);
   `);
+  await migrateIntake(cx);
   const { migrateFeederKpi } = await import('./feederKpiSchema.js');
-  await migrateFeederKpi();
+  await migrateFeederKpi(cx);
+}
+
+// Burst-safe intake (runbook v2 WP1). Idempotent: safe on every boot.
+// complaints.external_id becomes unique (partial: NULL stays allowed). An
+// existing database that already holds duplicate external ids is NOT changed
+// (no rows are deleted or renamed): the unique index is skipped with a
+// warning and a plain index is made instead. Intake stays idempotent through
+// the external-id advisory lock and lookup (realtime/complaintIntake.js); the
+// warning stays until someone resolves the duplicates by hand.
+// Indexes for the scope lookups (D2) are added too.
+async function migrateIntake(cx) {
+  const r = await cx.one(`
+    SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'complaints_external_id_key') AS has_unique,
+           (SELECT count(*) FROM (SELECT external_id FROM complaints WHERE external_id IS NOT NULL
+              GROUP BY external_id HAVING count(*) > 1) d)::int AS dup_ids`);
+  if (!r.has_unique) {
+    if (r.dup_ids === 0) {
+      await cx.none('CREATE UNIQUE INDEX IF NOT EXISTS complaints_external_id_key ON complaints (external_id) WHERE external_id IS NOT NULL');
+      await cx.none('DROP INDEX IF EXISTS idx_complaints_external_id');
+    } else {
+      console.warn(`[migrate] WARNING: ${r.dup_ids} external_id value(s) appear on more than one complaint; `
+        + 'unique index complaints_external_id_key NOT created (no data changed). New complaints are still deduplicated by external id.');
+      await cx.none('CREATE INDEX IF NOT EXISTS idx_complaints_external_id ON complaints (external_id)');
+    }
+  }
+  // Merge candidates are the open incidents of the last 4 hours (repo.activeIncidentsInScope).
+  await cx.none(`
+    CREATE INDEX IF NOT EXISTS idx_incidents_open_opened_at ON incidents (opened_at DESC)
+      WHERE status NOT IN ('resolved','closed','cancelled');
+  `);
+  // Canonical feeder / substation identity for the D2 merge rule (G9).
+  const { migrateNetworkIdentity } = await import('./networkIdentity.js');
+  await migrateNetworkIdentity(cx);
+  // pgcrypto, safe_decrypt_text and the encrypted phone column, which used
+  // to need the manual db/migrations files.
+  const { migrateComplaintPhones } = await import('./complaintPhones.js');
+  await migrateComplaintPhones(cx);
+  // The durable intake queue and its dead-letter table (WP2).
+  const { migrateIntakeQueue } = await import('./intakeQueue.js');
+  await migrateIntakeQueue(cx);
+  // Cross-process bus relay for ROLE=api / ROLE=worker (WP4).
+  const { migrateBusRelay } = await import('./busRelay.js');
+  await migrateBusRelay(cx);
+}
+
+// ---- D1 (4 Nov 2026): a schema version, so a normal start runs no DDL ----
+// Load test section 8.2: every process ran all of the DDL above at start.
+// The DDL takes table locks even when it changes nothing, and under traffic
+// it deadlocked with the API's inserts; the restarted worker then never
+// started. Now:
+//   - the expected version is a hash of the migration code itself (every
+//     function below that issues schema statements) plus the inputs that
+//     change what it does (PostGIS / TimescaleDB present, ENCRYPTION_KEY set),
+//     so any change to the migrations makes the version "older" with no
+//     hand-kept number to forget;
+//   - version current (the normal start): no DDL, no setval, no lock;
+//   - version older or missing: ONE advisory lock (41000, 1), then on that same
+//     connection a short lock_timeout (MIGRATION_LOCK_TIMEOUT_MS, default
+//     2000), the DDL, the counter sync, and the new version row. A lock wait
+//     longer than that fails the step instead of queueing the API's traffic
+//     behind it; the caller retries with a delay (index.js).
+// refreshNetworkIdentity() (data, not schema: it rebuilds feeder_identity
+// under its own lock) still runs on every start, as before.
+async function migrationSources() {
+  const mods = await Promise.all(['./feederKpiSchema.js', './networkIdentity.js', './complaintPhones.js', './intakeQueue.js', './busRelay.js']
+    .map((m) => import(m)));
+  const [kpi, net, phones, queue, relay] = mods;
+  return [runMigrations, migrateIntake, syncIdSequences, kpi.migrateFeederKpi, net.migrateNetworkIdentity,
+    phones.migrateComplaintPhones, queue.migrateIntakeQueue, relay.migrateBusRelay].map((f) => f.toString()).join('\n');
+}
+
+export async function expectedSchemaVersion(cx = db) {
+  const ext = await cx.one(`SELECT
+      EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'postgis') AS postgis,
+      EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') AS timescaledb`);
+  const inputs = `postgis=${ext.postgis};timescaledb=${ext.timescaledb};enc=${!!process.env.ENCRYPTION_KEY}`;
+  return createHash('sha256').update(await migrationSources()).update(inputs).digest('hex').slice(0, 24);
+}
+
+export async function currentSchemaVersion(cx = db) {
+  const { exists } = await cx.one("SELECT to_regclass('public.oms_schema_version') IS NOT NULL AS exists");
+  if (!exists) return null;
+  return (await cx.oneOrNone('SELECT version FROM oms_schema_version WHERE id = 1'))?.version ?? null;
+}
+
+export async function ensureSchema({ lockTimeoutMs = envMs('MIGRATION_LOCK_TIMEOUT_MS') ?? 2000, log = console.log } = {}) {
+  await waitForDb();
+  const want = await expectedSchemaVersion();
+  const have = await currentSchemaVersion();
+  let out;
+  if (have === want) {
+    out = { migrated: false, version: want };
+  } else {
+    out = await db.task('schema-migration', async (t) => {
+      await t.one('SELECT pg_advisory_lock(41000, 1)'); // waits for another process's migration
+      try {
+        const now = await currentSchemaVersion(t);
+        if (now === want) return { migrated: false, version: want, waitedForOther: true };
+        await t.none(`SET lock_timeout = ${Math.max(100, Number(lockTimeoutMs) || 2000)}`);
+        const t0 = Date.now();
+        await runMigrations(t);
+        await syncIdSequences(t);
+        await t.none(`
+          CREATE TABLE IF NOT EXISTS oms_schema_version (
+            id INTEGER PRIMARY KEY CHECK (id = 1), version TEXT NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT now());
+          INSERT INTO oms_schema_version (id, version) VALUES (1, $1)
+            ON CONFLICT (id) DO UPDATE SET version = EXCLUDED.version, applied_at = now();`, [want]);
+        return { migrated: true, version: want, from: now, ms: Date.now() - t0 };
+      } finally {
+        await t.none('RESET lock_timeout').catch(() => {});
+        await t.one('SELECT pg_advisory_unlock(41000, 1)').catch(() => {});
+      }
+    });
+  }
+  const { refreshNetworkIdentity } = await import('./networkIdentity.js');
+  await refreshNetworkIdentity();
+  log(out.migrated
+    ? `[schema] migrated ${out.from || '(none)'} -> ${out.version} in ${out.ms} ms`
+    : `[schema] version ${out.version} is current: no DDL${out.waitedForOther ? ' (another process migrated it)' : ''}`);
+  return out;
+}
+
+// Kept for every existing caller (seed(), the selftests, the tools): the
+// version-gated step above.
+export async function migrate() {
+  return ensureSchema();
 }

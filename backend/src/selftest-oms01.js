@@ -16,6 +16,7 @@ import * as rules from './domain/plannedOutage.js';
 import { draftFromTrace } from './domain/switchingPlan.js';
 import { clientTime } from './domain/clientTime.js';
 import { handleScadaEvent, _resetDedupState } from './realtime/scada.js';
+import { startIntakeWorker } from './realtime/intakeWorker.js';
 import { publishRestoration } from './realtime/restoration.js';
 import { sendDueNotices } from './realtime/plannedNotices.js';
 import { startNotifier, transport, maskEmail } from './realtime/notifier.js';
@@ -57,6 +58,7 @@ import * as crewApp from '../../src/lib/plannedOutage.js';
 await migrate();
 await seed();
 await initBus();
+startIntakeWorker({ pollMs: 50 }); // WP2: POST /complaints is processed from the intake queue
 
 let fails = 0, passes = 0;
 const check = (name, ok, extra = '') => {
@@ -497,7 +499,9 @@ const server = app.listen(PORT, async () => {
       const pcSteps = (await repo.plannedOutage(pc.id)).steps;
       await call('op', 'POST', `/switching-steps/${pcSteps[0].id}/confirm`, { clientConfirmationId: 'pc-1' });
       const nInc = async () => (await repo.incidents()).length;
-      const complain = (category, dt) => call('op', 'POST', '/complaints', { category, lat: dt.lat, lon: dt.lon, customer: 'F1 test', phone: '9000000001', externalId: `EXT-F1-${category}` });
+      // externalId is unique per complaint (WP1: a repeated externalId is the SAME complaint, answered as a duplicate)
+      let nComplaint = 0;
+      const complain = (category, dt) => call('op', 'POST', '/complaints', { category, lat: dt.lat, lon: dt.lon, customer: 'F1 test', phone: '9000000001', externalId: `EXT-F1-${category}-${++nComplaint}` });
       let before = await nInc();
       r = await complain('No Supply', dtA);
       check('No Supply on the planned feeder -> linked to the planned outage, no fault incident',

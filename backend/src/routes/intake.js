@@ -60,6 +60,13 @@ export function validateComplaint(b) {
     || (!present(b.lat) && !(typeof b.address === 'string' && b.address.trim()) ? 'lat/lon or address is required' : null);
 }
 
+// An id the sender may give as a string or a number, at most 128 characters.
+function optIdString(b, k) {
+  if (!present(b[k])) return null;
+  if (typeof b[k] === 'number' && Number.isFinite(b[k])) return null;
+  return optString(b, k, 128);
+}
+
 // POST /scada/fault and /scada/simulate (state changes and alarms only, runbook D3).
 export function validateScadaEvent(b) {
   if (!isObject(b)) return 'body must be a JSON object';
@@ -67,8 +74,10 @@ export function validateScadaEvent(b) {
   if (b.tag.length > 128) return 'tag must be at most 128 characters';
   if (present(b.event) && !SCADA_EVENTS.includes(b.event)) return "event must be 'trip' or 'reclose'";
   if (present(b.customers) && !(Number.isInteger(b.customers) && b.customers >= 0 && b.customers <= 1_000_000)) return 'customers must be a whole number from 0 to 1000000';
+  // eventId / external_id / sourceTs / ts: the event's idempotency key (F2, infra/ids.js)
   return optString(b, 'condition', 32) || optString(b, 'limit_val', 32) || optString(b, 'feeder', 128)
-    || optString(b, 'substation', 200) || optString(b, 'cim_mrid', 128) || optCoords(b);
+    || optString(b, 'substation', 200) || optString(b, 'cim_mrid', 128) || optCoords(b)
+    || optIdString(b, 'eventId') || optIdString(b, 'external_id') || optString(b, 'sourceTs', 64) || optString(b, 'ts', 64);
 }
 
 // POST /calls keeps its own required-field checks in api.js; this caps the sizes and types.

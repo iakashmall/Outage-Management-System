@@ -9,7 +9,9 @@
     "dev": "node --watch src/index.js",
     "seed": "node src/infra/seed.js",
     "seed:oms03": "node src/infra/seed.js --force --scenario=oms03",
-    "test": "node --test src/domain/rebalance.test.js src/domain/indices.test.js src/domain/geofence.test.js src/domain/photos.test.js src/domain/standardReports.test.js src/domain/reportBuilder.test.js src/domain/uptime.test.js src/domain/topology.test.js src/infra/importHaridwarInferred.test.js src/routes/errors.test.js src/routes/intake.test.js src/infra/redisTag.test.js && node src/selftest.js && node src/selftest-oms01.js && node src/selftest-oms03.js && node src/selftest-audit-actor.js && node src/selftest-jobs.js && node src/selftest-workorders.js && node src/selftest-crewfeatures.js && node src/selftest-topology.js && node src/selftest-haridwar-import.js && node src/selftest-pool.js && node src/selftest-intake-hardening.js",
+    "test": "node --test src/domain/rebalance.test.js src/domain/indices.test.js src/domain/geofence.test.js src/domain/photos.test.js src/domain/standardReports.test.js src/domain/reportBuilder.test.js src/domain/uptime.test.js src/domain/topology.test.js src/infra/importHaridwarInferred.test.js src/routes/errors.test.js src/routes/intake.test.js src/infra/redisTag.test.js src/infra/redisFailFast.test.js && node src/selftest.js && node src/selftest-oms01.js && node src/selftest-oms03.js && node src/selftest-audit-actor.js && node src/selftest-jobs.js && node src/selftest-workorders.js && node src/selftest-crewfeatures.js && node src/selftest-topology.js && node src/selftest-haridwar-import.js && node src/selftest-pool.js && node src/selftest-intake-hardening.js && node src/selftest-intake.js && node src/selftest-queue.js && node src/selftest-roles.js && node src/selftest-loadfixes.js && node src/selftest-startup.js && node src/selftest-verdicts.js && node src/selftest-lease.js && node src/selftest-restarts.js",
+    "test:restarts": "node src/selftest-restarts.js",
+    "test:restarts:full": "node src/selftest-restarts.js --full",
     "test:intake-hardening": "node --test src/routes/intake.test.js && node src/selftest-intake-hardening.js",
     "test:oms01": "node src/selftest-oms01.js",
     "test:workorders": "node src/selftest-workorders.js",
@@ -18,6 +20,10 @@
     "test:topology": "node src/selftest-topology.js",
     "test:haridwar-import": "node src/selftest-haridwar-import.js",
     "test:pool": "node src/selftest-pool.js",
+    "test:intake": "node src/selftest-intake.js",
+    "test:queue": "node src/selftest-queue.js",
+    "test:roles": "node src/selftest-roles.js",
+    "test:loadfixes": "node --test src/infra/redisFailFast.test.js && node src/selftest-loadfixes.js",
     "test:oms03": "node --test src/domain/rebalance.test.js",
     "test:oms03:db": "node src/selftest-oms03.js",
     "test:audit-actor": "node src/selftest-audit-actor.js",
@@ -57,5 +63,4 @@
   "devDependencies": {
     "osm-pbf-parser": "^2.3.0"
   }
-  
 }

@@ -1,6 +1,7 @@
 import { repo } from '../infra/repo.js';
 import { bus, TOPICS } from '../domain/bus.js';
 import { nanoid } from 'nanoid';
+import { newAlarmId } from '../infra/ids.js';
 import { substations as netSubstations } from '../infra/geo.js';
 import { CALL_CATEGORIES } from '../domain/callState.js';
 
@@ -33,7 +34,7 @@ export function startSimulator() {
       const cond = conds[Math.floor(Math.random() * conds.length)];
       const s = netSubstations[Math.floor(Math.random() * netSubstations.length)] || { lat: 29.95, lon: 78.13 };
       const a = await repo.createAlarm({
-        id: 'ALM-' + nanoid(5), tag: TAGS[Math.floor(Math.random() * TAGS.length)],
+        id: newAlarmId(), tag: TAGS[Math.floor(Math.random() * TAGS.length)],
         condition: cond, limit_val: cond === 'CRITICAL' ? 'TRIP' : '95A',
         priority: cond === 'CRITICAL' ? 1 : cond === 'MAJOR' ? 2 : 3,
         message: `${cond} condition detected on field device`, ts: new Date().toISOString(), ack: 0,
