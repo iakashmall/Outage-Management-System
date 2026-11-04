@@ -115,7 +115,7 @@ at rest (`ENCRYPTION_KEY`), sequence-based ID generation, network topology schem
 `INTAKE_RATE_LIMIT_PER_MIN`, `SCADA_RATE_LIMIT_PER_MIN`, `ROLE`, `INTAKE_SYNC_WAIT_MS`, `INTAKE_COALESCE`,
 `INTAKE_RETRY_ATTEMPTS`, `INTAKE_RETRY_BASE_MS`, `QUEUE_CONCURRENCY`, `QUEUE_POLL_MS`, `QUEUE_LEASE_MS`, `QUEUE_MAX_ATTEMPTS`,
 `QUEUE_BACKOFF_BASE_MS`, `QUEUE_BACKOFF_MAX_MS`, `JOB_LOCK_RETRY_MS`, `HEALTH_QUEUE_TIMEOUT_MS`, `HEALTH_REFRESH_MS`,
-`QUEUE_PG_POOL_MAX`, `QUEUE_COMPLAINT_CONCURRENCY`, `QUEUE_BATCH_MAX`, `SCADA_BATCH_MAX`, `SCADA_BATCH_WAIT_MS`,
+`QUEUE_PG_POOL_MAX`, `QUEUE_COMPLAINT_CONCURRENCY`, `QUEUE_BATCH_MAX`, `QUEUE_CLAIM_SCAN`, `QUEUE_GROUP_MAX`, `SCADA_BATCH_MAX`, `SCADA_BATCH_WAIT_MS`,
 `REDIS_COMMAND_TIMEOUT_MS`, `REDIS_CONNECT_TIMEOUT_MS`, `PG_POOL_MAX`, `PG_CONNECT_TIMEOUT_MS`, `PG_STATEMENT_TIMEOUT_MS`,
 `PG_IDLE_TX_TIMEOUT_MS`, `PG_IDLE_TIMEOUT_MS`, `DB_WAIT_S`,
 `MOMENTARY_MAX_MIN`, `CUSTOMERS_SERVED`, `CUSTOMERS_SERVED_CONFIRMED`, `ENCRYPTION_KEY`, `TILES_DIR`, `MAP_SERVER_URL`, `MAP_API_KEY`. The backend reads `backend/.env` (git-ignored). The seed script does not load it: run it with `node --env-file=.env`.
@@ -129,6 +129,8 @@ at rest (`ENCRYPTION_KEY`), sequence-based ID generation, network topology schem
 | `QUEUE_CONCURRENCY` | 4 | *(changed meaning)* SCADA-lane worker loops (every kind except complaints), capped by the consumer pool |
 | `QUEUE_COMPLAINT_CONCURRENCY` | 2 | complaint-lane worker loops; complaints never wait behind SCADA items |
 | `QUEUE_BATCH_MAX` | 200 | items one SCADA-lane loop claims at once; trips of one feeder run in one transaction |
+| `QUEUE_CLAIM_SCAN` | 10 × `QUEUE_BATCH_MAX` | oldest claimable items a claim looks at; it claims whole feeder groups out of them, oldest group first (4 Nov 2026) |
+| `QUEUE_GROUP_MAX` | 50 | most items of one feeder group in one claim |
 | `SCADA_BATCH_MAX` | 500 | `POST /scada/fault` requests written in one transaction |
 | `SCADA_BATCH_WAIT_MS` | 5 | how long a write batch waits to fill before it is written |
 | `HEALTH_REFRESH_MS` | 2000 | refresh interval of the cached queue figures `/api/health` answers with |

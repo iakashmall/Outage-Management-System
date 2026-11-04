@@ -96,7 +96,9 @@ Intake throughput, read protection and fail-fast settings (load-test fixes F3 to
 | `QUEUE_PG_POOL_MAX` | `8` | size of the intake consumer's own pool, created only in a process that runs the consumer (`ROLE=worker` or `all`); it also takes `PG_CONNECT_TIMEOUT_MS`, `PG_STATEMENT_TIMEOUT_MS`, `PG_IDLE_TX_TIMEOUT_MS` and `PG_IDLE_TIMEOUT_MS` |
 | `QUEUE_CONCURRENCY` | `4` | *(changed meaning)* worker loops in the SCADA lane (every queued kind except complaints); each loop claims up to `QUEUE_BATCH_MAX` items at a time. Capped by the pool, see below |
 | `QUEUE_COMPLAINT_CONCURRENCY` | `2` | worker loops in the complaint lane, which claims only complaints, one at a time, so a complaint never waits behind a SCADA backlog |
-| `QUEUE_BATCH_MAX` | `200` | queue items one SCADA-lane loop claims at once (only the oldest item of each SCADA tag is ever claimed); claimed trips of the same feeder are processed in one transaction |
+| `QUEUE_BATCH_MAX` | `200` | queue items one SCADA-lane loop claims at once (only the oldest item of each SCADA tag is ever claimed); claimed trips of the same feeder are processed in one transaction. A claim takes whole feeder groups, see the next two rows |
+| `QUEUE_CLAIM_SCAN` | `10 × QUEUE_BATCH_MAX` | oldest claimable SCADA-lane items one claim looks at; they are grouped by the feeder the event names (its `feeder` field, else the first two tag tokens) and whole groups are claimed, the group with the oldest item first. Never below `QUEUE_BATCH_MAX` |
+| `QUEUE_GROUP_MAX` | `50` | most items of one feeder group in one claim |
 | `SCADA_BATCH_MAX` | `500` | `POST /scada/fault` requests written in one transaction (alarm rows, queue items and audit rows as multi-row inserts) |
 | `SCADA_BATCH_WAIT_MS` | `5` | how long the first request of a write batch waits for others before the batch is written |
 | `HEALTH_REFRESH_MS` | `2000` | how often a background read refreshes the queue figures that `/api/health` answers with; the endpoint itself never waits on Postgres or Redis |

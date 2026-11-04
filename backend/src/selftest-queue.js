@@ -258,6 +258,57 @@ try {
     server.closeAllConnections();
     await new Promise((res) => server.close(res));
   }
+
+  // Feeder-group claim, worst case (4 Nov 2026): 257 feeders, every event on
+  // its own tag, plus tags that carry an ordered trip/reclose/trip sequence.
+  // A recording handler stands in for SCADA so the test measures only the claim.
+  {
+    await db.none('DELETE FROM intake_queue');
+    const FEEDERS = 257, PER = 8, ORDERED = 20;
+    const fdr = (i) => `GQ-F${String(i).padStart(3, '0')}`;
+    const seen = new Map(); const order = new Map(); const groupSizes = [];
+    const record = (p) => {
+      seen.set(p.tag, (seen.get(p.tag) || 0) + 1);
+      if (p.seq) { if (!order.has(p.tag)) order.set(p.tag, []); order.get(p.tag).push(p.seq); }
+    };
+    let total = 0;
+    for (let k = 0; k < FEEDERS * PER; k += 200) {
+      await Promise.all(Array.from({ length: Math.min(200, FEEDERS * PER - k) }, (_, j) => {
+        const i = k + j, tag = `GQ.${fdr(i % FEEDERS)}.E${i}`;
+        return enqueue('gqtest', { tag, feeder: fdr(i % FEEDERS) }, { orderKey: `tag:${tag}` });
+      }));
+      total += Math.min(200, FEEDERS * PER - k);
+    }
+    for (let s = 1; s <= 3; s++) { // seq 1, 2, 3 on each ordered tag, interleaved across tags
+      for (let o = 0; o < ORDERED; o++) {
+        const tag = `GQ.${fdr(o * 13 % FEEDERS)}.ORD${o}`;
+        await enqueue('gqtest', { tag, feeder: fdr(o * 13 % FEEDERS), seq: s }, { orderKey: `tag:${tag}` });
+        total++;
+      }
+    }
+    const { startIntakeConsumer } = await import('./infra/intakeQueue.js');
+    const consumer = startIntakeConsumer(
+      { gqtest: async (p) => { record(p); return { effects: [] }; } },
+      { batchMax: 200, pollMs: 20, batchHandlers: { gqtest: {
+        canBatch: () => true, groupKey: (p) => p.feeder,
+        run: async (ps) => { groupSizes.push(ps.length); ps.forEach(record); return { effects: [] }; } } } });
+    const t0 = Date.now();
+    const drained = await waitUntil(async () => (await queueStats()).depth === 0, 120000, 50);
+    const ms = Date.now() - t0;
+    await consumer.stop();
+    const counts = [...seen.values()];
+    const grouped = groupSizes.reduce((a, b) => a + b, 0);
+    check(`feeder-group claim: ${total} items on ${FEEDERS} feeders (every event its own tag) drained, each processed exactly once`,
+      drained && seen.size === FEEDERS * PER + ORDERED && counts.every((c) => c === 1 || c === 3) && counts.reduce((a, b) => a + b, 0) === total,
+      `(drained=${drained} in ${ms} ms, ${seen.size} tags, ${counts.reduce((a, b) => a + b, 0)} runs)`);
+    const ordOk = [...order.values()].length === ORDERED && [...order.values()].every((v) => v.join() === '1,2,3');
+    check('feeder-group claim: trip/reclose/trip order kept on all 20 ordered tags', ordOk,
+      `(${[...order.entries()].filter(([, v]) => v.join() !== '1,2,3').map(([t, v]) => `${t}:${v}`).join(' ') || 'all 1,2,3'})`);
+    const avg = groupSizes.length ? grouped / groupSizes.length : 0;
+    check('feeder-group claim: claims of 200 bring whole feeder groups (>= 90% of items in groups, average group >= 4)',
+      grouped >= 0.9 * total && avg >= 4,
+      `(${(100 * grouped / total).toFixed(1)}% in ${groupSizes.length} groups, average ${avg.toFixed(2)}, largest ${Math.max(0, ...groupSizes)})`);
+  }
 } catch (e) {
   fails++;
   console.log('  [FAIL] unexpected error', e.stack);

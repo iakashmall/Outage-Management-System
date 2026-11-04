@@ -202,9 +202,22 @@ export async function closeListener() {
 //   - complaints: QUEUE_COMPLAINT_CONCURRENCY loops (2) that claim only
 //     complaints, so a complaint never waits behind a SCADA backlog;
 //   - everything else: QUEUE_CONCURRENCY loops (4), each claiming up to
-//     QUEUE_BATCH_MAX (200) queue heads at once.
+//     QUEUE_BATCH_MAX (200) queue heads at once, by feeder group (below).
 // Ordering is unchanged: only the head of each order_key (a SCADA tag) is
 // ever claimed, so at most one item per tag is in flight.
+//
+// Feeder-group claim (worst case 4 Nov 2026: 257 feeders, every event on its
+// own tag): taking the 200 oldest heads hit ~200 different feeders, so almost
+// every item ran in a transaction of its own (257 items/s; a 60 s storm at
+// 1,000/s needed 174 s to drain). The main lane now looks at the oldest
+// QUEUE_CLAIM_SCAN heads (default 10 x QUEUE_BATCH_MAX), groups them by the
+// feeder the payload names (payload.feeder, else the first two tag tokens --
+// the same rule as scada.js locateFromEvent; anything else is its own group),
+// and claims whole groups, the groups with the oldest head first, up to
+// QUEUE_GROUP_MAX (50) items per group and QUEUE_BATCH_MAX in all. The SQL
+// grouping only decides what is claimed together: processClaimed still
+// groups on the handler's exact key, and order/exactly-once rest on the
+// head rule and the per-transaction DELETE as before.
 const stats = { groups: 0, groupedItems: 0 };
 export const consumerStats = () => ({ ...stats });
 
@@ -213,8 +226,10 @@ export function startIntakeConsumer(handlers, opts = {}) {
     ...queueConfig(),
     complaintConcurrency: envInt('QUEUE_COMPLAINT_CONCURRENCY', 2),
     batchMax: envInt('QUEUE_BATCH_MAX', 200),
+    groupMax: envInt('QUEUE_GROUP_MAX', 50),
     ...opts,
   };
+  cfg.claimScan = Math.max(cfg.batchMax, opts.claimScan || envInt('QUEUE_CLAIM_SCAN', cfg.batchMax * 10));
   const pool = cfg.db || workerDb();
   const batchHandlers = cfg.batchHandlers || {};
   // Each loop holds one connection for its transaction; leave the pool room.
@@ -235,7 +250,8 @@ export function startIntakeConsumer(handlers, opts = {}) {
   const lease = String(cfg.leaseMs);
   const laneFilter = { complaint: "q.kind = 'complaint'", main: "q.kind <> 'complaint'" };
   // lane 'complaint': complaints only; lane 'main': everything else.
-  const claim = (lane, limit) => pool.any(`
+  const claim = (lane, limit) => (lane === 'main' ? claimGroups(limit) : claimHeads(lane, limit));
+  const claimHeads = (lane, limit) => pool.any(`
     UPDATE intake_queue u SET attempts = u.attempts + 1, available_at = now() + ($1 || ' milliseconds')::interval
     FROM (
       SELECT q.id FROM intake_queue q
@@ -248,6 +264,35 @@ export function startIntakeConsumer(handlers, opts = {}) {
       LIMIT $2) c
     WHERE u.id = c.id
     RETURNING u.id, u.kind, u.payload, u.order_key, u.attempts, u.last_error`, [lease, limit]);
+  // Main lane: whole feeder groups out of the oldest claimScan heads (see the
+  // comment above startIntakeConsumer). The lock step re-checks the lane and
+  // available_at on the current row, so an item another loop claimed between
+  // our snapshot and our lock is skipped, as with claimHeads.
+  const claimGroups = (limit) => pool.any(`
+    WITH heads AS (
+      SELECT q.id, q.kind || '|' || COALESCE(
+               NULLIF(q.payload->>'feeder', ''),
+               substring(q.payload->>'tag' from '^[^.]+\\.[^.]+'),
+               'item:' || q.id::text) AS g
+      FROM intake_queue q
+      WHERE ${laneFilter.main}
+        AND q.available_at <= now()
+        AND (q.order_key IS NULL OR NOT EXISTS (
+              SELECT 1 FROM intake_queue p WHERE p.order_key = q.order_key AND p.id < q.id))
+      ORDER BY q.id
+      LIMIT $3),
+    ranked AS (
+      SELECT id, row_number() OVER (PARTITION BY g ORDER BY id) AS rn, min(id) OVER (PARTITION BY g) AS g0 FROM heads),
+    pick AS (
+      SELECT id FROM ranked WHERE rn <= $4 ORDER BY g0, rn LIMIT $2),
+    c AS (
+      SELECT q.id FROM intake_queue q
+      WHERE q.id IN (SELECT id FROM pick) AND ${laneFilter.main} AND q.available_at <= now()
+      FOR UPDATE SKIP LOCKED)
+    UPDATE intake_queue u SET attempts = u.attempts + 1, available_at = now() + ($1 || ' milliseconds')::interval
+    FROM c
+    WHERE u.id = c.id
+    RETURNING u.id, u.kind, u.payload, u.order_key, u.attempts, u.last_error`, [lease, limit, cfg.claimScan, cfg.groupMax]);
 
   const deadLetter = (id, reason) => pool.tx(async (t) => {
     await t.none(`INSERT INTO intake_dead_letter (id, kind, payload, order_key, attempts, last_error, created_at)
@@ -366,7 +411,7 @@ export function startIntakeConsumer(handlers, opts = {}) {
     ...Array.from({ length: complaintLoops }, (_, i) => loop('complaint', i + 1)),
     ...Array.from({ length: mainLoops }, (_, i) => loop('main', i + 1)),
   ];
-  console.log(`[queue] intake consumer started: ${mainLoops} worker(s) + ${complaintLoops} complaint-lane worker(s), batch ${cfg.batchMax}, own pool of ${poolMax}, lease ${cfg.leaseMs} ms, max ${cfg.maxAttempts} attempts`);
+  console.log(`[queue] intake consumer started: ${mainLoops} worker(s) + ${complaintLoops} complaint-lane worker(s), batch ${cfg.batchMax} (feeder groups of up to ${cfg.groupMax} from the oldest ${cfg.claimScan} heads), own pool of ${poolMax}, lease ${cfg.leaseMs} ms, max ${cfg.maxAttempts} attempts`);
   return {
     async stop() { running = false; local.delete(wake); wake(); await Promise.all(loops); },
   };

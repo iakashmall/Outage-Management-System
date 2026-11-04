@@ -270,16 +270,19 @@ function startChildApi(port, crash) {
   check('F6: a complaint is processed in under 2 s while a SCADA backlog is being worked off',
     r.status === 201 && complaintMs < 2000 && depthAfter > 1000,
     `(${r.status} in ${complaintMs} ms; SCADA backlog ${depthBefore} -> ${depthAfter})`);
+  // Only reads that finish while a backlog is still there count (since the
+  // feeder-group claim of 4 Nov the 20,000 items can drain before 40 reads).
   const reads = [];
   for (let i = 0; i < 40; i++) {
     const t = performance.now();
     await fetch(base + '/incidents'); await fetch(base + '/indicators');
-    reads.push(performance.now() - t);
+    const ms = performance.now() - t;
+    if ((await queueStats()).depth === 0) break;
+    reads.push(ms);
     await sleep(50);
   }
-  const depthEnd = (await queueStats()).depth;
-  check('F6: dashboard reads (GET /incidents + /indicators) during the drain: p95 under 1 s',
-    p95(reads) < 1000 && depthEnd > 0, `(p95 ${Math.round(p95(reads))} ms, max ${Math.round(Math.max(...reads))} ms, backlog still ${depthEnd})`);
+  check('F6: dashboard reads (GET /incidents + /indicators) during the drain: p95 under 1 s (at least 10 reads under backlog)',
+    reads.length >= 10 && p95(reads) < 1000, `(${reads.length} reads under backlog, p95 ${Math.round(p95(reads))} ms, max ${Math.round(Math.max(0, ...reads))} ms)`);
   await waitUntil(async () => (await queueStats()).depth === 0, 300000, 500);
   await worker.stop();
 }
