@@ -15,6 +15,14 @@ export const RESTORED_CHOICES = [
 const COMPLETED = ["Work Complete", "Work Finished"];
 export const isCompleted = (job) => !!job && COMPLETED.includes(job.status);
 
+// The crew finished a fault job but the control room has not verified it yet
+// (its incident is still Pending Verification, or the status has not reached
+// the server). The job is not done until both agree: it stays in the crew's
+// pending list and the crew stays at the site.
+export const awaitingVerification = (job) =>
+  isCompleted(job) && !job.planned && !!job.incidentId && !["resolved", "closed", "cancelled"].includes(job.incidentStatus);
+export const VERIFY_WAIT_LABEL = "Waiting for the control room to verify. Stay at the site until they confirm; you will get a message.";
+
 // The completion form goes to the server for fault jobs only, and not once
 // the job is locked (the server would answer applied:false).
 export const canSendCompletion = (job) => !!job && !job.planned && !job.locked;

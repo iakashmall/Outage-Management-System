@@ -225,7 +225,7 @@ export default function App() {
     <div className="shell">
       <a className="skip-link" href="#main-content" onClick={(e) => { e.preventDefault(); mainRef.current?.focus(); }}>{t('app.skip')}</a>
       <nav className="rail" aria-label={t('app.primaryNav')}>
-        <div className="brand" title="GridQ"><img src="/gridq-mark.png" alt="GridQ" className="brand-img" /></div>
+        <div className="brand" title="GridQ"><span role="img" aria-label="GridQ" className="brand-img gq-mark" /></div>
         {nav.map(([id, , icon]) => (
           <button key={id} className={`navbtn ${tab === id ? 'on' : ''}`}
             onClick={() => goTab(id)} aria-current={tab === id} aria-label={navLabel(id)}>

@@ -36,7 +36,7 @@ export default function AboutOverlay({ onClose }) {
           borderRadius: '18px 18px 0 0', padding: '22px 26px', display: 'flex',
           alignItems: 'center', gap: 14, position: 'relative',
         }}>
-          <img src="/gridq-mark.png" alt="" style={{ width: 40, height: 40, borderRadius: 9 }} />
+          <span className="gq-mark" aria-hidden="true" style={{ width: 48, height: 48, color: '#fff' }} />
           <div>
             <div style={{ fontFamily: 'var(--disp)', color: '#fff', fontWeight: 700, fontSize: 19 }}>GridQ</div>
             <div style={{ color: 'rgba(255,255,255,.85)', fontSize: 12.5, letterSpacing: '.02em' }}>Predict. Prevent. Power.</div>

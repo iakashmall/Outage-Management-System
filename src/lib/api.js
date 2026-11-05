@@ -149,6 +149,9 @@ function normalizeOmsJob(job) {
     assignedCrewId: job.assignedCrewId ?? job.crewId ?? job.crew_id ?? null,
     assignedDistance: job.assignedDistance ?? job.distance ?? "Nearest available",
     incidentId: job.incident_id ?? job.incidentId ?? null,
+    // The incident's own status: 'pending' after Work Complete means the
+    // control room has not verified the work yet (the crew stays on site).
+    incidentStatus: job.incident?.status ?? job.incidentStatus ?? null,
     // OMS-01: a job on a planned outage gets the permit / switching gates.
     planned: job.planned === true || (job.incident?.type ?? job.incidentType) === "Scheduled",
     // OMS-03: a finished fault job can be reopened until undoUntil; after

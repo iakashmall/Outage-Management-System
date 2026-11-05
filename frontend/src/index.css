@@ -808,6 +808,10 @@ body{
 }
 
 .brand-img { width: 30px !important; height: 30px !important; }
+/* GridQ symbol, drawn in the current text colour so each page tints it with its own theme */
+.gq-mark { display: inline-block; flex: none; background-color: currentColor;
+  -webkit-mask: url(/gridq-symbol.png) center / contain no-repeat; mask: url(/gridq-symbol.png) center / contain no-repeat; }
+.rail .brand .gq-mark { color: var(--teal-1); width: 38px !important; height: 38px !important; }
 .rail .brand { width: 44px !important; height: 44px !important; }
 /* ---- Network map: CIM topology layers + section trace ---- */
 .sw-topo{background:#0e7490;box-shadow:0 0 0 2px #fff inset}

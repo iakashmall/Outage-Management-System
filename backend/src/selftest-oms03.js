@@ -252,12 +252,21 @@ const server = app.listen(0, async () => {
     check('new crew can update it (200)', r.status === 200 && r.body.status === 'En Route');
     const inc102 = (await job('JOB-102')).incident_id;
     await db.none('UPDATE crews SET job_id=$1 WHERE id=$2', [inc102, 'C003']);
+    const site102 = await repo.incident(inc102);
     r = await call('c3', 'PATCH', '/mobile/jobs/JOB-102/status', { status: 'Work Finished' });
-    const c3after = await repo.crew('C003');
+    check('Work Finished skipping On Site, sent with no position -> 409 (checked as On Site)',
+      !Number.isFinite(site102?.lat) || (r.status === 409 && r.body.code === 'NO_LOCATION'), `${r.status} ${r.body.code}`);
+    r = await call('c3', 'PATCH', '/mobile/jobs/JOB-102/status', { status: 'Work Finished', lat: site102?.lat, lon: site102?.lon });
+    let c3after = await repo.crew('C003');
+    check('Work Complete: crew held at the site until the control room verifies',
+      r.status === 200 && c3after.job_id === inc102 && c3after.status === 'in_service', JSON.stringify({ status: c3after.status, job_id: c3after.job_id }));
+    r = await call('op', 'PATCH', `/incidents/${inc102}/status`, { status: 'resolved' });
+    c3after = await repo.crew('C003');
     const c3active = (await repo.activeJobsForCrew('C003')).map((j) => j.incident_id);
-    check('Work Complete with jobs left: crew points at the next one and is not available',
+    check('verified with jobs left: crew points at the next one and is not available',
       r.status === 200 && c3active.length > 0 && c3active.includes(c3after.job_id) && c3after.job_id !== inc102 && c3after.status === 'in_transit',
       JSON.stringify({ status: c3after.status, job_id: c3after.job_id, left: c3active.length }));
+    check('the crew is told it may leave', (await repo.messages(inc102)).some((m) => m.sender_role === 'system' && /may leave the site/.test(m.body)));
 
     wl = (await call('op', 'GET', '/dispatch/workload')).body;
     check('workload lists JOB-103 as unassigned with its reason', wl.unassigned.some((j) => j.id === 'JOB-103' && /Fuse/.test(j.flagged_reason)) && wl.openProposal === null);

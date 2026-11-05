@@ -37,13 +37,14 @@ import { reportTrackingState, getCurrentCrew, fetchMyJobs, clearJobCache, update
 import { getLocation } from './lib/location';
 import { uploadCapturedPhoto } from './lib/photos';
 import { siteBlock, SITE_STATUSES } from './lib/siteCheck';
+import { loadDraft, saveDraft, clearDraft, saveLastPage, loadLastPage } from './lib/jobDraft';
 import { setupAlerts, findNewJobs, findNewMessages, alertNewJobs, alertNewMessages, reportDelivered, isOwnMessage } from './lib/alerts';
 import { watchMessages } from './lib/liveMessages';
 import { queueUpdate, queueScan, queueCompletion, queueChecklist, queueWorkOrder, keepUndeliveredCompletion, getUndeliveredCompletion, clearUndeliveredCompletion, isRetryable, isRefusal, flushQueue, getQueueLength, getQueueItems } from './lib/offlineQueue';
 import { localDate, workOrderId, viewWorkOrder, dayJobs, summarize, startPayload, closePayload, cleanMembers } from './lib/workOrder';
 import { getCachedWorkOrder, cacheWorkOrder, getPendingWorkOrder, setPendingWorkOrder, getLastMembers, saveLastMembers, clearWorkOrderCache } from './lib/workOrderStore';
 import DailyWorkOrder from './components/DailyWorkOrder';
-import { SUBMITTED_LABEL, RESTORED_CHOICES, isCompleted, canSendCompletion, canResendCompletion, canReopen, isReadOnly, completionPayload, serverJobUpdate } from './lib/jobFlow';
+import { SUBMITTED_LABEL, VERIFY_WAIT_LABEL, awaitingVerification, RESTORED_CHOICES, isCompleted, canSendCompletion, canResendCompletion, canReopen, isReadOnly, completionPayload, serverJobUpdate } from './lib/jobFlow';
 import { startCrewTracking, stopCrewTracking, autoStartCrewTracking, setTrackingPausedByCrew, isLocationServiceOn } from './lib/backgroundLocation';
 import { flushLocations, getPendingLocationCount } from './lib/locationQueue';
 import { downloadPack } from './lib/offlineMap/areaStore';
@@ -84,7 +85,8 @@ const NEXT_STATUS = {
 // The app's last step is 'Work Finished'; the server stores it as
 // 'Work Complete', and dashboard-closed jobs come back Completed/Closed.
 const DONE_STATUSES = ['work finished', 'work complete', 'completed', 'closed'];
-const isJobDone = (job) => DONE_STATUSES.includes(String(job.status).toLowerCase());
+// A finished fault job counts as done only once the control room verified it.
+const isJobDone = (job) => DONE_STATUSES.includes(String(job.status).toLowerCase()) && !awaitingVerification(job);
 
 // Jobs the control room cancelled: listed under Pending Sync until the crew
 // dismisses them (ids kept on the phone), never under My Jobs.
@@ -247,6 +249,7 @@ function NativeAppScreen() {
   // "Show on map" ({ lat, lon, title, at }): the Map tab opens on it.
   // Cleared from the nav bar.
   const [mapNav, setMapNav] = useState(null);
+  const [mapNavigating, setMapNavigating] = useState(false); // the Map tab is navigating to a site
   const [mapFocus, setMapFocus] = useState(null);
   const [pendingCount, setPendingCount] = useState(0);
   const [pendingItems, setPendingItems] = useState([]);
@@ -302,6 +305,7 @@ function NativeAppScreen() {
     setBackStack((stack) => [...stack, current]);
     setForwardStack([]);
     pageRef.current = page;
+    saveLastPage(page);
     setTab(page.tab);
     setActiveJob(page.jobId ? jobs.find((job) => job.id === page.jobId) || null : null);
   }, [jobs]);
@@ -312,6 +316,7 @@ function NativeAppScreen() {
       if (!previous) return stack;
       setForwardStack((forward) => [...forward, pageRef.current]);
       pageRef.current = previous;
+      saveLastPage(previous);
       setTab(previous.tab);
       setActiveJob(previous.jobId ? jobs.find((job) => job.id === previous.jobId) || null : null);
       return stack.slice(0, -1);
@@ -324,6 +329,7 @@ function NativeAppScreen() {
       if (!next) return stack;
       setBackStack((back) => [...back, pageRef.current]);
       pageRef.current = next;
+      saveLastPage(next);
       setTab(next.tab);
       setActiveJob(next.jobId ? jobs.find((job) => job.id === next.jobId) || null : null);
       return stack.slice(0, -1);
@@ -601,6 +607,22 @@ function NativeAppScreen() {
     refresh();
   }, [refresh]);
 
+  // On start, reopen the page the crew had open (tab, and the job if it is
+  // still theirs), once the job list is first loaded.
+  const pageRestored = useRef(false);
+  useEffect(() => {
+    if (pageRestored.current || !authenticated || !jobs.length) return;
+    pageRestored.current = true;
+    loadLastPage().then((page) => {
+      if (!page || pageRef.current.tab !== 'Dashboard' || pageRef.current.jobId) return; // the crew already moved on
+      const job = page.jobId ? jobs.find((j) => j.id === page.jobId && !j.cancelled) : null;
+      if (page.jobId && !job) return;
+      pageRef.current = { tab: page.tab, jobId: job ? job.id : null };
+      setTab(page.tab);
+      setActiveJob(job);
+    });
+  }, [authenticated, jobs]);
+
   // The open job screen is a snapshot. When a refresh shows the job is no
   // longer this crew's (rebalanced or reassigned by dispatch), close it so
   // the crew doesn't keep working on, or updating, another crew's job.
@@ -624,8 +646,11 @@ function NativeAppScreen() {
         // The site position can change (dispatch corrects the incident's
         // location); the On Site check must measure against the new one.
         const samePlace = current.coordinates?.lat === fresh.coordinates?.lat && current.coordinates?.lon === fresh.coordinates?.lon;
-        if (samePlace && current.locked === fresh.locked && current.undoUntil === fresh.undoUntil && (!serverDriven || current.status === fresh.status)) return current;
-        return { ...current, coordinates: fresh.coordinates, locked: fresh.locked, undoUntil: fresh.undoUntil, ...(serverDriven ? { status: fresh.status } : {}) };
+        if (samePlace && current.locked === fresh.locked && current.undoUntil === fresh.undoUntil && current.incidentStatus === fresh.incidentStatus && (!serverDriven || current.status === fresh.status)) return current;
+        if (fresh.status === 'Requires Revisit' && current.status !== 'Requires Revisit') {
+          addNotice(`${fresh.id} was returned by the control room. Read their message and redo the job.`);
+        }
+        return { ...current, coordinates: fresh.coordinates, locked: fresh.locked, undoUntil: fresh.undoUntil, incidentStatus: fresh.incidentStatus, ...(serverDriven ? { status: fresh.status } : {}) };
       });
       return;
     }
@@ -960,12 +985,12 @@ function NativeAppScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
       <StatusBar barStyle="light-content" backgroundColor="#173355" />
+      {/* Hidden while navigating on the map: the road needs the room. */}
+      {tab === 'Map' && mapNavigating ? null : (
       <View style={styles.header}>
         <View style={styles.headerTop}>
           <View style={styles.headerIdentity}>
-            <Text style={styles.kicker}>OMS CREW</Text>
-            <Text style={styles.crewName} numberOfLines={1}>{crew.name}</Text>
-            <Text style={styles.role} numberOfLines={1}>{crew.role} · {crew.id}</Text>
+            <Text style={styles.crewName} numberOfLines={1}>{crew.name} <Text style={styles.role}>· {crew.id}</Text></Text>
           </View>
           <View style={styles.headerRight}>
             <View style={styles.historyControls}>
@@ -1024,6 +1049,7 @@ function NativeAppScreen() {
           />
         </View>
       </View>
+      )}
       {(() => {
         // One warning at a time, most fixable first. None when the crew
         // switched tracking off themselves (the Tracking button shows that).
@@ -1052,9 +1078,9 @@ function NativeAppScreen() {
       <GlimpseBanner glimpse={glimpse} onPress={openGlimpse} onDismiss={() => setGlimpse(null)} />
       {tab === 'Map' ? (
         // The map fills the screen between the header and the bottom bar.
-        <View style={{ flex: 1, paddingBottom: 46 + insets.bottom }}>
+        <View style={{ flex: 1, paddingBottom: mapNavigating ? insets.bottom : 46 + insets.bottom }}>
           {notice ? <View style={styles.mapNotice}><NoticeBanner notice={notice} onDismiss={() => setNotice('')} /></View> : null}
-          <CrewMap jobs={liveJobs} crew={crew} navRequest={mapNav} focus={mapFocus} onMarkOnSite={markOnSiteFromMap} />
+          <CrewMap jobs={liveJobs} crew={crew} navRequest={mapNav} focus={mapFocus} onMarkOnSite={markOnSiteFromMap} onNavigatingChange={setMapNavigating} />
         </View>
       ) : (
       <ScrollView contentContainerStyle={[styles.content, { paddingBottom: 100 + insets.bottom }]}>
@@ -1148,6 +1174,8 @@ function NativeAppScreen() {
         )}
       </ScrollView>
       )}
+      {/* Navigating on the map: full screen, like Google Maps (End brings the bar back). */}
+      {tab === 'Map' && mapNavigating ? null : (
       <View style={[styles.nav, { paddingBottom: 12 + insets.bottom }]}>
         {['Dashboard', 'Today', 'Jobs', 'Map', 'Profile'].map((item) => (
           <Pressable
@@ -1165,6 +1193,7 @@ function NativeAppScreen() {
           </Pressable>
         ))}
       </View>
+      )}
 
       <Modal visible={!!activeJob} animationType="slide" onRequestClose={goBack}>
         {activeJob && (
@@ -1679,6 +1708,36 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
   // OMS-03: "Supply restored?" goes with the completion form.
   const [restored, setRestored] = useState(null);
   const [reopening, setReopening] = useState(false);
+  // The checklists and completion form so far, saved on the phone per job so
+  // a restart carries on where the crew was (lib/jobDraft.js). null until read.
+  const [draft, setDraft] = useState(null);
+  const [priorityItems, setPriorityItems] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    setDraft(null);
+    loadDraft(job.id).then((d) => {
+      if (!alive) return;
+      // Returned for correction: the crew starts the job again from the top.
+      if (job.status === 'Requires Revisit' && d.status !== 'Requires Revisit') {
+        clearDraft(job.id);
+        d = {};
+      }
+      setPriorityItems(d.priority || null);
+      setChecklistDone(Array.isArray(d.priority) && d.priority.length > 0 && d.priority.every((x) => x.checked));
+      setSafetyChecklist(d.safetyChecklist || null);
+      setDiagnosis(d.diagnosis || null);
+      setPartsUsed(d.partsUsed || null);
+      setRestored(d.restored || null);
+      setSignOff(d.signOff || null);
+      setCompletionStep(job.status === 'Work Started' ? d.completionStep || null : null);
+      setDraft(d);
+    });
+    return () => { alive = false; };
+  }, [job.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!draft) return;
+    saveDraft(job.id, { status: job.status, priority: priorityItems, safetyChecklist, diagnosis, partsUsed, restored, signOff, completionStep });
+  }, [draft, job.status, priorityItems, safetyChecklist, diagnosis, partsUsed, restored, signOff, completionStep]); // eslint-disable-line react-hooks/exhaustive-deps
   // A completion form the server did not apply, kept on the phone: { form, reason }.
   const [undelivered, setUndelivered] = useState(null);
   const loadUndelivered = () => getUndeliveredCompletion(job.id).then(setUndelivered).catch(() => {});
@@ -1711,6 +1770,27 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
   }, [job.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const next = NEXT_STATUS[job.status];
+
+  // The "too far from the site" warning follows the crew: re-checked every few
+  // seconds, it updates the distance and goes away once the crew is in range.
+  useEffect(() => {
+    if (!siteMessage) return undefined;
+    if (!next || !SITE_STATUSES.includes(next)) {
+      setSiteMessage('');
+      return undefined;
+    }
+    let alive = true;
+    const check = async () => {
+      const here = await getLocation({ allowCached: false, fresh: true }).catch(() => ({}));
+      if (!alive || !Number.isFinite(here?.lat)) return;
+      setSiteMessage(siteBlock(job, next, here) || '');
+    };
+    const timer = setInterval(check, 5000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [Boolean(siteMessage), next, job.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (showSafety || completionStep) scrollRef.current?.scrollTo({ y: Math.max(0, flowY.current - 12), animated: true });
@@ -1829,6 +1909,7 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
   // waited for; no signal: it waits in Pending sync.
   const onPriorityChecklist = (allDone, items) => {
     setChecklistDone(allDone);
+    setPriorityItems(items);
     if (!allDone) return;
     const body = { items, passedAt: new Date().toISOString() };
     postJobChecklist(job.id, body).catch(async (err) => {
@@ -2014,7 +2095,7 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
           </View>
         </View>
 
-        <PriorityChecklist severity={job.severity} onChange={onPriorityChecklist} />
+        {draft ? <PriorityChecklist key={job.id} severity={job.severity} initial={priorityItems} onChange={onPriorityChecklist} /> : null}
 
         {!checklistDone && (
           <View style={styles.checklistLock}>
@@ -2258,6 +2339,11 @@ function JobDetail({ job, crew, onClose, onAdvance, onServerJob, onQueued, onNav
 
         {checklistDone && job.planned && <PlannedOutagePanel job={job} />}
         {plannedMessage ? <Text style={styles.plannedGate}>{plannedMessage}</Text> : null}
+        {awaitingVerification(job) ? (
+          <View style={styles.siteBlock}>
+            <Text style={styles.siteBlockText}>{VERIFY_WAIT_LABEL}</Text>
+          </View>
+        ) : null}
         {siteMessage ? (
           <View style={styles.siteBlock}>
             <Text style={styles.siteBlockText}>{siteMessage}</Text>
@@ -2360,11 +2446,11 @@ const styles = StyleSheet.create({
   locationOffBanner: { backgroundColor: '#B42318', marginHorizontal: 14, marginTop: 10, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10 },
   locationOffTitle: { color: '#FFFFFF', fontWeight: '800', fontSize: 15 },
   locationOffText: { color: '#FFE4E1', fontSize: 13, marginTop: 2 },
-  header: { backgroundColor: '#173355', paddingHorizontal: 18, paddingTop: 16, paddingBottom: 14, borderBottomLeftRadius: 18, borderBottomRightRadius: 18 },
-  headerTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
+  header: { backgroundColor: '#173355', paddingHorizontal: 14, paddingTop: 8, paddingBottom: 10, borderBottomLeftRadius: 14, borderBottomRightRadius: 14 },
+  headerTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   headerIdentity: { flex: 1, marginRight: 12 },
-  actionBar: { flexDirection: 'row', gap: 8, marginTop: 14 },
-  action: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', height: 36, paddingHorizontal: 6, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.08)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)' },
+  actionBar: { flexDirection: 'row', gap: 6, marginTop: 8 },
+  action: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', height: 30, paddingHorizontal: 6, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.08)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)' },
   actionOn: { backgroundColor: 'rgba(39,199,178,0.16)', borderColor: 'rgba(39,199,178,0.45)' },
   actionDanger: { backgroundColor: 'rgba(240,110,98,0.12)', borderColor: 'rgba(240,110,98,0.4)' },
   actionPressed: { opacity: 0.7 },
@@ -2383,8 +2469,8 @@ const styles = StyleSheet.create({
   demoBadge: { backgroundColor: '#5a3fa6', borderRadius: 12, paddingHorizontal: 9, paddingVertical: 4 },
   demoBadgeText: { color: '#fff', fontSize: 10, fontWeight: '800', letterSpacing: 0.5 },
   kicker: { color: '#27c7b2', fontSize: 12, fontWeight: '800', letterSpacing: 2 },
-  crewName: { color: '#fff', fontSize: 21, fontWeight: '700', marginTop: 4 },
-  role: { color: '#a7bdd6', fontSize: 12, marginTop: 3 },
+  crewName: { color: '#fff', fontSize: 17, fontWeight: '700' },
+  role: { color: '#a7bdd6', fontSize: 13, fontWeight: '500' },
   pendingBadge: { backgroundColor: '#e08a1e', borderRadius: 12, paddingHorizontal: 9, paddingVertical: 4 },
   pendingText: { color: '#fff', fontSize: 10, fontWeight: '800' },
   content: { padding: 20, paddingBottom: 100 },

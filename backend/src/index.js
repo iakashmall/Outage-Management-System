@@ -34,6 +34,7 @@ import { startScheduledReports } from './realtime/scheduledReports.js';
 import { ensureRatings, startFeederKpiJobs } from './realtime/feederKpi.js';
 import { startFeederTelemetrySim } from './realtime/feederTelemetrySim.js';
 import { startStaleLocationMonitor } from './realtime/staleLocation.js';
+import { startCrewNotifications } from './realtime/crewNotify.js';
 import { startEscalations } from './realtime/escalation.js';
 import { startFeederManagerAlerts } from './realtime/feederManagers.js';
 import { deepHealth, startUptimeMonitor } from './realtime/uptime.js';
@@ -66,6 +67,7 @@ process.on('uncaughtException', (err) => logFatal('uncaughtException', err));
 await ensureRatings();
 startFeederKpiJobs();
  startStaleLocationMonitor(); // alert dispatch when a tracked crew's phone goes quiet
+ startCrewNotifications(); // ...and tell the crew's phone what dispatch was told
 
 const app = express();
 app.use(cors());

@@ -16,7 +16,7 @@
 // Map data © OpenStreetMap contributors (ODbL).
 import { createHash } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
-import { readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -65,7 +65,9 @@ const inBbox = (lat, lon) => AREAS.some((b) => inArea(b, lat, lon));
 function drivable(tags) {
   const speed = SPEEDS[tags.highway];
   if (!speed || tags.area === 'yes') return null;
-  const no = (v) => v === 'no' || v === 'private';
+  // Private roads stay in: crews drive into housing societies, campuses and
+  // substations, so a route has to reach the site, not stop at the gate.
+  const no = (v) => v === 'no';
   const yes = (v) => v === 'yes' || v === 'designated' || v === 'permissive' || v === 'destination';
   if (no(tags.motor_vehicle) || no(tags.vehicle)) return null;
   if (no(tags.access) && !yes(tags.motor_vehicle) && !yes(tags.vehicle)) return null;
@@ -224,6 +226,7 @@ async function main() {
   const body = JSON.stringify(graph);
   const version = createHash('sha256').update(body).digest('hex').slice(0, 16);
 
+  await mkdir(OUT, { recursive: true });
   const tmp = join(OUT, `roads.json.${process.pid}.tmp`);
   await writeFile(tmp, body);
   await rename(tmp, join(OUT, 'roads.json'));
@@ -235,7 +238,7 @@ async function main() {
     manifest.roads = { file: 'roads.json', version, bytes: Buffer.byteLength(body), ...router.stats };
     await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
   } else {
-    console.warn('  no manifest.json yet (run tiles:fetch) — roads.json is written but phones will not download it');
+    console.warn('  no manifest.json yet (run tiles:fetch, or create it as {} to publish only the road graph) — roads.json is written but phones will not download it');
   }
   console.log(`Road graph ${version}: ${router.stats.junctions} junctions, ${router.stats.edges} segments, ${(Buffer.byteLength(body) / 1048576).toFixed(1)} MB -> ${OUT}`);
 }

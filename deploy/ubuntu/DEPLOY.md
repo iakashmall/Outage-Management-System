@@ -107,6 +107,18 @@ Traffic on these ports is not encrypted. Published Docker ports bypass `ufw`, so
 - Photos and QR scans go straight into the `oms` database (table `job_photos`, about 100-200 KB per photo, and
   `asset_scans`). Taken offline, they wait on the phone and upload when it is back online.
 
+## Road directions for the crew app
+The crew app routes along roads with a road graph (`backend/tiles/roads.json` plus `manifest.json`), mounted into the
+backend read-only. Without it the app draws a straight line to the site. Build it on a PC (not in git; 18 MB):
+```bash
+cd backend && mkdir -p tile-server tiles && echo '{}' > tiles/manifest.json
+curl -L -o tile-server/uttarakhand.osm.pbf https://download.openstreetmap.fr/extracts/asia/india/uttarakhand-latest.osm.pbf
+curl -L -o tile-server/ncr.osm.pbf https://download.bbbike.org/osm/bbbike/NewDelhi/NewDelhi.osm.pbf   # only for the NCR test region
+PACK_TEST_REGIONS=delhi-ncr npm run roads:build     # leave out PACK_TEST_REGIONS for Uttarakhand only
+```
+Copy `backend/tiles/` to the same place on the server, then `docker compose -f docker-compose.deploy.yml up -d --no-deps
+oms-backend` and restart `oms-web`. Phones pick it up the next time they download the offline map.
+
 ## Backups
 Everything the OMS keeps, including every crew photo and QR asset scan, is in the `pgdata` volume. Keep it:
 - Never run `down -v`, and always use this folder's `docker-compose.deploy.yml` (project name `oms`); another

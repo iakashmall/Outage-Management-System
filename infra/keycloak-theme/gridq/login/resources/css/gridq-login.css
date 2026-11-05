@@ -101,6 +101,7 @@ body::before {
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;  /* logo, name, tagline and the card sit in the middle of the screen */
   min-height: 100vh;
   padding: 40px 20px;
   box-sizing: border-box;
@@ -110,12 +111,13 @@ body::before {
 #kc-header {
   width: 100%;
   text-align: center;
-  padding: 8px 0 28px;
+  padding: 0 0 18px;
+  margin: 0 !important;
 }
 #kc-header-wrapper {
   color: #ffffff !important;
   font-family: 'Space Grotesk', system-ui, sans-serif;
-  font-size: 20px;
+  font-size: 0;  /* hides Keycloak's own realm-name text ("oms-upcl"); #gridq-brand shows the name instead */
   font-weight: 700;
   letter-spacing: 0.3px;
   text-shadow: none !important;
@@ -125,11 +127,39 @@ body::before {
   gap: 10px;
 }
 
+#gridq-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
 #gridq-logo {
-  width: 64px;
-  height: 64px;
-  object-fit: contain;
+  display: block;
+  width: 84px;
+  height: 84px;
+  background-color: #16b7a2;  /* the login scene's teal; the symbol image is only the shape */
   animation: gridqLogoPulse 2.6s ease-in-out infinite;
+}
+#gridq-name {
+  color: #ffffff;
+  font-size: 26px;
+  font-weight: 700;
+}
+#gridq-copyright {
+  position: relative;
+  z-index: 1;
+  margin-top: 18px;
+  color: #9fb0c4;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 12.5px;
+  text-align: center;
+}
+#gridq-tagline {
+  color: #d3deea;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
 }
 @keyframes gridqLogoPulse {
   0%, 100% { transform: scale(1); filter: drop-shadow(0 8px 20px rgba(14,159,142,0.35)); }

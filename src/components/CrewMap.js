@@ -21,6 +21,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Location from 'expo-location';
 import * as Network from 'expo-network';
+import * as Speech from 'expo-speech';
 import { Camera, GeoJSONSource, Layer, Map, Marker, NativeUserLocation, OfflineManager } from '@maplibre/maplibre-react-native';
 import { mapApiBase, mapServerHeaders } from '../lib/mapServer';
 import { startMapAuth, stopMapAuth, syncMapAuthHeader } from '../lib/offlineMap/nativeMapAuth';
@@ -30,6 +31,7 @@ import { isOnlineState } from '../lib/offlineNavigation';
 import { navigateTo } from '../lib/navigate';
 import { SITE_RADIUS_M } from '../lib/siteCheck';
 import { openMultiJobRoute } from '../lib/routing';
+import { buildSteps, nextStep, stepSentence, ANNOUNCE_AT_M } from '../lib/turnByTurn';
 
 const PACK_NAME = 'spike-region'; // name kept so packs downloaded before the rename still count
 const FLEET_CACHE_KEY = 'oms-newmap-fleet';
@@ -117,7 +119,7 @@ async function fetchFleet() {
 // onClose: shows a Close button (when opened full screen).
 // onMarkOnSite(job): marks an En Route job On Site from the map once the crew
 // is within SITE_RADIUS_M; resolves to null when done, else a message to show.
-export default function CrewMap({ jobs = [], crew = null, navRequest = null, focus = null, onClose, onMarkOnSite }) {
+export default function CrewMap({ jobs = [], crew = null, navRequest = null, focus = null, onClose, onMarkOnSite, onNavigatingChange }) {
   const initialJobId = navRequest?.jobId || null;
   const [authed, setAuthed] = useState(null);
   const [region, setRegion] = useState({ id: 'dehradun', bbox: DEHRADUN });
@@ -142,6 +144,11 @@ export default function CrewMap({ jobs = [], crew = null, navRequest = null, foc
   const [showLabels, setShowLabels] = useState(true);
   const [follow, setFollow] = useState(Boolean(initialJobId));
   const [route, setRoute] = useState(null);
+  const [voiceOn, setVoiceOn] = useState(true);
+  useEffect(() => {
+    onNavigatingChange?.(navigating);
+  }, [navigating]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => onNavigatingChange?.(false), []); // eslint-disable-line react-hooks/exhaustive-deps
   const [routingAll, setRoutingAll] = useState(false);
   const routeReq = useRef({ key: null, at: 0, seq: 0 });
   const roadsUri = oldPack?.roadsUri || null;
@@ -499,6 +506,31 @@ export default function CrewMap({ jobs = [], crew = null, navRequest = null, foc
   const canMarkOnSite = Boolean(onMarkOnSite) && targetJob?.status === 'En Route' && finite(straight) && straight <= SITE_RADIUS_M;
   const oldDownloading = oldPackStatus.phase === 'downloading' || oldPackStatus.phase === 'checking';
 
+  // Turn-by-turn: the next turn on the road route, shown in a banner and
+  // spoken as the crew closes in on it (each distance once per turn).
+  const plan = useMemo(() => buildSteps(route?.coords), [route]);
+  const step = navigating && route && finite(left) && !arrived ? nextStep(plan, left) : null;
+  const instruction = navigating && arrived ? 'You have arrived at the site' : step ? stepSentence(step) : null;
+  const spoken = useRef(new Set());
+  useEffect(() => {
+    if (!navigating) spoken.current.clear();
+  }, [navigating, route]);
+  useEffect(() => {
+    if (!voiceOn || !navigating) return;
+    let key = null;
+    if (arrived) key = 'arrived';
+    else if (step) {
+      const within = ANNOUNCE_AT_M.filter((m) => step.inM <= m).pop();
+      if (within !== undefined) key = `${step.kind}@${Math.round(step.at)}:${step.inM < 15 ? 'now' : within}`;
+    }
+    if (!key || spoken.current.has(key)) return;
+    spoken.current.add(key);
+    Speech.stop();
+    Speech.speak(instruction, { language: 'en-IN', rate: 0.95 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [instruction, voiceOn, navigating]);
+  useEffect(() => () => { Speech.stop(); }, []);
+
   const distanceLine = (() => {
     if (!site) return null;
     if (arrived) return 'You have reached the site';
@@ -514,13 +546,15 @@ export default function CrewMap({ jobs = [], crew = null, navRequest = null, foc
     // Full screen: inside the safe area. In the Map tab the app's header and
     // bottom bar already keep it clear of the status bar and buttons.
     <SafeAreaView style={styles.screen} edges={onClose ? ['top', 'bottom', 'left', 'right'] : ['left', 'right']}>
+      {navigating ? null : (
       <View style={styles.bar}>
-        <Text style={styles.title}>{navigating ? 'Navigating to site' : 'Outage map'}</Text>
+        <Text style={styles.title}>Outage map</Text>
         <View style={styles.row}>
           <Text style={[styles.badge, online ? styles.badgeOn : styles.badgeOff]}>{online ? 'Online' : 'Offline'}</Text>
           {onClose ? <Pressable onPress={onClose} style={styles.btn}><Text style={styles.btnText}>Close</Text></Pressable> : null}
         </View>
       </View>
+      )}
 
       {!navigating ? (
         <View style={styles.chips}>
@@ -557,7 +591,7 @@ export default function CrewMap({ jobs = [], crew = null, navRequest = null, foc
             <Camera
               ref={cameraRef}
               initialViewState={{ bounds: [w, s, e, n] }}
-              {...(navigating ? { zoom: 17, pitch: 55 } : {})}
+              {...(navigating ? { zoom: 18, pitch: 60 } : {})}
               trackUserLocation={follow ? (navigating ? 'course' : 'default') : undefined}
               onTrackUserLocationChange={(event) => {
                 if (!event.nativeEvent.trackUserLocation) setFollow(false); // the crew panned the map
@@ -566,8 +600,8 @@ export default function CrewMap({ jobs = [], crew = null, navRequest = null, foc
 
             {routeLine ? (
               <GeoJSONSource id="route" data={routeLine}>
-                <Layer id="route-casing" type="line" layout={{ 'line-cap': 'round', 'line-join': 'round' }} paint={{ 'line-color': '#0b3d91', 'line-width': 10 }} />
-                <Layer id="route-line" type="line" layout={{ 'line-cap': 'round', 'line-join': 'round' }} paint={{ 'line-color': '#2f80ed', 'line-width': 6 }} />
+                <Layer id="route-casing" type="line" layout={{ 'line-cap': 'round', 'line-join': 'round' }} paint={{ 'line-color': '#1558b0', 'line-width': navigating ? 13 : 10 }} />
+                <Layer id="route-line" type="line" layout={{ 'line-cap': 'round', 'line-join': 'round' }} paint={{ 'line-color': '#4285f4', 'line-width': navigating ? 9 : 6 }} />
               </GeoJSONSource>
             ) : null}
             {straightLine ? (
@@ -657,22 +691,26 @@ export default function CrewMap({ jobs = [], crew = null, navRequest = null, foc
         )}
 
         {navigating && site ? (
-          <View style={[styles.navCard, arrived && styles.navCardArrived]}>
-            <Text style={styles.navBig}>
-              {arrived
-                ? 'You have reached the site'
-                : `${finite(left) ? formatDistance(left) : finite(straight) ? formatDistance(straight) : '…'}${finite(eta) ? ` · ${formatDuration(eta)}` : ''}`}
-            </Text>
-            <Text style={styles.navSmall} numberOfLines={1}>{target.title}</Text>
-            <Text style={styles.navSmall}>
-              {route ? (route.source === 'device' ? 'Road route (offline directions)' : 'Road route') : hasPoint(here) ? 'Straight line: no road route yet' : 'Waiting for GPS…'}
-              {!online ? ' · no internet, map still works' : ''}
-            </Text>
+          <View style={[styles.turnBanner, arrived && styles.navCardArrived]}>
+            <Text style={styles.turnText}>{instruction || (hasPoint(here) ? 'Head to the site' : 'Waiting for GPS…')}</Text>
+            {step?.then && step.inM < 150 && step.then.kind === 'turn' ? (
+              <Text style={styles.turnThen}>then {step.then.text.toLowerCase()}</Text>
+            ) : null}
+            {!arrived ? (
+              <Text style={styles.turnMeta} numberOfLines={1}>
+                {finite(left) ? formatDistance(left) : finite(straight) ? formatDistance(straight) : '…'}
+                {finite(eta) ? ` · ${formatDuration(eta)}` : ''} · {target.title}
+                {!route && hasPoint(here) ? ' · straight line' : ''}{!online ? ' · offline' : ''}
+              </Text>
+            ) : null}
+            <Pressable onPress={() => { Speech.stop(); setVoiceOn((v) => !v); }} style={styles.turnVoice}>
+              <Text style={styles.turnVoiceText}>{voiceOn ? 'Voice on' : 'Voice off'}</Text>
+            </Pressable>
           </View>
         ) : null}
 
         <View style={styles.fabs}>
-          {!follow && authed !== null ? (
+          {!follow && authed !== null && !navigating ? (
             <Pressable style={styles.fab} onPress={recenter}>
               <Text style={styles.fabText}>{navigating ? 'Re-centre' : 'Centre on me'}</Text>
             </Pressable>
@@ -725,6 +763,25 @@ export default function CrewMap({ jobs = [], crew = null, navRequest = null, foc
         </View>
       ) : null}
       {navigating ? (
+        <View style={styles.navControls} pointerEvents="box-none">
+          {!follow ? (
+            <Pressable style={[styles.navPill, styles.navRecenter]} onPress={recenter}>
+              <Text style={styles.navRecenterText}>▲ Re-center</Text>
+            </Pressable>
+          ) : <View />}
+          <View style={styles.navRight}>
+            {site ? (
+              <Pressable style={styles.navPill} onPress={() => navigateTo(target.address, site)}>
+                <Text style={styles.navPillText}>Google Maps</Text>
+              </Pressable>
+            ) : null}
+            <Pressable style={[styles.navPill, styles.navEnd]} onPress={stopNavigation}>
+              <Text style={styles.navEndText}>End</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
+      {navigating && (canMarkOnSite || onSiteMessage) ? (
         <View style={styles.sheet}>
           {canMarkOnSite ? (
             <Pressable style={[styles.btn, styles.btnGo, markingOnSite && { opacity: 0.6 }]} onPress={() => markOnSite(targetJob)} disabled={markingOnSite}>
@@ -732,16 +789,6 @@ export default function CrewMap({ jobs = [], crew = null, navRequest = null, foc
             </Pressable>
           ) : null}
           {onSiteMessage ? <Text style={styles.offlineNote}>{onSiteMessage}</Text> : null}
-          <View style={styles.row}>
-            <Pressable style={[styles.btn, styles.btnStop, styles.btnWide]} onPress={stopNavigation}>
-              <Text style={styles.btnText}>End navigation</Text>
-            </Pressable>
-            {site ? (
-              <Pressable style={[styles.btn, styles.btnLight]} onPress={() => navigateTo(target.address, site)}>
-                <Text style={styles.btnLightText}>{online ? 'Google Maps' : 'Try Google Maps'}</Text>
-              </Pressable>
-            ) : null}
-          </View>
         </View>
       ) : null}
       {!target && !navigating ? (
@@ -755,12 +802,12 @@ export default function CrewMap({ jobs = [], crew = null, navRequest = null, foc
         </View>
       ) : null}
 
-      <Pressable onPress={() => setPanelOpen((v) => !v)} style={styles.panelToggle}>
+      {navigating ? null : <Pressable onPress={() => setPanelOpen((v) => !v)} style={styles.panelToggle}>
         <Text style={styles.panelToggleText}>
           Offline map {pack ? `· ${pack.state} ${pack.percent}%` : '· not downloaded'} · road directions {roadsUri ? 'ready' : 'not downloaded'} {panelOpen ? '▲' : '▼'}
         </Text>
-      </Pressable>
-      {panelOpen ? (
+      </Pressable>}
+      {panelOpen && !navigating ? (
         <ScrollView style={styles.panel} contentContainerStyle={styles.info}>
           <Text style={styles.line}>
             {hasPoint(here) ? `Your position ${here.lat.toFixed(4)}, ${here.lon.toFixed(4)}` : 'Waiting for GPS fix…'}
@@ -800,6 +847,20 @@ export default function CrewMap({ jobs = [], crew = null, navRequest = null, foc
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#fff' },
+  turnBanner: { position: 'absolute', top: 10, left: 10, right: 10, backgroundColor: '#0b6e4f', borderRadius: 14, paddingHorizontal: 14, paddingVertical: 12, elevation: 6, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 6, shadowOffset: { width: 0, height: 2 } },
+  navControls: { position: 'absolute', left: 12, right: 12, bottom: 16, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end' },
+  navRight: { flexDirection: 'row', gap: 8 },
+  navPill: { backgroundColor: '#fff', borderRadius: 28, paddingHorizontal: 18, paddingVertical: 12, elevation: 4, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 4, shadowOffset: { width: 0, height: 1 } },
+  navPillText: { color: '#173355', fontWeight: '700', fontSize: 14 },
+  navRecenter: { paddingHorizontal: 22 },
+  navRecenterText: { color: '#0b6e4f', fontWeight: '800', fontSize: 16 },
+  navEnd: { backgroundColor: '#d93025' },
+  navEndText: { color: '#fff', fontWeight: '800', fontSize: 14 },
+  turnText: { color: '#fff', fontSize: 20, fontWeight: '800', paddingRight: 84 },
+  turnMeta: { color: '#dbe7ff', fontSize: 13, fontWeight: '600', marginTop: 3 },
+  turnThen: { color: '#c9dcff', fontSize: 14, marginTop: 2 },
+  turnVoice: { position: 'absolute', right: 10, top: 10, backgroundColor: 'rgba(255,255,255,0.18)', borderRadius: 14, paddingHorizontal: 10, paddingVertical: 5 },
+  turnVoiceText: { color: '#fff', fontSize: 12, fontWeight: '700' },
   bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 10, paddingVertical: 6 },
   title: { fontSize: 16, fontWeight: '700', color: '#173355' },
   chips: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingBottom: 6, flexWrap: 'wrap' },
@@ -825,10 +886,7 @@ const styles = StyleSheet.create({
   crewBadgeSelected: { borderColor: '#2f80ed' },
   crewDot: { width: 8, height: 8, borderRadius: 4 },
   crewText: { color: '#fff', fontSize: 10, fontWeight: '700' },
-  navCard: { position: 'absolute', top: 8, left: 8, right: 8, backgroundColor: '#173355', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8, gap: 1 },
   navCardArrived: { backgroundColor: '#2a9d5c' },
-  navBig: { color: '#fff', fontSize: 19, fontWeight: '800' },
-  navSmall: { color: '#c9d6e6', fontSize: 12 },
   fabs: { position: 'absolute', right: 10, bottom: 10, gap: 8, alignItems: 'flex-end' },
   fab: { backgroundColor: '#fff', borderRadius: 22, paddingHorizontal: 14, paddingVertical: 8, borderWidth: 1, borderColor: '#d5deea' },
   fabText: { color: '#173355', fontWeight: '700', fontSize: 13 },

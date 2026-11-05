@@ -42,12 +42,22 @@ const CHECKLIST_ITEMS = {
 };
 
 // onChange(allDone, items): items is [{ label, checked, at }], at = when that
-// item was ticked (ISO string) or null.
-export default function PriorityChecklist({ severity = "Medium", onChange }) {
+// item was ticked (ISO string) or null. initial: items in that shape from an
+// earlier visit (saved on the phone), ticked again by label.
+export default function PriorityChecklist({ severity = "Medium", onChange, initial = null }) {
   const color = SEVERITY_COLORS[severity] || SEVERITY_COLORS.Medium;
   const items = CHECKLIST_ITEMS[severity] || CHECKLIST_ITEMS.Medium;
   // index -> the time it was ticked (truthy), or false
-  const [checked, setChecked] = useState({});
+  const [checked, setChecked] = useState(() => {
+    const done = {};
+    if (Array.isArray(initial)) {
+      items.forEach((label, i) => {
+        const hit = initial.find((x) => x.label === label && x.checked);
+        if (hit) done[i] = hit.at || true;
+      });
+    }
+    return done;
+  });
 
   const toggle = (i) => {
     const next = { ...checked, [i]: checked[i] ? false : new Date().toISOString() };

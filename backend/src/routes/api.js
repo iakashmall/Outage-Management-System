@@ -24,7 +24,8 @@ import { traceSection } from '../domain/sectionalize.js';
 import { traceUpstream, simulateOpen } from '../domain/supplyTrace.js';
 import { topologyGeoJSON } from '../domain/topology.js';
 import { decodePhotoDataUrl, compressPhoto, PHOTO_STAGES } from '../domain/photos.js';
-import { siteCheck } from '../domain/geofence.js';
+import { siteCheck, SITE_STATUSES } from '../domain/geofence.js';
+import { notifyCrew } from '../realtime/crewNotify.js';
 import { CALL_CATEGORIES, CALL_SEVERITY, cleanSubstation, deriveCallState } from '../domain/callState.js';
 import { nanoid } from 'nanoid';
 import { db } from '../infra/db.js';
@@ -377,10 +378,40 @@ api.patch('/incidents/:id/status', requireRole('oms_operator', 'system_admin'), 
       bus.publish(TOPICS.JOB_UPDATED, await repo.job(j.id));
     }
   }
+  // Deny (Pending Verification back to In Progress): the same as Return for
+  // correction for the crew -- its finished job goes back to it to redo.
+  if (inc.status === 'pending' && to === 'in_progress') {
+    const now = new Date().toISOString();
+    const why = req.body?.note ? String(req.body.note) : 'not accepted at verification';
+    for (const j of (await repo.jobsForIncident(inc.id)).filter((x) => x.status === 'Work Complete' && x.crew_id)) {
+      if (!(await repo.updateJobIf(j.id, j.crew_id, 'Work Complete', { status: 'Requires Revisit', completed_at: null, updated_at: now }))) continue;
+      await repo.addJobUpdate(j.id, 'Requires Revisit', null, null, `Returned by ${actor(req)}: ${why}`, now, 'dispatch');
+      if ((await repo.crew(j.crew_id))?.on_shift !== false) await repo.updateCrew(j.crew_id, { status: 'in_service' });
+      await repo.syncCrew(j.crew_id);
+      bus.publish(TOPICS.JOB_UPDATED, await repo.job(j.id));
+      bus.publish(TOPICS.CREW_UPDATED, await repo.crew(j.crew_id));
+      await notifyCrew(inc.id, `Job ${j.id} was RETURNED by the control room: ${why}. Go back to the job and redo it.`);
+    }
+  }
+  if (to === 'resolved' || to === 'closed') await releaseVerifiedCrews(inc.id, to === 'resolved' ? 'verified the work and resolved' : 'closed');
+  if (to === 'cancelled') await notifyCrew(inc.id, `The control room cancelled incident ${inc.id}${req.body?.note ? `: ${req.body.note}` : ''}. Stop work on this job.`);
   bus.publish(TOPICS.INCIDENT_UPDATED, updated);
   await pushIndices();
   res.json(updated);
 });
+
+// The control room verified (resolved) or closed an incident: each crew whose
+// job on it is Work Complete was held on site for this (see the status
+// route); free it, point it at its next job, and tell the phone.
+async function releaseVerifiedCrews(incidentId, what) {
+  const done = (await repo.jobsForIncident(incidentId)).filter((j) => j.status === 'Work Complete' && j.crew_id);
+  for (const j of done) {
+    await repo.syncCrew(j.crew_id);
+    bus.publish(TOPICS.CREW_UPDATED, await repo.crew(j.crew_id));
+    bus.publish(TOPICS.JOB_UPDATED, await repo.job(j.id));
+  }
+  if (done.length) await notifyCrew(incidentId, `The control room ${what} incident ${incidentId}. Job ${done.map((j) => j.id).join(', ')} is closed; you may leave the site.`);
+}
 
 // Set/update the estimated restoration time; notifies customers if it moves by >30 min
 api.patch('/incidents/:id/ert', requireRole('oms_operator', 'system_admin'), async (req, res) => {
@@ -1422,12 +1453,19 @@ api.patch('/mobile/jobs/:id/status', async (req, res) => {
   const info = await lockInfo(job);
   if (info.locked) return notApplied(res, job, { kind: 'status', status, clientTs: ts, rawTs: req.body?.ts, reason: lockReason(info) });
   // On Site / Work Started only from the site (the position the phone sent,
-  // taken when the crew pressed the button). The control room is not checked.
+  // taken when the crew pressed the button). A Work Complete that skips On
+  // Site (the job never got there on the server) is checked as On Site, so
+  // the crew can't close a job it was never at. The control room is not checked.
   if (!operator) {
+    const skipsSite = status === 'Work Complete' && !SITE_STATUSES.includes(job.status);
+    const checkAs = skipsSite ? 'On Site' : status;
     const inc = job.incident_id ? await repo.incident(job.incident_id) : null;
-    const away = siteCheck({ status, site: inc, lat, lon });
+    const away = siteCheck({ status: checkAs, site: inc, lat, lon });
     if (away) {
-      if (job.incident_id) await repo.addIncidentEvent(job.incident_id, 'Crew', 'field', `${status} refused for job ${job.id}: ${away.message}`, ts);
+      if (job.incident_id) {
+        await repo.addIncidentEvent(job.incident_id, 'Crew', 'field', `${status} refused for job ${job.id}: ${away.message}`, ts);
+        await notifyCrew(job.incident_id, `${status} was not accepted for job ${job.id}: ${away.message}. Go to the site first.`);
+      }
       return res.status(409).json(away);
     }
   }
@@ -1459,11 +1497,16 @@ api.patch('/mobile/jobs/:id/status', async (req, res) => {
   if (job.incident_id) await repo.addIncidentEvent(job.incident_id, operator ? (who.username || 'Control room') : 'Crew', 'field', 'Status: ' + status + skipped, ts);
   // reflect crew status + incident progress back to control room (an
   // off-shift crew stays off_shift: availability is the dispatcher's call)
-  const map = { 'En Route': 'in_transit', 'On Site': 'in_service', 'Work Started': 'in_service', 'Work Complete': 'available' };
+  // A fault job's Work Complete keeps the crew in_service at the site: the job
+  // is done only once the control room verifies it (incident resolved), and
+  // that frees the crew (releaseVerifiedCrews). A job with no incident to
+  // verify frees the crew at once.
+  const awaitsVerification = status === 'Work Complete' && !!job.incident_id;
+  const map = { 'En Route': 'in_transit', 'On Site': 'in_service', 'Work Started': 'in_service', 'Work Complete': awaitsVerification ? 'in_service' : 'available' };
   if (map[status] && (await repo.crew(written.crew_id))?.on_shift !== false) await repo.updateCrew(written.crew_id, { status: map[status] });
   // A finished job: point the crew at its next active job (a rebalance can
   // leave several), back to in_transit if one remains.
-  if (!isActive({ status })) await repo.syncCrew(written.crew_id);
+  if (!isActive({ status }) && !awaitsVerification) await repo.syncCrew(written.crew_id);
   // A skipped On Site still means the crew got there.
   if ((status === 'On Site' || status === 'Work Started') && job.incident_id) {
     const inc = await repo.incident(job.incident_id);
@@ -1472,6 +1515,7 @@ api.patch('/mobile/jobs/:id/status', async (req, res) => {
   if (status === 'Work Complete' && job.incident_id) {
     await repo.updateIncident(job.incident_id, { status: 'pending' });
     await repo.addIncidentEvent(job.incident_id, 'Crew', 'field', 'Work complete - awaiting verification', ts);
+    await notifyCrew(job.incident_id, `Job ${job.id}: work complete received. Stay at the site until the control room verifies it; you will get a message here.`);
   }
   if (job.incident_id) await cacheDel('indicators');
   const updated = await repo.job(job.id);
@@ -1612,6 +1656,7 @@ api.post('/incidents/:id/return-for-correction', requireRole('oms_operator', 'sy
   await repo.syncCrew(job.crew_id);
   await repo.updateIncident(inc.id, { status: 'in_progress' });
   await repo.addIncidentEvent(inc.id, by, 'status', `Returned for correction (job ${job.id}): ${reason}`, now);
+  await notifyCrew(inc.id, `Job ${job.id} was RETURNED by the control room: ${reason}. Go back to the job and redo it.`);
   await repo.audit(by, 'incident.return_for_correction', inc.id);
   await cacheDel('indicators');
   const updated = await repo.incident(inc.id);

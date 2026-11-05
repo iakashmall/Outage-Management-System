@@ -14,8 +14,9 @@
 //   edges: [from, to, nPts, kmh, oneway, ...]  5 numbers per edge; oneway=1
 //                                       means only from -> to is allowed
 //
-// A route is the fastest path by (length / speed); the result carries the
-// road distance, an ETA and the full road geometry for drawing.
+// A route is the shortest path by road distance (by: 'time' gives the
+// fastest instead); the result carries the road distance, an ETA from the
+// road speeds and the full road geometry for drawing.
 
 export const GRAPH_FORMAT = 'oms-roads-1';
 
@@ -26,6 +27,11 @@ const M_PER_DEG_LON_EQ = 111320;
 // be a road that has nothing to do with where the crew actually is).
 const MAX_SNAP_M = 3000;
 const CELL_DEG = 0.01; // spatial index cell, about 1 km
+// Roads up to this much further away than the nearest one are also tried as
+// the way on and off the network (at most MAX_SNAPS of them).
+const SNAP_SLACK_M = 40;
+const MAX_SNAPS = 6;
+const OFF_ROAD_MS = 15 / 3.6; // between a fix and its road, ~15 km/h
 
 export function createRouter(graph) {
   if (graph?.format !== GRAPH_FORMAT) throw new Error('Unsupported road graph format');
@@ -123,17 +129,22 @@ export function createRouter(graph) {
     }
   }
 
-  // Nearest point on any road to (lat, lon): the edge, how far along it
-  // (metres from its from-junction), and the snapped point.
-  function snap(lat, lon) {
+  // Every road near (lat, lon): for each edge within SNAP_SLACK_M of the
+  // nearest one, its closest point -- the edge, how far along it (metres from
+  // its from-junction), the snapped point and the distance d to it; nearest
+  // first. More than one because the nearest line is not always the right
+  // one: a divided road is two one-way lines a few metres apart, and joining
+  // the wrong one means driving past the site and coming back.
+  function snapAll(lat, lon) {
     const cx = Math.floor(lon / CELL_DEG);
     const cy = Math.floor(lat / CELL_DEG);
     const kx = Math.cos((lat * Math.PI) / 180) * M_PER_DEG_LON_EQ;
-    let best = null;
+    const byEdge = new Map();
+    let bestD = Infinity;
     const maxRing = Math.ceil(MAX_SNAP_M / (CELL_DEG * M_PER_DEG_LAT)) + 1;
     for (let r = 0; r <= maxRing; r++) {
-      // Once a candidate is closer than anything the next ring could hold, stop.
-      if (best && best.d < (r - 1) * CELL_DEG * M_PER_DEG_LAT * 0.8) break;
+      // Once candidates are closer than anything the next ring could hold, stop.
+      if (bestD + SNAP_SLACK_M < (r - 1) * CELL_DEG * M_PER_DEG_LAT * 0.8) break;
       const checked = new Set();
       for (let dx = -r; dx <= r; dx++) {
         for (let dy = -r; dy <= r; dy++) {
@@ -153,8 +164,10 @@ export function createRouter(graph) {
               const px = ax + t * sx, py = ay + t * sy;
               const d = Math.sqrt(px * px + py * py);
               const segLen = Math.sqrt(segLen2);
-              if (!best || d < best.d) {
-                best = { e, d, along: along + t * segLen, lat: aLat + t * (bLat - aLat), lon: aLon + t * (bLon - aLon) };
+              const cur = byEdge.get(e);
+              if (!cur || d < cur.d) {
+                byEdge.set(e, { e, d, along: along + t * segLen, lat: aLat + t * (bLat - aLat), lon: aLon + t * (bLon - aLon) });
+                if (d < bestD) bestD = d;
               }
               along += segLen;
             }
@@ -162,8 +175,10 @@ export function createRouter(graph) {
         }
       }
     }
-    return best && best.d <= MAX_SNAP_M ? best : null;
+    if (bestD > MAX_SNAP_M) return [];
+    return [...byEdge.values()].filter((c) => c.d <= bestD + SNAP_SLACK_M).sort((a, b) => a.d - b.d).slice(0, MAX_SNAPS);
   }
+  const snap = (lat, lon) => snapAll(lat, lon)[0] || null;
 
   // Polyline of edge e between two along-distances, in travel order
   // (fromAlong > toAlong means travelling against the edge).
@@ -186,53 +201,80 @@ export function createRouter(graph) {
     for (const p of part) out.push(p);
   }
 
-  // ---- A* search, fastest path by travel time
+  // ---- A* search, shortest path by distance (or fastest by time)
   const INF = Infinity;
   const gScore = new Float64Array(J);
   const viaArc = new Int32Array(J);
   const stamp = new Int32Array(J); // lazily reset per query
   let query = 0;
 
-  function route(from, to) {
+  function route(from, to, { by = 'distance' } = {}) {
     if (![from?.lat, from?.lon, to?.lat, to?.lon].every(Number.isFinite)) return null;
     // Already there: no detour out to the road and back.
     const direct = dist(from.lat, from.lon, to.lat, to.lon);
     if (direct < 30) {
       return { meters: Math.round(direct), seconds: Math.round(direct / (5 / 3.6)), coords: simplify([[from.lat, from.lon], [to.lat, to.lon]]), offRoadMeters: Math.round(direct) };
     }
-    const s = snap(from.lat, from.lon);
-    const t = snap(to.lat, to.lon);
-    if (!s || !t) return null;
+    const S = snapAll(from.lat, from.lon);
+    const T = snapAll(to.lat, to.lon);
+    if (!S.length || !T.length) return null;
     query++;
+    // Cost of m metres on edge e, and the matching admissible heuristic. The
+    // hop between a fix and its road counts too, so a further road is only
+    // taken when it really shortens the trip.
+    const fastest = by === 'time';
+    const cost = (e, m) => (fastest ? m / eSpeed[e] : m);
+    const hop = (m) => (fastest ? m / OFF_ROAD_MS : m);
+    const costPerM = fastest ? 1 / maxSpeed : 1;
 
     const g = (j) => (stamp[j] === query ? gScore[j] : INF);
     const heap = new MinHeap();
-    const hToTarget = (j) => dist(jLat[j], jLon[j], t.lat, t.lon) / maxSpeed;
-    const relax = (j, cost, arc) => {
-      if (cost >= g(j)) return;
+    const hToTarget = (j) => {
+      let h = INF;
+      for (const t of T) h = Math.min(h, dist(jLat[j], jLon[j], t.lat, t.lon));
+      return h * costPerM;
+    };
+    const relax = (j, c, arc) => {
+      if (c >= g(j)) return;
       stamp[j] = query;
-      gScore[j] = cost;
+      gScore[j] = c;
       viaArc[j] = arc;
-      heap.push(cost + hToTarget(j), j);
+      heap.push(c + hToTarget(j), j);
     };
 
-    // Virtual start: leave the snapped point towards either end of its edge.
-    const vs = eSpeed[s.e];
-    relax(eTo[s.e], (eLen[s.e] - s.along) / vs, -1);
-    if (!eOneway[s.e]) relax(eFrom[s.e], s.along / vs, -2);
+    // Virtual start: from each start candidate k, leave its snapped point
+    // towards either end of its edge; arc -(2k+1) = towards the to-junction,
+    // -(2k+2) = towards the from-junction.
+    S.forEach((s, k) => {
+      relax(eTo[s.e], hop(s.d) + cost(s.e, eLen[s.e] - s.along), -(2 * k + 1));
+      if (!eOneway[s.e]) relax(eFrom[s.e], hop(s.d) + cost(s.e, s.along), -(2 * k + 2));
+    });
 
-    // Virtual target: reach the target edge's from-junction and drive along
-    // it, or (two-way roads) its to-junction and drive against it.
-    const vt = eSpeed[t.e];
-    const tailFrom = t.along / vt;
-    const tailTo = eOneway[t.e] ? INF : (eLen[t.e] - t.along) / vt;
+    // Virtual target: reach a target edge's from-junction and go along it, or
+    // (two-way roads) its to-junction and go against it. Junction -> the
+    // ways to finish from there.
+    const tails = new Map();
+    const addTail = (j, t, end, c) => {
+      if (!tails.has(j)) tails.set(j, []);
+      tails.get(j).push({ t, end, c });
+    };
+    for (const t of T) {
+      addTail(eFrom[t.e], t, 'from', cost(t.e, t.along) + hop(t.d));
+      if (!eOneway[t.e]) addTail(eTo[t.e], t, 'to', cost(t.e, eLen[t.e] - t.along) + hop(t.d));
+    }
 
+    // Start and site on the same road: straight along it.
     let best = INF;
-    let bestEnd = null; // 'direct' | 'from' | 'to'
-    if (s.e === t.e) {
-      if (t.along >= s.along) best = (t.along - s.along) / vs;
-      else if (!eOneway[s.e]) best = (s.along - t.along) / vs;
-      if (best < INF) bestEnd = 'direct';
+    let bestEnd = null; // { kind: 'direct' | 'from' | 'to', t, s?, j? }
+    for (const s of S) {
+      for (const t of T) {
+        if (s.e !== t.e) continue;
+        let c = INF;
+        if (t.along >= s.along) c = cost(s.e, t.along - s.along);
+        else if (!eOneway[s.e]) c = cost(s.e, s.along - t.along);
+        c += hop(s.d) + hop(t.d);
+        if (c < best) { best = c; bestEnd = { kind: 'direct', s, t }; }
+      }
     }
 
     while (heap.size) {
@@ -240,44 +282,50 @@ export function createRouter(graph) {
       if (f >= best) break;
       const gj = g(j);
       if (f > gj + hToTarget(j) + 1e-9) continue; // stale entry
-      if (j === eFrom[t.e] && gj + tailFrom < best) { best = gj + tailFrom; bestEnd = 'from'; }
-      if (j === eTo[t.e] && gj + tailTo < best) { best = gj + tailTo; bestEnd = 'to'; }
+      for (const { t, end, c } of tails.get(j) || []) {
+        if (gj + c < best) { best = gj + c; bestEnd = { kind: end, t, j }; }
+      }
       for (let k = outStart[j]; k < outStart[j + 1]; k++) {
         const arc = arcs[k];
         const e = arc >> 1;
         const next = arc & 1 ? eFrom[e] : eTo[e];
-        relax(next, gj + eLen[e] / eSpeed[e], arc);
+        relax(next, gj + cost(e, eLen[e]), arc);
       }
     }
     if (best === INF) return null;
 
     // ---- rebuild geometry: GPS fix -> snapped start -> edges -> snapped end -> site
     const coords = [[from.lat, from.lon]];
-    if (bestEnd === 'direct') {
-      slice(s.e, s.along, t.along, coords);
+    let drive = 0; // seconds on the roads, for the ETA
+    const part = (e, a, b) => {
+      slice(e, a, b, coords);
+      drive += Math.abs(b - a) / eSpeed[e];
+    };
+    const t = bestEnd.t;
+    let s;
+    if (bestEnd.kind === 'direct') {
+      s = bestEnd.s;
+      part(s.e, s.along, t.along);
     } else {
-      const endJ = bestEnd === 'from' ? eFrom[t.e] : eTo[t.e];
       const chain = [];
-      let j = endJ;
+      let j = bestEnd.j;
       for (;;) {
         const arc = viaArc[j];
-        if (arc < 0) {
-          chain.push(arc);
-          break;
-        }
         chain.push(arc);
+        if (arc < 0) break;
         const e = arc >> 1;
         j = arc & 1 ? eTo[e] : eFrom[e];
       }
       chain.reverse();
-      const first = chain[0];
-      slice(s.e, s.along, first === -1 ? eLen[s.e] : 0, coords);
+      const first = -chain[0] - 1; // 2k: towards the to-junction, 2k+1: the from-junction
+      s = S[first >> 1];
+      part(s.e, s.along, first & 1 ? 0 : eLen[s.e]);
       for (let i = 1; i < chain.length; i++) {
         const e = chain[i] >> 1;
-        if (chain[i] & 1) slice(e, eLen[e], 0, coords);
-        else slice(e, 0, eLen[e], coords);
+        if (chain[i] & 1) part(e, eLen[e], 0);
+        else part(e, 0, eLen[e]);
       }
-      slice(t.e, bestEnd === 'from' ? 0 : eLen[t.e], t.along, coords);
+      part(t.e, bestEnd.kind === 'from' ? 0 : eLen[t.e], t.along);
     }
     coords.push([to.lat, to.lon]);
 
@@ -285,7 +333,7 @@ export function createRouter(graph) {
     let meters = 0;
     for (let i = 1; i < coords.length; i++) meters += dist(coords[i - 1][0], coords[i - 1][1], coords[i][0], coords[i][1]);
     const offRoad = s.d + t.d;
-    const seconds = best + offRoad / (15 / 3.6); // off-road hops at ~15 km/h
+    const seconds = drive + offRoad / OFF_ROAD_MS;
     return {
       meters: Math.round(meters),
       seconds: Math.round(seconds),

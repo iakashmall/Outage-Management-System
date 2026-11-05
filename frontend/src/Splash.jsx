@@ -181,10 +181,10 @@ export default function Splash({ onDone, minDurationMs = 2600 }) {
            continuous pulse/glow after it settles in, tying into the
            electric theme (echoes the current-pulse motif in the scene
            below rather than a generic breathing effect). ---- */}
-      <motion.div style={{ position: 'relative', zIndex: 1, width: 96, height: 96, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <motion.img
-          src="/gridq-mark.png"
-          alt="GridQ"
+      <motion.div style={{ position: 'relative', zIndex: 1, width: 112, height: 112, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <motion.div
+          role="img"
+          aria-label="GridQ"
           initial={{ scale: 0.5, opacity: 0 }}
           animate={reduceMotion ? { scale: 1, opacity: 1 } : {
             scale: [0.5, 1.06, 1, 1.035, 1],
@@ -204,8 +204,11 @@ export default function Splash({ onDone, minDurationMs = 2600 }) {
             repeatDelay: 0.3,
             ease: 'easeInOut',
           }}
-          style={{ width: 72, height: 72, objectFit: 'contain' }}
-        />
+          style={{ width: 92, height: 92, display: 'flex' }}
+        >
+          {/* the glow sits on this wrapper: a filter on the masked element itself would be masked away */}
+          <span className="gq-mark" style={{ width: 92, height: 92, color: '#16b7a2' }} />
+        </motion.div>
       </motion.div>
 
 
@@ -221,9 +224,9 @@ export default function Splash({ onDone, minDurationMs = 2600 }) {
         initial={{ opacity: 0, y: 6 }}
         animate={{ opacity: 1, y: 0 }}
         transition={t({ duration: 0.48, delay: 1.25, ease: 'easeOut' })}
-        style={{ position: 'relative', zIndex: 1, fontFamily: "'Inter', system-ui, sans-serif", fontSize: 13, color: '#9fb0c4' }}
+        style={{ position: 'relative', zIndex: 1, fontFamily: "'Inter', system-ui, sans-serif", fontSize: 15, fontWeight: 500, color: '#d3deea', letterSpacing: 0.2 }}
       >
-        {tr('splash.sub')}
+        Predict. Prevent. Power.
       </motion.div>
 
       <motion.div

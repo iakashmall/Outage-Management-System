@@ -89,6 +89,10 @@ services:
       - "4000:4000"
     extra_hosts:
       - "host.docker.internal:host-gateway"   # lets the backend reach a map server running on the server itself
+    volumes:
+      # Road graph for crew directions (roads.json + manifest.json), built with npm run roads:build.
+      # Optional: without it the crew app draws a straight line to the site. See deploy/ubuntu/DEPLOY.md.
+      - ./backend/tiles:/app/backend/tiles:ro
     env_file:
       - path: ./backend/.env.deploy   # optional extras: MAP_*, BREVO_*, NOTIFY_*, REPORT_*
         required: false
