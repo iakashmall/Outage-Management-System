@@ -1,14 +1,13 @@
-// Builds the crew app's launcher icons from the brand mark (assets/logo.png)
+// Builds the crew app's launcher icons from the GridQ emblem (assets/gridq-emblem.png, made by build-brand-assets.mjs)
 // so they fit every platform's mask instead of being cropped:
 //
-//   assets/icon.png           1024x1024, logo on the navy brand background
+//   assets/icon.png           1024x1024, emblem on white
 //                             (iOS + legacy Android; iOS forbids transparency)
 //   assets/adaptive-icon.png  1024x1024 transparent foreground for Android
 //                             adaptive icons, logo kept inside the safe circle
 //                             that survives every launcher's mask shape
 //
-// Re-run after replacing assets/logo.png (a larger, square source gives
-// sharper icons):
+// Re-run after build-brand-assets.mjs:
 //
 //   npm run build:icons
 import { dirname, join } from 'node:path';
@@ -17,7 +16,7 @@ import sharp from 'sharp';
 
 const assets = join(dirname(fileURLToPath(import.meta.url)), '..', 'assets');
 const SIZE = 1024;
-const BRAND_BG = '#173355'; // must match expo.android.adaptiveIcon.backgroundColor
+const BRAND_BG = '#ffffff'; // authorised logo is navy/teal on white; must match expo.android.adaptiveIcon.backgroundColor
 
 // Android shows only the middle 72dp of a 108dp adaptive layer and masks it
 // (circle, squircle, ...); the 66dp circle in the centre is always visible.
@@ -28,7 +27,7 @@ const FULL_SAFE_RADIUS = Math.floor(SIZE * 0.42);
 // Crop the transparent padding, then measure how far the visible pixels
 // reach from the logo's centre — scaling by that radius (not the bounding
 // box) lets the logo be as large as possible while no part is ever masked.
-const { data, info } = await sharp(join(assets, 'logo.png'))
+const { data, info } = await sharp(join(assets, 'gridq-emblem.png'))
   .ensureAlpha()
   .trim({ threshold: 1 })
   .raw()

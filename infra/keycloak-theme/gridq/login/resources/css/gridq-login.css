@@ -137,7 +137,6 @@ body::before {
   display: block;
   width: 84px;
   height: 84px;
-  background-color: #16b7a2;  /* the login scene's teal; the symbol image is only the shape */
   animation: gridqLogoPulse 2.6s ease-in-out infinite;
 }
 #gridq-name {

@@ -9,7 +9,7 @@
   // real, correct URL — resolving the logo path relative to THAT (not the
   // current page's URL) is what makes this work regardless of the hash.
   var scriptSrc = document.currentScript && document.currentScript.src;
-  var logoUrl = scriptSrc ? new URL('../img/gridq-symbol.png', scriptSrc).href : '/gridq-symbol.png';
+  var logoUrl = scriptSrc ? new URL('../img/gridq-mark.png', scriptSrc).href : '/gridq-mark.png';
 
   function inject() {
     if (document.getElementById('gridq-scene')) return; // don't double-inject on partial reloads
@@ -68,16 +68,14 @@
     // separate fixed element, so it sits naturally with the realm title.
     var headerWrap = document.getElementById('kc-header-wrapper');
     if (headerWrap && !document.getElementById('gridq-logo')) {
-      // The symbol is a mask tinted by CSS (#gridq-logo), with the name and tagline under it.
+      // The emblem in its authorised colours (white disc baked in), with the name and tagline under it.
       var brand = document.createElement('div');
       brand.id = 'gridq-brand';
       var logo = document.createElement('span');
       logo.id = 'gridq-logo';
       logo.setAttribute('role', 'img');
       logo.setAttribute('aria-label', 'GridQ');
-      var mask = 'url("' + logoUrl + '") center / contain no-repeat';
-      logo.style.webkitMask = mask;
-      logo.style.mask = mask;
+      logo.style.background = 'url("' + logoUrl + '") center / contain no-repeat';
       var name = document.createElement('div');
       name.id = 'gridq-name';
       name.textContent = 'GridQ';
