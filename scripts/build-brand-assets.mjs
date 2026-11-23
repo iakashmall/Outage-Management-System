@@ -3,9 +3,9 @@
 //
 //   assets/logo.png                         full logo (emblem + wordmark), transparent background
 //   assets/gridq-emblem.png                 emblem only, transparent (input for build-app-icons.mjs)
-//   frontend/public/gridq-mark.png          emblem in full colour on a white disc (for dark UI)
+//   frontend/public/gridq-mark.png          emblem for dark UI: transparent, navy shown white, teal kept
 //   infra/keycloak-theme/.../gridq-mark.png same, for the sign-in page
-//   public/favicon.svg, mobile-native-fixed/public/favicon.svg   emblem badge (PWA/browser icon)
+//   {,frontend/,mobile-native-fixed/}public/favicon.svg   emblem badge (PWA/browser icon)
 import { writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -52,10 +52,20 @@ async function badge(size, file) {
   const out = sharp(disc).composite([{ input: e, gravity: 'center' }]).png({ compressionLevel: 9 });
   return file ? out.toFile(file) : out.toBuffer();
 }
-await badge(512, join(root, 'frontend', 'public', 'gridq-mark.png'));
-await badge(512, join(root, 'infra', 'keycloak-theme', 'gridq', 'login', 'resources', 'img', 'gridq-mark.png'));
+// On-dark (reversed) emblem, transparent: navy parts become white so they read on the navy UI,
+// the teal ring stays teal. Teal pixels are the ones where green clearly beats red.
+async function onDark(size, file) {
+  const { data, info } = await sharp(emblem).resize(size, size, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+    .raw().toBuffer({ resolveWithObject: true });
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] && data[i + 1] - data[i] < 50) data[i] = data[i + 1] = data[i + 2] = 255;
+  }
+  await sharp(data, { raw: info }).png({ compressionLevel: 9 }).toFile(file);
+}
+await onDark(512, join(root, 'frontend', 'public', 'gridq-mark.png'));
+await onDark(512, join(root, 'infra', 'keycloak-theme', 'gridq', 'login', 'resources', 'img', 'gridq-mark.png'));
 // favicon.svg (PWA icon in vite.config.js) wraps the 192px badge so the existing references keep working
 const fav = await badge(192);
 const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192"><image width="192" height="192" href="data:image/png;base64,${fav.toString('base64')}"/></svg>\n`;
-for (const dir of ['public', join('mobile-native-fixed', 'public')]) writeFileSync(join(root, dir, 'favicon.svg'), svg);
-console.log(`split at y=${splitY}; wrote logo.png, gridq-emblem.png, gridq-mark.png (x2), favicon.svg (x2)`);
+for (const dir of ['public', 'frontend/public', join('mobile-native-fixed', 'public')]) writeFileSync(join(root, dir, 'favicon.svg'), svg);
+console.log(`split at y=${splitY}; wrote logo.png, gridq-emblem.png, gridq-mark.png (x2), favicon.svg (x3)`);
